@@ -78,6 +78,10 @@ impl<'tcx> ModuleBuilder<'tcx> {
         self.globals.push('\n');
     }
 
+    pub(super) fn define(&mut self, definition: &str) {
+        self.definitions.push_str(definition);
+    }
+
     pub fn unique(&mut self, prefix: &str) -> String {
         self.counter += 1;
         format!("{prefix}{}", self.counter)

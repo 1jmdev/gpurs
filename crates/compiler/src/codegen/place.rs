@@ -1,6 +1,6 @@
 use rustc_abi::{Align, BackendRepr, FieldIdx, FieldsShape, Scalar, Size, VariantIdx};
 use rustc_middle::mir::{self, ProjectionElem};
-use rustc_middle::ty::layout::{LayoutOf, TyAndLayout};
+use rustc_middle::ty::layout::TyAndLayout;
 use rustc_middle::ty::{self, Ty};
 
 use super::function::FunctionBuilder;

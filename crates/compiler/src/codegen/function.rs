@@ -23,8 +23,8 @@ pub struct FunctionBuilder<'m, 'tcx> {
     pub locals: IndexVec<Local, Place<'tcx>>,
     pub fast_math: bool,
     pub span: Span,
-    code: String,
-    allocas: String,
+    pub(super) code: String,
+    pub(super) allocas: String,
     pub label: String,
     counter: usize,
 }
