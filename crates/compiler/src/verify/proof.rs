@@ -123,9 +123,9 @@ fn decompose(
             bases.push(right.clone());
         }
     }
-    digits.sort();
+    digits.sort_by(|left, right| right.0.len().cmp(&left.0.len()).then(left.cmp(right)));
     digits.dedup();
-    bases.sort();
+    bases.sort_by(|left, right| right.cmp(left));
     bases.dedup();
     for digit in digits {
         if digit == *expression || digit.value().is_some() {

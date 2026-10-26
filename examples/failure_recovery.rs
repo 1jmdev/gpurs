@@ -1,5 +1,5 @@
 use gpurs::*;
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 #[gpu]
 fn gather(input: &[f32], indices: &[u32], output: &mut [f32]) {
@@ -40,7 +40,10 @@ fn main() {
 
     scale(&consumer_stream, &intermediate, &mut output, 2.0);
 
+    let hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
     let observation = catch_unwind(AssertUnwindSafe(|| output.download()));
+    std::panic::set_hook(hook);
 
     assert!(observation.is_err());
 
