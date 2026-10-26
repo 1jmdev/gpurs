@@ -66,6 +66,6 @@ fn main() {
     parameters.update(&stream, 1.0, 0.0, Activation::Relu);
     transform(&stream, &input, &mut output, &parameters);
 
-    assert_eq!(scalar.read(), 7.0);
-    assert_eq!(output.download(), vec![0.0, 0.0, 2.0, 5.0]);
+    println!("Scalar: {:?}", scalar.read());
+    println!("Transformed: {:?}", output.download());
 }

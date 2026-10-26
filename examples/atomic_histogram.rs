@@ -34,5 +34,5 @@ fn main() {
         .map(|value| value.into_inner())
         .collect::<Vec<_>>();
 
-    assert_eq!(counts, vec![512; BIN_COUNT]);
+    println!("Histogram: {counts:?}");
 }

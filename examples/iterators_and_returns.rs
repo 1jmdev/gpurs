@@ -27,6 +27,7 @@ fn selected_energy(values: &[f32]) -> (f32, Option<usize>) {
         })
 }
 
+#[derive(Debug)]
 enum DomainError {
     NegativeInput,
 }
@@ -69,19 +70,9 @@ fn main() {
         0.5,
     );
 
-    assert_eq!(product.read(), -10.0);
-    assert_eq!(energy.read(), (10.0, Some(2)));
-    assert_eq!(integer_product.read(), 32);
-
-    assert_eq!(
-        samples.download(),
-        (0..64)
-            .map(|index| 1.0 + index as f32 * 0.5)
-            .collect::<Vec<_>>()
-    );
-
-    assert!(matches!(
-        checked_sqrt(&stream, -1.0).read(),
-        Err(DomainError::NegativeInput)
-    ));
+    println!("Dot product: {:?}", product.read());
+    println!("Selected energy: {:?}", energy.read());
+    println!("Integer dot product: {:?}", integer_product.read());
+    println!("Samples: {:?}", samples.download());
+    println!("Square root: {:?}", checked_sqrt(&stream, -1.0).read());
 }

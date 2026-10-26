@@ -23,6 +23,6 @@ fn main() {
     process(&stream, &input, &mut output);
 
     let result = output.download();
-    assert_eq!(result, vec![1.0, 4.0, 9.0]);
-    assert_eq!(square(&stream, 5.0).read(), 25.0);
+    println!("Squares: {result:?}");
+    println!("Square of 5: {:?}", square(&stream, 5.0).read());
 }

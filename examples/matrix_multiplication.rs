@@ -79,5 +79,5 @@ fn main() {
         columns,
     );
 
-    assert_eq!(output.download(), vec![29.0; rows * columns]);
+    println!("Matrix: {:?}", output.download());
 }

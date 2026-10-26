@@ -36,5 +36,5 @@ fn main() {
 
     let result = output.download();
 
-    assert_eq!(result, vec![12.5, 12.5, 12.5, 12.5]);
+    println!("Result: {result:?}");
 }

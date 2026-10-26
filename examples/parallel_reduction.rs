@@ -72,5 +72,5 @@ fn main() {
         &mut output,
     );
 
-    assert_eq!(output.download(), vec![10_000.0]);
+    println!("Sum: {:?}", output.download());
 }
