@@ -14,4 +14,4 @@ rustc_private = true
 
 [dependencies]
 gpurs-artifact.workspace = true
-libloading = "0.9"
+libloading.workspace = true
