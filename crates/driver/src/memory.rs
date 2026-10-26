@@ -104,24 +104,17 @@ pub unsafe fn copy_from_device(destination: &mut [MaybeUninit<u8>], source: Devi
     );
 }
 
-/// Fills `count` elements of `pattern.len()` bytes each, where the pattern is 1, 2, or 4 bytes.
+/// Sets `bytes` bytes to `value`.
 ///
 /// # Safety
-/// `destination` must hold `count * pattern.len()` bytes until the fill completes.
-pub unsafe fn fill_async(destination: DevicePointer, pattern: &[u8], count: usize, stream: &Stream) {
-    if count == 0 {
+/// `destination` must hold `bytes` bytes until the fill completes.
+pub unsafe fn fill_async(destination: DevicePointer, value: u8, bytes: usize, stream: &Stream) {
+    if bytes == 0 {
         return;
     }
     // SAFETY: guaranteed by the caller.
-    let result = unsafe {
-        match *pattern {
-            [byte] => ffi::cuMemsetD8Async(destination, byte, count, stream.raw),
-            [a, b] => ffi::cuMemsetD16Async(destination, u16::from_ne_bytes([a, b]), count, stream.raw),
-            [a, b, c, d] => {
-                ffi::cuMemsetD32Async(destination, u32::from_ne_bytes([a, b, c, d]), count, stream.raw)
-            }
-            _ => panic!("fill pattern must be 1, 2, or 4 bytes"),
-        }
-    };
-    check(result, "cuMemsetAsync");
+    check(
+        unsafe { ffi::cuMemsetD8Async(destination, value, bytes, stream.raw) },
+        "cuMemsetD8Async",
+    );
 }

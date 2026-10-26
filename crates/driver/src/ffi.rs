@@ -92,18 +92,6 @@ unsafe extern "C" {
         count: usize,
         stream: CUstream,
     ) -> CUresult;
-    pub fn cuMemsetD16Async(
-        destination: DevicePointer,
-        value: u16,
-        count: usize,
-        stream: CUstream,
-    ) -> CUresult;
-    pub fn cuMemsetD32Async(
-        destination: DevicePointer,
-        value: u32,
-        count: usize,
-        stream: CUstream,
-    ) -> CUresult;
 }
 
 /// Panics with a descriptive message unless `result` is `CUDA_SUCCESS`.

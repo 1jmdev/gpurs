@@ -1,4 +1,5 @@
 use std::ffi::{CString, c_void};
+use std::mem::MaybeUninit;
 use std::ptr;
 
 use crate::Stream;
@@ -72,7 +73,7 @@ impl Function {
         block: [u32; 3],
         shared_bytes: u32,
         stream: &Stream,
-        arguments: &mut [u8],
+        arguments: &mut [MaybeUninit<u8>],
     ) {
         let mut parameters = [arguments.as_mut_ptr().cast::<c_void>()];
         // SAFETY: guaranteed by the caller; the driver copies the block during the call.

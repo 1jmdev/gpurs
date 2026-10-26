@@ -1,0 +1,11 @@
+[package]
+name = "gpurs"
+description = "Safe Rust GPU kernels compiled through rustc MIR, libNVVM, and ptxas"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+gpurs-artifact.workspace = true
+gpurs-driver.workspace = true
+gpurs-macros.workspace = true
