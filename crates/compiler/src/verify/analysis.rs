@@ -1,8 +1,12 @@
 use std::collections::VecDeque;
 
-use gpurs_artifact::{Access as ParameterAccess, Condition, Expression, Extent, Parameter, Relation};
+use gpurs_artifact::{
+    Access as ParameterAccess, Condition, Expression, Extent, Parameter, Relation,
+};
 use rustc_data_structures::fx::FxHashSet;
-use rustc_middle::mir::{self, BinOp, Body, ProjectionElem, Rvalue, StatementKind, TerminatorKind, UnOp};
+use rustc_middle::mir::{
+    self, BinOp, Body, ProjectionElem, Rvalue, StatementKind, TerminatorKind, UnOp,
+};
 use rustc_middle::ty::{self, EarlyBinder, Instance, TyCtxt, TypeFoldable, TypingEnv};
 use rustc_span::Span;
 
@@ -14,6 +18,7 @@ use crate::paths;
 enum Region {
     Parameter(usize),
     Shared(usize, u64),
+    Unknown,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -32,7 +37,7 @@ struct Value {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct Fact(BinOp, Polynomial, Polynomial);
+pub(super) struct Fact(pub BinOp, pub Polynomial, pub Polynomial);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct State {
@@ -57,6 +62,8 @@ struct Analysis<'a, 'tcx> {
     accesses: Vec<Access>,
     barriers: FxHashSet<usize>,
     collectives: Vec<(usize, u8, Span)>,
+    controls: Vec<Vec<(usize, usize)>>,
+    comparisons: Vec<Option<Fact>>,
     conditions: Vec<Condition>,
     uses_index: bool,
     geometry: bool,
@@ -67,7 +74,11 @@ struct Analysis<'a, 'tcx> {
 
 impl Value {
     fn expression(expression: Polynomial, variance: u8) -> Self {
-        Value { expression: Some(expression), variance, ..Value::default() }
+        Value {
+            expression: Some(expression),
+            variance,
+            ..Value::default()
+        }
     }
 
     fn join(&mut self, other: &Self) {
@@ -76,17 +87,25 @@ impl Value {
         }
         if self.origin != other.origin {
             self.origin = match (&self.origin, &other.origin) {
-                (Some(left), Some(right)) if left.region == right.region => {
-                    Some(Origin { region: left.region.clone(), index: None })
-                }
-                _ => None,
+                (Some(left), Some(right)) if left.region == right.region => Some(Origin {
+                    region: left.region.clone(),
+                    index: None,
+                }),
+                (None, None) => None,
+                _ => Some(Origin {
+                    region: Region::Unknown,
+                    index: None,
+                }),
             };
         }
         if self.comparison != other.comparison {
             self.comparison = None;
         }
         if self.fields.len() == other.fields.len() {
-            self.fields.iter_mut().zip(&other.fields).for_each(|(left, right)| left.join(right));
+            self.fields
+                .iter_mut()
+                .zip(&other.fields)
+                .for_each(|(left, right)| left.join(right));
         } else {
             self.fields.clear();
         }
@@ -98,6 +117,7 @@ pub fn verify<'tcx>(
     tcx: TyCtxt<'tcx>,
     instance: Instance<'tcx>,
     parameters: &[KernelParameter<'tcx>],
+    functions: &FxHashSet<Instance<'tcx>>,
     configured: bool,
     returns_value: bool,
 ) -> (Extent, Vec<Condition>) {
@@ -110,21 +130,40 @@ pub fn verify<'tcx>(
         accesses: Vec::new(),
         barriers: FxHashSet::default(),
         collectives: Vec::new(),
+        controls: vec![Vec::new(); body.basic_blocks.len()],
+        comparisons: vec![None; body.basic_blocks.len()],
         conditions: Vec::new(),
-        uses_index: false,
+        uses_index: functions.iter().any(|function| {
+            paths::path(tcx, function.def_id()).starts_with("gpurs::gpu::thread::")
+                && !paths::is(tcx, function.def_id(), "gpurs::gpu::thread::sync_block")
+        }),
         geometry: false,
         collect: false,
         block: 0,
         span: body.span,
     };
-    let mut initial = State { locals: vec![Value::default(); body.local_decls.len()], facts: Vec::new() };
+    let mut initial = State {
+        locals: vec![Value::default(); body.local_decls.len()],
+        facts: Vec::new(),
+    };
     for (index, local) in body.args_iter().enumerate() {
         initial.locals[local.as_usize()] = match parameters[index].metadata {
             Parameter::Slice { .. } | Parameter::Reference { .. } => Value {
-                origin: Some(Origin { region: Region::Parameter(index), index: Some(Polynomial::constant(0)) }),
+                origin: Some(Origin {
+                    region: Region::Parameter(index),
+                    index: Some(Polynomial::constant(0)),
+                }),
                 ..Value::default()
             },
-            Parameter::Value(_) => Value::expression(Polynomial::atom(Atom::Scalar(index)), 0),
+            Parameter::Value(_)
+                if matches!(
+                    parameters[index].layout.ty.kind(),
+                    ty::Uint(ty::UintTy::Usize | ty::UintTy::U64)
+                ) =>
+            {
+                Value::expression(Polynomial::atom(Atom::Scalar(index)), 0)
+            }
+            Parameter::Value(_) => Value::default(),
         };
     }
     let mut states = vec![None; body.basic_blocks.len()];
@@ -145,7 +184,11 @@ pub fn verify<'tcx>(
                 }
                 Some(previous) => {
                     let saved = previous.clone();
-                    previous.locals.iter_mut().zip(&next.locals).for_each(|(left, right)| left.join(right));
+                    previous
+                        .locals
+                        .iter_mut()
+                        .zip(&next.locals)
+                        .for_each(|(left, right)| left.join(right));
                     previous.facts.retain(|fact| next.facts.contains(fact));
                     *previous != saved
                 }
@@ -156,15 +199,25 @@ pub fn verify<'tcx>(
         }
     }
     analysis.collect = true;
-    for (block, state) in states.iter().enumerate() {
+    let mut exits = states;
+    for (block, state) in exits.iter_mut().enumerate() {
         if let Some(state) = state {
-            analysis.block(block, &mut state.clone());
+            analysis.block(block, state);
         }
     }
     let mut lengths = Vec::new();
-    for state in states.iter().flatten() {
-        for Fact(operation, left, right) in &state.facts {
-            if *operation == BinOp::Lt && left.variable() == Some(&Atom::Index)
+    for (block, state) in exits.iter().enumerate() {
+        let Some(state) = state else { continue };
+        let TerminatorKind::SwitchInt { discr, .. } = &body.basic_blocks
+            [mir::BasicBlock::from_usize(block)]
+        .terminator()
+        .kind
+        else {
+            continue;
+        };
+        if let Some(Fact(operation, left, right)) = analysis.operand(discr, state).comparison {
+            if operation == BinOp::Lt
+                && left.variable() == Some(&Atom::Index)
                 && let Some(Atom::Length(parameter)) = right.variable()
                 && !lengths.contains(parameter)
             {
@@ -180,9 +233,14 @@ pub fn verify<'tcx>(
         Extent::Explicit
     };
     if !configured && extent == Extent::Explicit {
-        tcx.dcx().span_err(body.span, "GPU launch dimensions are ambiguous; use stream.with_launch(config)");
+        crate::diagnostic::error(
+            tcx,
+            body.span,
+            "GPU launch dimensions cannot be inferred",
+            "launch this kernel with stream.with_launch(LaunchConfig { grid, block, shared_bytes })",
+        );
     }
-    analysis.collective_control(&states);
+    analysis.collective_control(&exits);
     if configured || extent != Extent::Single {
         analysis.races();
     }
@@ -213,16 +271,33 @@ impl<'tcx> Analysis<'_, 'tcx> {
                     self.assign(*place, value, state);
                 }
                 StatementKind::Intrinsic(intrinsic) => {
-                    if self.collect && matches!(&**intrinsic, mir::NonDivergingIntrinsic::CopyNonOverlapping(_)) {
-                        self.tcx.dcx().span_err(self.span, "bulk pointer copies require a GPU access proof");
+                    if self.collect
+                        && matches!(
+                            &**intrinsic,
+                            mir::NonDivergingIntrinsic::CopyNonOverlapping(_)
+                        )
+                    {
+                        self.tcx
+                            .dcx()
+                            .span_err(self.span, "bulk pointer copies require a GPU access proof");
                     }
                 }
                 _ => {}
             }
         }
         self.span = data.terminator().source_info.span;
-        if let TerminatorKind::Call { func, args, destination, target: Some(_), .. } = &data.terminator().kind {
-            let arguments: Vec<_> = args.iter().map(|argument| self.operand(&argument.node, state)).collect();
+        if let TerminatorKind::Call {
+            func,
+            args,
+            destination,
+            target: Some(_),
+            ..
+        } = &data.terminator().kind
+        {
+            let arguments: Vec<_> = args
+                .iter()
+                .map(|argument| self.operand(&argument.node, state))
+                .collect();
             let value = self.call(func, &arguments, state);
             self.assign(*destination, value, state);
         }
@@ -230,68 +305,154 @@ impl<'tcx> Analysis<'_, 'tcx> {
 
     fn rvalue(&mut self, rvalue: &Rvalue<'tcx>, state: &State) -> Value {
         match rvalue {
-            Rvalue::Use(operand, _) | Rvalue::WrapUnsafeBinder(operand, _) => self.operand(operand, state),
+            Rvalue::Use(operand, _) | Rvalue::WrapUnsafeBinder(operand, _) => {
+                self.operand(operand, state)
+            }
             Rvalue::CopyForDeref(place) => self.read(*place, state),
-            Rvalue::Ref(_, _, place) | Rvalue::RawPtr(_, place) | Rvalue::Reborrow(_, _, place) => self.place(*place, state),
-            Rvalue::Cast(_, operand, _) => self.operand(operand, state),
+            Rvalue::Ref(_, _, place) | Rvalue::RawPtr(_, place) | Rvalue::Reborrow(_, _, place) => {
+                self.place(*place, state)
+            }
+            Rvalue::Cast(kind, operand, target) => {
+                let mut value = self.operand(operand, state);
+                if matches!(
+                    kind,
+                    mir::CastKind::IntToInt
+                        | mir::CastKind::IntToFloat
+                        | mir::CastKind::FloatToInt
+                        | mir::CastKind::FloatToFloat
+                ) {
+                    let source = self.monomorphize(operand.ty(self.body, self.tcx));
+                    let target = self.monomorphize(*target);
+                    let layout = |ty| {
+                        self.tcx
+                            .layout_of(TypingEnv::fully_monomorphized().as_query_input(ty))
+                            .unwrap()
+                    };
+                    if !source.is_integral()
+                        || !target.is_integral()
+                        || layout(target).size < layout(source).size
+                        || (target.is_signed()
+                            && !source.is_signed()
+                            && layout(target).size == layout(source).size)
+                    {
+                        value.expression = None;
+                    }
+                }
+                value
+            }
             Rvalue::UnaryOp(UnOp::PtrMetadata, operand) => {
                 let value = self.operand(operand, state);
-                if let Some(Origin { region: Region::Parameter(parameter), .. }) = value.origin {
+                if let Some(Origin {
+                    region: Region::Parameter(parameter),
+                    ..
+                }) = value.origin
+                {
                     Value::expression(Polynomial::atom(Atom::Length(parameter)), 0)
                 } else {
-                    Value { variance: value.variance, ..Value::default() }
+                    Value {
+                        variance: value.variance,
+                        ..Value::default()
+                    }
                 }
             }
             Rvalue::UnaryOp(_, operand) => {
                 let value = self.operand(operand, state);
-                Value { variance: value.variance, ..Value::default() }
+                Value {
+                    variance: value.variance,
+                    ..Value::default()
+                }
             }
             Rvalue::BinaryOp(operation, operands) => {
                 let left = self.operand(&operands.0, state);
                 let right = self.operand(&operands.1, state);
                 let variance = left.variance.max(right.variance);
-                let expression = left.expression.as_ref().zip(right.expression.as_ref()).and_then(|(left, right)| {
-                    match operation.overflowing_to_wrapping().unwrap_or(*operation) {
-                        BinOp::Add | BinOp::AddUnchecked => Some(left.add(right, 1)),
-                        BinOp::Sub | BinOp::SubUnchecked => Some(left.add(right, -1)),
-                        BinOp::Mul | BinOp::MulUnchecked => Some(left.multiply(right)),
-                        BinOp::Div | BinOp::Rem => {
-                            let divisor = u64::try_from(right.value()?).ok().filter(|value| *value > 0)?;
-                            let atom = if *operation == BinOp::Div { Atom::Quotient(Box::new(left.clone()), divisor) } else { Atom::Remainder(Box::new(left.clone()), divisor) };
-                            Some(Polynomial::atom(atom))
+                let expression = left
+                    .expression
+                    .as_ref()
+                    .zip(right.expression.as_ref())
+                    .and_then(|(left, right)| {
+                        match operation.overflowing_to_wrapping().unwrap_or(*operation) {
+                            BinOp::Add | BinOp::AddUnchecked => Some(left.add(right, 1)),
+                            BinOp::Sub | BinOp::SubUnchecked => Some(left.add(right, -1)),
+                            BinOp::Mul | BinOp::MulUnchecked => Some(left.multiply(right)),
+                            BinOp::Div | BinOp::Rem => {
+                                let divisor = u64::try_from(right.value()?)
+                                    .ok()
+                                    .filter(|value| *value > 0)?;
+                                let atom = if *operation == BinOp::Div {
+                                    Atom::Quotient(Box::new(left.clone()), divisor)
+                                } else {
+                                    Atom::Remainder(Box::new(left.clone()), divisor)
+                                };
+                                Some(Polynomial::atom(atom))
+                            }
+                            _ => None,
                         }
-                        _ => None,
-                    }
-                });
-                let comparison = if matches!(operation, BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge) {
-                    left.expression.zip(right.expression).map(|(left, right)| Fact(*operation, left, right))
+                    });
+                let comparison = if matches!(
+                    operation,
+                    BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
+                ) {
+                    left.expression
+                        .zip(right.expression)
+                        .map(|(left, right)| Fact(*operation, left, right))
                 } else {
                     None
                 };
-                let variance = if let Some(Atom::Quotient(value, divisor)) = expression.as_ref().and_then(Polynomial::variable)
-                    && value.variable() == Some(&Atom::Thread(0)) && divisor.is_multiple_of(32)
+                let variance = if let Some(Atom::Quotient(value, divisor)) =
+                    expression.as_ref().and_then(Polynomial::variable)
+                    && value.variable() == Some(&Atom::Thread(0))
+                    && divisor.is_multiple_of(32)
                 {
                     1
                 } else {
                     variance
                 };
-                let value = Value { expression, comparison, variance, ..Value::default() };
+                let value = Value {
+                    expression,
+                    comparison,
+                    variance,
+                    ..Value::default()
+                };
                 if operation.overflowing_to_wrapping().is_some() {
-                    Value { fields: vec![value, Value { variance, ..Value::default() }], variance, ..Value::default() }
+                    Value {
+                        fields: vec![
+                            value,
+                            Value {
+                                variance,
+                                ..Value::default()
+                            },
+                        ],
+                        variance,
+                        ..Value::default()
+                    }
                 } else {
                     value
                 }
             }
             Rvalue::Aggregate(_, operands) => {
-                let fields: Vec<_> = operands.iter().map(|operand| self.operand(operand, state)).collect();
-                Value { variance: fields.iter().map(|field| field.variance).max().unwrap_or(0), fields, ..Value::default() }
+                let fields: Vec<_> = operands
+                    .iter()
+                    .map(|operand| self.operand(operand, state))
+                    .collect();
+                Value {
+                    variance: fields.iter().map(|field| field.variance).max().unwrap_or(0),
+                    fields,
+                    ..Value::default()
+                }
             }
             Rvalue::Repeat(operand, _) => self.operand(operand, state),
             Rvalue::Discriminant(place) => {
                 let value = self.read(*place, state);
-                Value { variance: value.variance, ..Value::default() }
+                Value {
+                    variance: value.variance,
+                    ..Value::default()
+                }
             }
-            _ => Value { variance: 2, ..Value::default() },
+            _ => Value {
+                variance: 2,
+                ..Value::default()
+            },
         }
     }
 
@@ -301,7 +462,9 @@ impl<'tcx> Analysis<'_, 'tcx> {
             mir::Operand::Constant(constant) => {
                 let constant = self.monomorphize(constant.const_);
                 Value {
-                    expression: constant.try_eval_bits(self.tcx, TypingEnv::fully_monomorphized()).map(|value| Polynomial::constant(value as i128)),
+                    expression: constant
+                        .try_eval_bits(self.tcx, TypingEnv::fully_monomorphized())
+                        .map(|value| Polynomial::constant(value as i128)),
                     ..Value::default()
                 }
             }
@@ -314,7 +477,11 @@ impl<'tcx> Analysis<'_, 'tcx> {
         for projection in place.projection {
             match projection {
                 ProjectionElem::Field(field, _) if !value.fields.is_empty() => {
-                    value = value.fields.get(field.as_usize()).cloned().unwrap_or_default();
+                    value = value
+                        .fields
+                        .get(field.as_usize())
+                        .cloned()
+                        .unwrap_or_default();
                 }
                 ProjectionElem::Index(local) => {
                     if let Some(origin) = &mut value.origin {
@@ -322,7 +489,11 @@ impl<'tcx> Analysis<'_, 'tcx> {
                     }
                     value.variance = value.variance.max(state.locals[local.as_usize()].variance);
                 }
-                ProjectionElem::ConstantIndex { offset, from_end: false, .. } => {
+                ProjectionElem::ConstantIndex {
+                    offset,
+                    from_end: false,
+                    ..
+                } => {
                     if let Some(origin) = &mut value.origin {
                         origin.index = Some(Polynomial::constant(offset as i128));
                     }
@@ -340,13 +511,20 @@ impl<'tcx> Analysis<'_, 'tcx> {
 
     fn read(&mut self, place: mir::Place<'tcx>, state: &State) -> Value {
         let value = self.place(place, state);
-        if place.projection.iter().any(|projection| matches!(projection, ProjectionElem::Deref)) {
+        if place
+            .projection
+            .iter()
+            .any(|projection| matches!(projection, ProjectionElem::Deref))
+        {
             self.access(&value, false, false, state);
             let ty = self.monomorphize(place.ty(self.body, self.tcx).ty);
             if matches!(ty.kind(), ty::Ref(..) | ty::RawPtr(..)) {
                 value
             } else {
-                Value { variance: 2, ..Value::default() }
+                Value {
+                    variance: 2,
+                    ..Value::default()
+                }
             }
         } else {
             value
@@ -354,7 +532,11 @@ impl<'tcx> Analysis<'_, 'tcx> {
     }
 
     fn assign(&mut self, place: mir::Place<'tcx>, value: Value, state: &mut State) {
-        if place.projection.iter().any(|projection| matches!(projection, ProjectionElem::Deref)) {
+        if place
+            .projection
+            .iter()
+            .any(|projection| matches!(projection, ProjectionElem::Deref))
+        {
             let destination = self.place(place, state);
             self.access(&destination, true, false, state);
         } else if place.projection.is_empty() {
@@ -364,36 +546,76 @@ impl<'tcx> Analysis<'_, 'tcx> {
             fields.resize_with(fields.len().max(field.as_usize() + 1), Value::default);
             fields[field.as_usize()] = value;
         } else {
-            state.locals[place.local.as_usize()] = Value { variance: value.variance, ..Value::default() };
+            state.locals[place.local.as_usize()] = Value {
+                variance: value.variance,
+                ..Value::default()
+            };
         }
     }
 
     fn access(&mut self, value: &Value, write: bool, atomic: bool, state: &State) {
-        if self.collect && let Some(origin) = &value.origin {
-            self.accesses.push(Access { origin: origin.clone(), write, atomic, block: self.block, facts: state.facts.clone(), span: self.span });
+        if self.collect
+            && let Some(origin) = &value.origin
+        {
+            self.accesses.push(Access {
+                origin: origin.clone(),
+                write,
+                atomic,
+                block: self.block,
+                facts: state.facts.clone(),
+                span: self.span,
+            });
         }
     }
 
     fn call(&mut self, function: &mir::Operand<'tcx>, arguments: &[Value], state: &State) -> Value {
         let ty = self.monomorphize(function.ty(self.body, self.tcx));
-        let ty::FnDef(def_id, args) = *ty.kind() else { return Value { variance: 2, ..Value::default() } };
-        let instance = Instance::expect_resolve(self.tcx, TypingEnv::fully_monomorphized(), def_id, args.no_bound_vars().unwrap(), self.span);
+        let ty::FnDef(def_id, args) = *ty.kind() else {
+            return Value {
+                variance: 2,
+                ..Value::default()
+            };
+        };
+        let instance = Instance::expect_resolve(
+            self.tcx,
+            TypingEnv::fully_monomorphized(),
+            def_id,
+            args.no_bound_vars().unwrap(),
+            self.span,
+        );
         let path = paths::path(self.tcx, instance.def_id());
         if path == "gpurs::gpu::thread::index" {
             self.uses_index = true;
             return Value::expression(Polynomial::atom(Atom::Index), 2);
         }
-        for (name, atom, variance) in [("thread_id", Atom::Thread as fn(usize) -> Atom, 2), ("block_id", Atom::Block, 0), ("block_dim", Atom::BlockDimension, 0), ("grid_dim", Atom::GridDimension, 0)] {
+        for (name, atom, variance) in [
+            ("thread_id", Atom::Thread as fn(usize) -> Atom, 2),
+            ("block_id", Atom::Block, 0),
+            ("block_dim", Atom::BlockDimension, 0),
+            ("grid_dim", Atom::GridDimension, 0),
+        ] {
             if path == format!("gpurs::gpu::thread::{name}") {
                 self.uses_index = true;
                 self.geometry = true;
-                return Value { fields: (0..3).map(|axis| Value::expression(Polynomial::atom(atom(axis)), variance)).collect(), variance, ..Value::default() };
+                return Value {
+                    fields: (0..3)
+                        .map(|axis| Value::expression(Polynomial::atom(atom(axis)), variance))
+                        .collect(),
+                    variance,
+                    ..Value::default()
+                };
             }
         }
         if path == "gpurs::gpu::warp::lane_id" {
             self.uses_index = true;
             self.geometry = true;
-            return Value::expression(Polynomial::atom(Atom::Remainder(Box::new(Polynomial::atom(Atom::Thread(0))), 32)), 2);
+            return Value::expression(
+                Polynomial::atom(Atom::Remainder(
+                    Box::new(Polynomial::atom(Atom::Thread(0))),
+                    32,
+                )),
+                2,
+            );
         }
         if path == "gpurs::gpu::thread::sync_block" || path == "gpurs::gpu::intrinsics::barrier" {
             self.geometry = true;
@@ -407,17 +629,39 @@ impl<'tcx> Analysis<'_, 'tcx> {
             self.geometry = true;
             if self.collect {
                 self.collectives.push((self.block, 1, self.span));
-                self.condition(Expression::Constant(32), Relation::Divides, Expression::BlockDimension(0), "warp operations require complete warps");
+                self.condition(
+                    Expression::Constant(32),
+                    Relation::Divides,
+                    Expression::BlockDimension(0),
+                    "warp operations require complete warps",
+                );
             }
-            return Value { variance: 2, ..Value::default() };
+            return Value {
+                variance: 2,
+                ..Value::default()
+            };
         }
         if path == "gpurs::gpu::shared::shared_array" {
             self.geometry = true;
-            let length = instance.args.const_at(1).try_to_target_usize(self.tcx).unwrap();
-            return Value { origin: Some(Origin { region: Region::Shared(self.block, length), index: Some(Polynomial::constant(0)) }), ..Value::default() };
+            let length = instance
+                .args
+                .const_at(1)
+                .try_to_target_usize(self.tcx)
+                .unwrap();
+            return Value {
+                origin: Some(Origin {
+                    region: Region::Shared(self.block, length),
+                    index: Some(Polynomial::constant(0)),
+                }),
+                ..Value::default()
+            };
         }
-        if path.starts_with("core::slice::") && path.ends_with("::len")
-            && let Some(Origin { region: Region::Parameter(parameter), .. }) = arguments[0].origin
+        if path.starts_with("core::slice::")
+            && path.ends_with("::len")
+            && let Some(Origin {
+                region: Region::Parameter(parameter),
+                ..
+            }) = arguments[0].origin
         {
             return Value::expression(Polynomial::atom(Atom::Length(parameter)), 0);
         }
@@ -431,50 +675,121 @@ impl<'tcx> Analysis<'_, 'tcx> {
             value.variance = value.variance.max(arguments[1].variance);
             return value;
         }
-        if path.starts_with("core::sync::atomic::") || path.starts_with("core::intrinsics::atomic_") {
+        if path.starts_with("core::sync::atomic::") || path.starts_with("core::intrinsics::atomic_")
+        {
             if let Some(argument) = arguments.first() {
                 self.access(argument, !path.ends_with("::load"), true, state);
             }
-            return Value { variance: 2, ..Value::default() };
+            return Value {
+                variance: 2,
+                ..Value::default()
+            };
         }
-        if self.collect {
-            for argument in arguments {
-                if let Some(origin) = &argument.origin {
-                    let writes = match origin.region {
-                        Region::Shared(..) => true,
-                        Region::Parameter(parameter) => matches!(self.parameters[parameter].metadata,
-                            Parameter::Slice { access: ParameterAccess::Write } | Parameter::Reference { access: ParameterAccess::Write }),
-                    };
-                    if writes {
-                        self.tcx.dcx().span_err(self.span, format!("cannot prove GPU accesses through `{instance}`; a writable device reference escapes the access analysis"));
+        if self.collect && arguments.iter().any(|argument| self.writable(argument)) {
+            crate::diagnostic::error(
+                self.tcx,
+                self.span,
+                format!("cannot verify memory accesses through `{instance}`"),
+                "keep writes through this device reference in the kernel body so their thread indices can be verified",
+            );
+        }
+        Value {
+            variance: if crate::device::is_device(self.tcx, instance.def_id()) {
+                2
+            } else {
+                arguments
+                    .iter()
+                    .map(|argument| argument.variance)
+                    .max()
+                    .unwrap_or(0)
+            },
+            ..Value::default()
+        }
+    }
+
+    fn writable(&self, value: &Value) -> bool {
+        value
+            .origin
+            .as_ref()
+            .is_some_and(|origin| match origin.region {
+                Region::Shared(..) | Region::Unknown => true,
+                Region::Parameter(parameter) => matches!(
+                    self.parameters[parameter].metadata,
+                    Parameter::Slice {
+                        access: ParameterAccess::Write
+                    } | Parameter::Reference {
+                        access: ParameterAccess::Write
                     }
-                }
-            }
-        }
-        Value { variance: arguments.iter().map(|argument| argument.variance).max().unwrap_or(0).max(2), ..Value::default() }
+                ),
+            })
+            || value.fields.iter().any(|field| self.writable(field))
     }
 
     fn successors(&mut self, block: usize, state: &State) -> Vec<(usize, Option<Fact>)> {
         let terminator = self.body.basic_blocks[mir::BasicBlock::from_usize(block)].terminator();
         if let TerminatorKind::SwitchInt { discr, targets } = &terminator.kind {
             let value = self.operand(discr, state);
-            return targets.iter().map(|(constant, target)| (target.as_usize(), value.comparison.clone().map(|fact| if constant == 0 { negate(fact) } else { fact })))
-                .chain(std::iter::once((targets.otherwise().as_usize(), value.comparison.clone().map(|fact| {
-                    if targets.iter().any(|(value, _)| value == 0) { fact } else { negate(fact) }
-                })))).collect();
+            return targets
+                .iter()
+                .map(|(constant, target)| {
+                    (
+                        target.as_usize(),
+                        value
+                            .comparison
+                            .clone()
+                            .map(|fact| if constant == 0 { negate(fact) } else { fact }),
+                    )
+                })
+                .chain(std::iter::once((
+                    targets.otherwise().as_usize(),
+                    value.comparison.clone().map(|fact| {
+                        if targets.iter().any(|(value, _)| value == 0) {
+                            fact
+                        } else {
+                            negate(fact)
+                        }
+                    }),
+                )))
+                .collect();
         }
-        terminator.successors().map(|block| (block.as_usize(), None)).collect()
+        if let TerminatorKind::Assert {
+            cond,
+            expected,
+            target,
+            ..
+        } = &terminator.kind
+        {
+            let comparison = self.operand(cond, state).comparison;
+            return vec![(
+                target.as_usize(),
+                comparison.map(|fact| if *expected { fact } else { negate(fact) }),
+            )];
+        }
+        normal_successors(self.body, block)
+            .into_iter()
+            .map(|block| (block, None))
+            .collect()
     }
 
     fn condition(&mut self, left: Expression, relation: Relation, right: Expression, reason: &str) {
-        let condition = Condition { left, relation, right, reason: reason.to_owned() };
+        let condition = Condition {
+            left,
+            relation,
+            right,
+            reason: reason.to_owned(),
+        };
         if !self.conditions.contains(&condition) {
             self.conditions.push(condition);
         }
     }
 
     fn collective_control(&mut self, states: &[Option<State>]) {
-        if self.collectives.is_empty() {
+        if self.collectives.is_empty()
+            && !self
+                .accesses
+                .iter()
+                .any(|access| matches!(access.origin.region, Region::Shared(..)))
+        {
             return;
         }
         let count = self.body.basic_blocks.len();
@@ -484,8 +799,12 @@ impl<'tcx> Analysis<'_, 'tcx> {
         loop {
             let mut changed = false;
             for block in (0..count).rev() {
-                let successors: Vec<_> = self.body.basic_blocks[mir::BasicBlock::from_usize(block)].terminator().successors().map(|block| block.as_usize()).collect();
-                let successors = if successors.is_empty() { vec![count] } else { successors };
+                let successors = normal_successors(self.body, block);
+                let successors = if successors.is_empty() {
+                    vec![count]
+                } else {
+                    successors
+                };
                 let mut next = postdominators[successors[0]].clone();
                 for successor in &successors[1..] {
                     next.retain(|block| postdominators[*successor].contains(block));
@@ -500,16 +819,33 @@ impl<'tcx> Analysis<'_, 'tcx> {
         }
         for (block, state) in states.iter().enumerate() {
             let Some(state) = state else { continue };
-            let terminator = self.body.basic_blocks[mir::BasicBlock::from_usize(block)].terminator();
-            let variance = match &terminator.kind {
-                TerminatorKind::SwitchInt { discr, .. } | TerminatorKind::Assert { cond: discr, .. } => self.operand(discr, state).variance,
+            let terminator =
+                self.body.basic_blocks[mir::BasicBlock::from_usize(block)].terminator();
+            let value = match &terminator.kind {
+                TerminatorKind::SwitchInt { discr, .. } => self.operand(discr, state),
                 _ => continue,
             };
+            self.comparisons[block] = value.comparison;
+            let mut reconvergence = postdominators[block].clone();
+            reconvergence.remove(&block);
+            for successor in normal_successors(self.body, block) {
+                for target in 0..count {
+                    if reachable(self.body, successor, target, &reconvergence) {
+                        self.controls[target].push((block, successor));
+                    }
+                }
+            }
             for &(collective, permitted, span) in &self.collectives {
-                if variance > permitted && !postdominators[block].contains(&collective)
-                    && reachable(self.body, block, collective, &FxHashSet::default())
+                if value.variance > permitted
+                    && !postdominators[block].contains(&collective)
+                    && reachable(self.body, block, collective, &reconvergence)
                 {
-                    self.tcx.dcx().span_err(span, "GPU collective participation depends on a divergent branch or failure path");
+                    crate::diagnostic::error(
+                        self.tcx,
+                        span,
+                        "threads may reach this GPU collective on different control-flow paths",
+                        "move block barriers outside thread-dependent branches; warp collectives require every lane of the warp to participate",
+                    );
                 }
             }
         }
@@ -521,69 +857,128 @@ impl<'tcx> Analysis<'_, 'tcx> {
                 continue;
             }
             let access = &self.accesses[index];
-            let injective = access.atomic || self.injective(access);
-            if !injective {
-                self.tcx.dcx().span_err(access.span, "cannot prove that GPU writes are disjoint across threads");
+            let proof = access.origin.index.as_ref().and_then(|expression| {
+                super::proof::injective(
+                    expression,
+                    &access.facts,
+                    matches!(access.origin.region, Region::Shared(..)),
+                )
+            });
+            if !access.atomic && proof.is_none() {
+                crate::diagnostic::error(
+                    self.tcx,
+                    access.span,
+                    "multiple GPU threads may write the same memory location",
+                    "use a distinct thread index for each write, an atomic operation, or a verified single-writer guard",
+                );
             }
-            for other in &self.accesses[index..] {
-                if access.origin.region != other.origin.region || (access.atomic && other.atomic) {
+            if let Some(conditions) = proof {
+                self.conditions.extend(conditions);
+            }
+            for other in &self.accesses {
+                if (access.origin.region != other.origin.region
+                    && access.origin.region != Region::Unknown
+                    && other.origin.region != Region::Unknown)
+                    || (access.atomic && other.atomic)
+                {
                     continue;
                 }
                 let shared = matches!(access.origin.region, Region::Shared(..));
-                let separated = shared && access.block != other.block
+                let separated = shared
+                    && access.block != other.block
                     && !reachable(self.body, access.block, other.block, &self.barriers)
                     && !reachable(self.body, other.block, access.block, &self.barriers);
-                if !separated && (access.origin.index != other.origin.index || access.atomic != other.atomic) {
-                    self.tcx.dcx().span_err(other.span, "overlapping GPU accesses are not separated by a verified synchronization phase");
+                if !separated
+                    && (access.origin.index != other.origin.index || access.atomic != other.atomic)
+                {
+                    let mut diagnostic = self
+                        .tcx
+                        .dcx()
+                        .struct_span_err(other.span, "GPU memory accesses may race");
+                    diagnostic.span_label(access.span, "this write may overlap the access below");
+                    diagnostic.span_label(other.span, "this access is not ordered after the write");
+                    diagnostic.help("use the same distinct per-thread index, or separate shared-memory phases with gpu::sync_block()");
+                    diagnostic.emit();
                 }
             }
         }
         for access in &self.accesses {
-            if !access.write && matches!(access.origin.region, Region::Shared(..))
-                && !self.accesses.iter().any(|write| write.write && write.origin.region == access.origin.region
-                    && (write.origin.index == access.origin.index || !reachable(self.body, write.block, access.block, &self.barriers)))
-            {
-                self.tcx.dcx().span_err(access.span, "shared-memory read has no established initialization");
+            let Region::Shared(_, length) = access.origin.region else {
+                continue;
+            };
+            if access.write {
+                continue;
+            }
+            let initialized = self
+                .accesses
+                .iter()
+                .filter(|write| write.write && write.origin.region == access.origin.region)
+                .find_map(|write| {
+                    if reachable(self.body, write.block, access.block, &self.barriers)
+                        || !reachable(self.body, write.block, access.block, &FxHashSet::default())
+                    {
+                        return None;
+                    }
+                    for &(branch, successor) in &self.controls[write.block] {
+                        if self.controls[access.block].contains(&(branch, successor)) {
+                            continue;
+                        }
+                        let Some(Fact(_, left, right)) = &self.comparisons[branch] else {
+                            return None;
+                        };
+                        let Some(Atom::Quotient(value, divisor)) =
+                            write.origin.index.as_ref()?.variable()
+                        else {
+                            return None;
+                        };
+                        let remainder = Polynomial::atom(Atom::Remainder(value.clone(), *divisor));
+                        if !((left == &remainder && right.value().is_some())
+                            || (right == &remainder && left.value().is_some()))
+                            || !write.facts.iter().any(|Fact(operation, left, right)| {
+                                *operation == BinOp::Eq
+                                    && ((left == &remainder
+                                        && right.value().is_some_and(|value| {
+                                            value >= 0 && value < *divisor as i128
+                                        }))
+                                        || (right == &remainder
+                                            && left.value().is_some_and(|value| {
+                                                value >= 0 && value < *divisor as i128
+                                            })))
+                            })
+                        {
+                            return None;
+                        }
+                    }
+                    super::proof::coverage(write.origin.index.as_ref()?, &write.facts, length)
+                });
+            if let Some(conditions) = initialized {
+                self.conditions.extend(conditions);
+            } else {
+                crate::diagnostic::error(
+                    self.tcx,
+                    access.span,
+                    "shared memory may be read before it is initialized",
+                    "initialize every shared-memory element, then call gpu::sync_block() before other threads read it",
+                );
             }
         }
-    }
-
-    fn injective(&self, access: &Access) -> bool {
-        let Some(expression) = &access.origin.index else { return false };
-        if expression.variable() == Some(&Atom::Index) {
-            return true;
-        }
-        let mut variables = Vec::new();
-        let shared = matches!(access.origin.region, Region::Shared(..));
-        for axis in 0..3 {
-            variables.push(Atom::Thread(axis));
-            if !shared {
-                variables.push(Atom::Block(axis));
-            }
-        }
-        variables.iter().all(|variable| {
-            let pinned = access.facts.iter().any(|Fact(operation, left, right)| {
-                *operation == BinOp::Eq && ((left.variable() == Some(variable) && right.value().is_some())
-                    || (right.variable() == Some(variable) && left.value().is_some()))
-            });
-            pinned || expression.0.iter().any(|(term, coefficient)| term == &[variable.clone()] && *coefficient != 0)
-                && variables.iter().filter(|other| *other != variable).all(|other| {
-                    !expression.0.keys().any(|term| term.contains(other))
-                })
-        })
     }
 }
 
 fn negate(Fact(operation, left, right): Fact) -> Fact {
-    Fact(match operation {
-        BinOp::Eq => BinOp::Ne,
-        BinOp::Ne => BinOp::Eq,
-        BinOp::Lt => BinOp::Ge,
-        BinOp::Le => BinOp::Gt,
-        BinOp::Gt => BinOp::Le,
-        BinOp::Ge => BinOp::Lt,
-        _ => unreachable!("comparison"),
-    }, left, right)
+    Fact(
+        match operation {
+            BinOp::Eq => BinOp::Ne,
+            BinOp::Ne => BinOp::Eq,
+            BinOp::Lt => BinOp::Ge,
+            BinOp::Le => BinOp::Gt,
+            BinOp::Gt => BinOp::Le,
+            BinOp::Ge => BinOp::Lt,
+            _ => unreachable!("comparison"),
+        },
+        left,
+        right,
+    )
 }
 
 fn reachable(body: &Body<'_>, start: usize, target: usize, barriers: &FxHashSet<usize>) -> bool {
@@ -596,7 +991,27 @@ fn reachable(body: &Body<'_>, start: usize, target: usize, barriers: &FxHashSet<
         if block == target {
             return true;
         }
-        pending.extend(body.basic_blocks[mir::BasicBlock::from_usize(block)].terminator().successors().map(|block| block.as_usize()));
+        pending.extend(normal_successors(body, block));
     }
     false
+}
+
+fn normal_successors(body: &Body<'_>, block: usize) -> Vec<usize> {
+    match &body.basic_blocks[mir::BasicBlock::from_usize(block)]
+        .terminator()
+        .kind
+    {
+        TerminatorKind::Call { target, .. } => {
+            target.iter().map(|block| block.as_usize()).collect()
+        }
+        TerminatorKind::Assert { target, .. } | TerminatorKind::Drop { target, .. } => {
+            vec![target.as_usize()]
+        }
+        _ => body.basic_blocks[mir::BasicBlock::from_usize(block)]
+            .terminator()
+            .successors()
+            .filter(|block| !body.basic_blocks[*block].is_cleanup)
+            .map(|block| block.as_usize())
+            .collect(),
+    }
 }

@@ -1,5 +1,6 @@
 mod analysis;
 mod policy;
+mod proof;
 mod symbolic;
 
 use gpurs_artifact::{Access, Condition, Extent, Parameter, Value};
@@ -13,14 +14,16 @@ pub fn kernel<'tcx>(
     instance: Instance<'tcx>,
     configured: bool,
 ) -> Option<(Vec<KernelParameter<'tcx>>, Extent, Vec<Condition>)> {
-    policy::verify(tcx, instance);
+    let functions = policy::verify(tcx, instance);
     let module = ModuleBuilder::new(tcx);
     let signature = module.signature(instance);
     let mut parameters = Vec::new();
     for (_, layout) in &signature.arguments {
         let metadata = match *layout.ty.kind() {
             ty::Ref(_, pointee, mutability) => {
-                let access = if mutability.is_mut() || !pointee.is_freeze(tcx, TypingEnv::fully_monomorphized()) {
+                let access = if mutability.is_mut()
+                    || !pointee.is_freeze(tcx, TypingEnv::fully_monomorphized())
+                {
                     Access::Write
                 } else {
                     Access::Read
@@ -44,16 +47,29 @@ pub fn kernel<'tcx>(
                     tcx.dcx().span_err(tcx.def_span(instance.def_id()), message);
                     return None;
                 }
-                Parameter::Value(Value { size: layout.size.bytes(), align: layout.align.abi.bytes() })
+                Parameter::Value(Value {
+                    size: layout.size.bytes(),
+                    align: layout.align.abi.bytes(),
+                })
             }
         };
-        parameters.push(KernelParameter { layout: *layout, metadata });
+        parameters.push(KernelParameter {
+            layout: *layout,
+            metadata,
+        });
     }
     let result = signature.result.1;
     if let Err(message) = transfer::check(tcx, result.ty) {
         tcx.dcx().span_err(tcx.def_span(instance.def_id()), message);
         return None;
     }
-    let (extent, conditions) = analysis::verify(tcx, instance, &parameters, configured, !result.is_zst());
+    let (extent, conditions) = analysis::verify(
+        tcx,
+        instance,
+        &parameters,
+        &functions,
+        configured,
+        !result.ty.is_unit(),
+    );
     Some((parameters, extent, conditions))
 }

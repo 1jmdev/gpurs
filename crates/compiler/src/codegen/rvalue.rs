@@ -1,8 +1,8 @@
 use rustc_abi::{BackendRepr, FIRST_VARIANT, Primitive, Scalar, TagEncoding, VariantIdx, Variants};
 use rustc_middle::mir::{AggregateKind, BinOp, CastKind, Rvalue, UnOp};
+use rustc_middle::ty;
 use rustc_middle::ty::adjustment::PointerCoercion;
 use rustc_middle::ty::layout::TyAndLayout;
-use rustc_middle::ty;
 
 use super::function::{FunctionBuilder, integer_text};
 use super::layout::{bits, immediate_type, is_float, is_signed};
@@ -21,7 +21,10 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
             }
             Rvalue::Ref(_, _, place) | Rvalue::RawPtr(_, place) => {
                 let place = self.place(*place);
-                Operand { value: self.address(&place), layout: destination.layout }
+                Operand {
+                    value: self.address(&place),
+                    layout: destination.layout,
+                }
             }
             Rvalue::Reborrow(_, _, place) => {
                 let place = self.place(*place);
@@ -30,11 +33,25 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
             }
             Rvalue::Repeat(operand, count) => {
                 let operand = self.operand(operand);
-                let count = self.monomorphize(*count).try_to_target_usize(self.tcx).unwrap_or(0);
+                let count = self
+                    .monomorphize(*count)
+                    .try_to_target_usize(self.tcx)
+                    .unwrap_or(0);
                 return self.repeat(destination, &operand, count);
             }
             Rvalue::Aggregate(kind, operands) => {
-                let operands: Vec<_> = operands.iter().map(|operand| self.operand(operand)).collect();
+                let operands: Vec<_> = operands
+                    .iter()
+                    .map(|operand| {
+                        let operand = self.operand(operand);
+                        if matches!(operand.value, Value::Memory(..)) {
+                            let place = self.spill(&operand);
+                            self.load(&place)
+                        } else {
+                            operand
+                        }
+                    })
+                    .collect();
                 return self.aggregate(destination, kind, &operands);
             }
             Rvalue::BinaryOp(operation, operands) => {
@@ -66,8 +83,11 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
         if operand.layout.is_zst() || count == 0 {
             return;
         }
-        let (head, body, end) =
-            (self.fresh_label("repeat"), self.fresh_label("repeat"), self.fresh_label("repeat"));
+        let (head, body, end) = (
+            self.fresh_label("repeat"),
+            self.fresh_label("repeat"),
+            self.fresh_label("repeat"),
+        );
         let entry = self.label.clone();
         let next = format!("%next.{body}");
         self.emit(format!("br label %{head}"));
@@ -83,16 +103,29 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
         self.start_block(&end);
     }
 
-    fn aggregate(&mut self, destination: &Place<'tcx>, kind: &AggregateKind<'tcx>, operands: &[Operand<'tcx>]) {
+    fn aggregate(
+        &mut self,
+        destination: &Place<'tcx>,
+        kind: &AggregateKind<'tcx>,
+        operands: &[Operand<'tcx>],
+    ) {
         if let AggregateKind::RawPtr(..) = kind {
             let value = match &operands[1].value {
                 Value::Zst => Value::Scalar(operands[0].scalar().to_owned()),
                 meta => {
-                    let Value::Scalar(meta) = meta else { panic!("pointer metadata {meta:?}") };
+                    let Value::Scalar(meta) = meta else {
+                        panic!("pointer metadata {meta:?}")
+                    };
                     Value::Pair(operands[0].scalar().to_owned(), meta.clone())
                 }
             };
-            return self.store(destination, &Operand { value, layout: destination.layout });
+            return self.store(
+                destination,
+                &Operand {
+                    value,
+                    layout: destination.layout,
+                },
+            );
         }
         let (variant, active) = match *kind {
             AggregateKind::Adt(_, variant, _, _, active) => (variant, active),
@@ -133,11 +166,15 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
             };
             let sign = if is_signed(scalar) { "s" } else { "u" };
             let name = format!("llvm.{sign}{kind}.with.overflow.{ty}");
-            self.module.declare(format!("declare {{{ty}, i1}} @{name}({ty}, {ty})"));
+            self.module
+                .declare(format!("declare {{{ty}, i1}} @{name}({ty}, {ty})"));
             let pair = self.instruction(format!("call {{{ty}, i1}} @{name}({ty} {a}, {ty} {b})"));
             let value = self.instruction(format!("extractvalue {{{ty}, i1}} {pair}, 0"));
             let overflow = self.instruction(format!("extractvalue {{{ty}, i1}} {pair}, 1"));
-            return Operand { value: Value::Pair(value, overflow), layout: result };
+            return Operand {
+                value: Value::Pair(value, overflow),
+                layout: result,
+            };
         }
         let value = if is_float(scalar) {
             let flags = if self.fast_math { FAST_FLAGS } else { "" };
@@ -146,7 +183,8 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
                 BinOp::Sub => format!("fsub {flags}{ty} {a}, {b}"),
                 BinOp::Mul => format!("fmul {flags}{ty} {a}, {b}"),
                 BinOp::Div if self.fast_math && ty == "float" => {
-                    self.module.declare("declare float @llvm.nvvm.div.approx.f(float, float)");
+                    self.module
+                        .declare("declare float @llvm.nvvm.div.approx.f(float, float)");
                     format!("call float @llvm.nvvm.div.approx.f(float {a}, float {b})")
                 }
                 BinOp::Div => format!("fdiv {flags}{ty} {a}, {b}"),
@@ -166,8 +204,11 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
             self.instruction(instruction)
         } else {
             let signed = is_signed(scalar);
-            let (division, remainder, shift, less) =
-                if signed { ("sdiv", "srem", "ashr", "slt") } else { ("udiv", "urem", "lshr", "ult") };
+            let (division, remainder, shift, less) = if signed {
+                ("sdiv", "srem", "ashr", "slt")
+            } else {
+                ("udiv", "urem", "lshr", "ult")
+            };
             let instruction = match operation {
                 BinOp::Add | BinOp::AddUnchecked => format!("add {ty} {a}, {b}"),
                 BinOp::Sub | BinOp::SubUnchecked => format!("sub {ty} {a}, {b}"),
@@ -179,7 +220,11 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
                 BinOp::BitOr => format!("or {ty} {a}, {b}"),
                 BinOp::Shl | BinOp::ShlUnchecked | BinOp::Shr | BinOp::ShrUnchecked => {
                     let amount = self.shift_amount(right, scalar, operation);
-                    let kind = if matches!(operation, BinOp::Shl | BinOp::ShlUnchecked) { "shl" } else { shift };
+                    let kind = if matches!(operation, BinOp::Shl | BinOp::ShlUnchecked) {
+                        "shl"
+                    } else {
+                        shift
+                    };
                     format!("{kind} {ty} {a}, {amount}")
                 }
                 BinOp::Eq => format!("icmp eq {ty} {a}, {b}"),
@@ -201,12 +246,17 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
             };
             self.instruction(instruction)
         };
-        Operand { value: Value::Scalar(value), layout: result }
+        Operand {
+            value: Value::Scalar(value),
+            layout: result,
+        }
     }
 
     /// Shift amount cast to the shifted type; masked unless the shift is unchecked.
     fn shift_amount(&mut self, right: &Operand<'tcx>, scalar: Scalar, operation: BinOp) -> String {
-        let BackendRepr::Scalar(amount_scalar) = right.layout.backend_repr else { unreachable!() };
+        let BackendRepr::Scalar(amount_scalar) = right.layout.backend_repr else {
+            unreachable!()
+        };
         let amount = self.integer_cast(right.scalar(), amount_scalar, scalar, false);
         match operation {
             BinOp::Shl | BinOp::Shr => {
@@ -217,37 +267,63 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
         }
     }
 
-    fn compare(&mut self, a: &str, b: &str, ty: &str, less: &str, equal: &str, result: TyAndLayout<'tcx>) -> Operand<'tcx> {
+    fn compare(
+        &mut self,
+        a: &str,
+        b: &str,
+        ty: &str,
+        less: &str,
+        equal: &str,
+        result: TyAndLayout<'tcx>,
+    ) -> Operand<'tcx> {
         let is_less = self.instruction(format!("{less} {ty} {a}, {b}"));
         let is_equal = self.instruction(format!("{equal} {ty} {a}, {b}"));
         let not_less = self.instruction(format!("select i1 {is_equal}, i8 0, i8 1"));
         let value = self.instruction(format!("select i1 {is_less}, i8 -1, i8 {not_less}"));
-        Operand { value: Value::Scalar(value), layout: result }
+        Operand {
+            value: Value::Scalar(value),
+            layout: result,
+        }
     }
 
-    fn unary(&mut self, operation: UnOp, operand: &Operand<'tcx>, result: TyAndLayout<'tcx>) -> Operand<'tcx> {
+    fn unary(
+        &mut self,
+        operation: UnOp,
+        operand: &Operand<'tcx>,
+        result: TyAndLayout<'tcx>,
+    ) -> Operand<'tcx> {
         let value = match (operation, &operand.value) {
             (UnOp::PtrMetadata, Value::Pair(_, meta)) => meta.clone(),
             (UnOp::PtrMetadata, _) => return Operand::zst(result),
             (_, Value::Scalar(value)) => {
-                let BackendRepr::Scalar(scalar) = operand.layout.backend_repr else { unreachable!() };
+                let BackendRepr::Scalar(scalar) = operand.layout.backend_repr else {
+                    unreachable!()
+                };
                 let ty = immediate_type(scalar);
                 match operation {
                     UnOp::Not if ty == "i1" => self.instruction(format!("xor i1 {value}, true")),
                     UnOp::Not => self.instruction(format!("xor {ty} {value}, -1")),
-                    UnOp::Neg if is_float(scalar) => self.instruction(format!("fsub {ty} -0.0, {value}")),
+                    UnOp::Neg if is_float(scalar) => {
+                        self.instruction(format!("fsub {ty} -0.0, {value}"))
+                    }
                     UnOp::Neg => self.instruction(format!("sub {ty} 0, {value}")),
                     UnOp::PtrMetadata => unreachable!(),
                 }
             }
             (_, value) => panic!("unary operation on {value:?}"),
         };
-        Operand { value: Value::Scalar(value), layout: result }
+        Operand {
+            value: Value::Scalar(value),
+            layout: result,
+        }
     }
 
     pub fn integer_cast(&mut self, value: &str, from: Scalar, to: Scalar, signed: bool) -> String {
         let (from_type, to_type) = (immediate_type(from), immediate_type(to));
-        let (from_bits, to_bits) = (if from_type == "i1" { 1 } else { bits(from) }, if to_type == "i1" { 1 } else { bits(to) });
+        let (from_bits, to_bits) = (
+            if from_type == "i1" { 1 } else { bits(from) },
+            if to_type == "i1" { 1 } else { bits(to) },
+        );
         let instruction = match from_bits.cmp(&to_bits) {
             std::cmp::Ordering::Equal => return value.to_owned(),
             std::cmp::Ordering::Greater => "trunc",
@@ -257,12 +333,20 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
         self.instruction(format!("{instruction} {from_type} {value} to {to_type}"))
     }
 
-    fn cast(&mut self, kind: CastKind, operand: &Operand<'tcx>, result: TyAndLayout<'tcx>) -> Operand<'tcx> {
+    fn cast(
+        &mut self,
+        kind: CastKind,
+        operand: &Operand<'tcx>,
+        result: TyAndLayout<'tcx>,
+    ) -> Operand<'tcx> {
         let scalars = match (operand.layout.backend_repr, result.backend_repr) {
             (BackendRepr::Scalar(from), BackendRepr::Scalar(to)) => Some((from, to)),
             _ => None,
         };
-        let scalar_value = |value| Operand { value: Value::Scalar(value), layout: result };
+        let scalar_value = |value| Operand {
+            value: Value::Scalar(value),
+            layout: result,
+        };
         match kind {
             CastKind::IntToInt => {
                 let (from, to) = scalars.expect("integer cast");
@@ -278,7 +362,10 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
                     _ => operand.scalar().to_owned(),
                 };
                 let from_type = if from_type == "i1" { "i8" } else { from_type };
-                scalar_value(self.instruction(format!("{instruction} {from_type} {value} to {}", immediate_type(to))))
+                scalar_value(self.instruction(format!(
+                    "{instruction} {from_type} {value} to {}",
+                    immediate_type(to)
+                )))
             }
             CastKind::FloatToFloat => {
                 let (from, to) = scalars.expect("float cast");
@@ -298,10 +385,17 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
                 let (from, to) = scalars.expect("float to integer cast");
                 scalar_value(self.saturating_float_to_int(operand.scalar(), from, to))
             }
-            CastKind::PtrToPtr | CastKind::FnPtrToPtr => match (&operand.value, result.backend_repr) {
-                (Value::Pair(pointer, _), BackendRepr::Scalar(_)) => scalar_value(pointer.clone()),
-                (value, _) => Operand { value: value.clone(), layout: result },
-            },
+            CastKind::PtrToPtr | CastKind::FnPtrToPtr => {
+                match (&operand.value, result.backend_repr) {
+                    (Value::Pair(pointer, _), BackendRepr::Scalar(_)) => {
+                        scalar_value(pointer.clone())
+                    }
+                    (value, _) => Operand {
+                        value: value.clone(),
+                        layout: result,
+                    },
+                }
+            }
             CastKind::PointerExposeProvenance => {
                 scalar_value(self.instruction(format!("ptrtoint i8* {} to i64", operand.scalar())))
             }
@@ -309,12 +403,19 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
                 scalar_value(self.instruction(format!("inttoptr i64 {} to i8*", operand.scalar())))
             }
             CastKind::PointerCoercion(PointerCoercion::Unsize, _) => {
-                let source = operand.layout.ty.builtin_deref(true).map(|ty| ty.kind());
+                let source = operand.layout.ty.builtin_deref(true).map(|ty| {
+                    self.tcx
+                        .struct_tail_for_codegen(ty, ty::TypingEnv::fully_monomorphized())
+                        .kind()
+                });
                 match source {
                     Some(ty::Array(_, length)) => {
                         let length = length.try_to_target_usize(self.tcx).unwrap_or(0);
                         let value = Value::Pair(operand.scalar().to_owned(), length.to_string());
-                        Operand { value, layout: result }
+                        Operand {
+                            value,
+                            layout: result,
+                        }
                     }
                     _ => {
                         self.unsupported("unsizing to trait objects (dynamic dispatch)");
@@ -322,9 +423,13 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
                     }
                 }
             }
-            CastKind::PointerCoercion(PointerCoercion::MutToConstPointer | PointerCoercion::ArrayToPointer, _) => {
-                Operand { value: operand.value.clone(), layout: result }
-            }
+            CastKind::PointerCoercion(
+                PointerCoercion::MutToConstPointer | PointerCoercion::ArrayToPointer,
+                _,
+            ) => Operand {
+                value: operand.value.clone(),
+                layout: result,
+            },
             CastKind::PointerCoercion(..) => {
                 self.unsupported("function pointers");
                 Operand::zst(result)
@@ -341,9 +446,16 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
         let signed = is_signed(to);
         let width = bits(to) as u32;
         let (minimum, maximum): (i128, u128) = if signed {
-            (-(1i128 << (width - 1)), (1u128 << (width - 1)) - 1)
+            (i128::MIN >> (128 - width), (1u128 << (width - 1)) - 1)
         } else {
-            (0, if width == 128 { u128::MAX } else { (1u128 << width) - 1 })
+            (
+                0,
+                if width == 128 {
+                    u128::MAX
+                } else {
+                    (1u128 << width) - 1
+                },
+            )
         };
         let literal = |value: f64| float_text(value, float);
         let (low, high) = (literal(minimum as f64), literal(maximum as f64));
@@ -354,60 +466,107 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
         let is_nan = self.instruction(format!("fcmp uno {float} {value}, {value}"));
         let low_value = integer_text(minimum as u128, integer, width as u64);
         let high_value = integer_text(maximum, integer, width as u64);
-        let clamped = self.instruction(format!("select i1 {below}, {integer} {low_value}, {integer} {raw}"));
-        let clamped = self.instruction(format!("select i1 {above}, {integer} {high_value}, {integer} {clamped}"));
-        self.instruction(format!("select i1 {is_nan}, {integer} 0, {integer} {clamped}"))
+        let clamped = self.instruction(format!(
+            "select i1 {below}, {integer} {low_value}, {integer} {raw}"
+        ));
+        let clamped = self.instruction(format!(
+            "select i1 {above}, {integer} {high_value}, {integer} {clamped}"
+        ));
+        self.instruction(format!(
+            "select i1 {is_nan}, {integer} 0, {integer} {clamped}"
+        ))
     }
 
     pub fn set_discriminant(&mut self, place: &Place<'tcx>, variant: VariantIdx) {
         let layout = place.layout;
-        if layout.for_variant(&self.module.cx, variant).is_uninhabited() {
+        if layout
+            .for_variant(&self.module.cx, variant)
+            .is_uninhabited()
+        {
             return;
         }
         match layout.variants {
             Variants::Empty | Variants::Single { .. } => {}
-            Variants::Multiple { tag_field, tag_encoding: TagEncoding::Direct, .. } => {
+            Variants::Multiple {
+                tag_field,
+                tag_encoding: TagEncoding::Direct,
+                ..
+            } => {
                 let tag = self.field(place, tag_field);
-                let value = layout.ty.discriminant_for_variant(self.tcx, variant).map_or(0, |d| d.val);
+                let value = layout
+                    .ty
+                    .discriminant_for_variant(self.tcx, variant)
+                    .map_or(0, |d| d.val);
                 self.store_tag(&tag, tag.layout.size.truncate(value));
             }
             Variants::Multiple {
                 tag_field,
-                tag_encoding: TagEncoding::Niche { untagged_variant, ref niche_variants, niche_start },
+                tag_encoding:
+                    TagEncoding::Niche {
+                        untagged_variant,
+                        ref niche_variants,
+                        niche_start,
+                    },
                 ..
             } => {
                 if variant != untagged_variant {
                     let tag = self.field(place, tag_field);
                     let value = (variant.as_u32() - niche_variants.start.as_u32()) as u128;
-                    self.store_tag(&tag, tag.layout.size.truncate(value.wrapping_add(niche_start)));
+                    self.store_tag(
+                        &tag,
+                        tag.layout.size.truncate(value.wrapping_add(niche_start)),
+                    );
                 }
             }
         }
     }
 
     fn store_tag(&mut self, tag: &Place<'tcx>, value: u128) {
-        let BackendRepr::Scalar(scalar) = tag.layout.backend_repr else { unreachable!() };
+        let BackendRepr::Scalar(scalar) = tag.layout.backend_repr else {
+            unreachable!()
+        };
         let text = match scalar.primitive() {
             Primitive::Pointer(_) if value == 0 => "null".to_owned(),
             Primitive::Pointer(_) => format!("inttoptr (i64 {value} to i8*)"),
             _ => integer_text(value, immediate_type(scalar), bits(scalar)),
         };
-        let operand = Operand { value: Value::Scalar(text), layout: tag.layout };
+        let operand = Operand {
+            value: Value::Scalar(text),
+            layout: tag.layout,
+        };
         self.store(tag, &operand);
     }
 
     fn discriminant(&mut self, place: &Place<'tcx>, result: TyAndLayout<'tcx>) -> Operand<'tcx> {
         let layout = place.layout;
-        let BackendRepr::Scalar(target) = result.backend_repr else { unreachable!() };
+        let BackendRepr::Scalar(target) = result.backend_repr else {
+            unreachable!()
+        };
         let target_type = immediate_type(target);
         let constant = |value: u128| integer_text(value, target_type, bits(target));
         let (tag_scalar, tag_field, encoding) = match &layout.variants {
-            Variants::Empty => return Operand { value: Value::Scalar("undef".into()), layout: result },
-            Variants::Single { index } => {
-                let value = layout.ty.discriminant_for_variant(self.tcx, *index).map_or(index.as_u32() as u128, |d| d.val);
-                return Operand { value: Value::Scalar(constant(result.size.truncate(value))), layout: result };
+            Variants::Empty => {
+                return Operand {
+                    value: Value::Scalar("undef".into()),
+                    layout: result,
+                };
             }
-            Variants::Multiple { tag, tag_field, tag_encoding, .. } => (*tag, *tag_field, tag_encoding.clone()),
+            Variants::Single { index } => {
+                let value = layout
+                    .ty
+                    .discriminant_for_variant(self.tcx, *index)
+                    .map_or(index.as_u32() as u128, |d| d.val);
+                return Operand {
+                    value: Value::Scalar(constant(result.size.truncate(value))),
+                    layout: result,
+                };
+            }
+            Variants::Multiple {
+                tag,
+                tag_field,
+                tag_encoding,
+                ..
+            } => (*tag, *tag_field, tag_encoding.clone()),
         };
         let tag_place = self.field(place, tag_field);
         let tag = self.load(&tag_place).scalar().to_owned();
@@ -424,9 +583,16 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
         };
         let tag_type = immediate_type(tag_scalar);
         let value = match encoding {
-            TagEncoding::Direct => self.integer_cast(&tag, tag_scalar, target, is_signed(tag_scalar)),
-            TagEncoding::Niche { untagged_variant, niche_variants, niche_start } => {
-                let relative_max = (niche_variants.last.as_u32() - niche_variants.start.as_u32()) as u128;
+            TagEncoding::Direct => {
+                self.integer_cast(&tag, tag_scalar, target, is_signed(tag_scalar))
+            }
+            TagEncoding::Niche {
+                untagged_variant,
+                niche_variants,
+                niche_start,
+            } => {
+                let relative_max =
+                    (niche_variants.last.as_u32() - niche_variants.start.as_u32()) as u128;
                 let start = integer_text(niche_start, tag_type, bits(tag_scalar));
                 let relative = self.instruction(format!("sub {tag_type} {tag}, {start}"));
                 let limit = integer_text(relative_max, tag_type, bits(tag_scalar));
@@ -440,7 +606,10 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
                 ))
             }
         };
-        Operand { value: Value::Scalar(value), layout: result }
+        Operand {
+            value: Value::Scalar(value),
+            layout: result,
+        }
     }
 }
 

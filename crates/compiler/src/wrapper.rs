@@ -2,6 +2,7 @@
 
 use std::env;
 use std::ffi::{CStr, c_char, c_int};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::process::ExitCode;
 
 use rustc_driver::Callbacks;
@@ -16,10 +17,17 @@ impl Callbacks for Passthrough {}
 /// # Safety
 /// `arguments` must point to `count` NUL-terminated strings.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gpurs_compiler_main(count: c_int, arguments: *const *const c_char) -> c_int {
+pub unsafe extern "C" fn gpurs_compiler_main(
+    count: c_int,
+    arguments: *const *const c_char,
+) -> c_int {
     let arguments: Vec<String> = (0..count as usize)
         // SAFETY: guaranteed by the caller.
-        .map(|index| unsafe { CStr::from_ptr(*arguments.add(index)) }.to_string_lossy().into_owned())
+        .map(|index| {
+            unsafe { CStr::from_ptr(*arguments.add(index)) }
+                .to_string_lossy()
+                .into_owned()
+        })
         .collect();
     // `arguments[0]` is the wrapper and `arguments[1]` the rustc that Cargo would have run.
     let rustc = &arguments[1..];
@@ -36,14 +44,26 @@ pub unsafe extern "C" fn gpurs_compiler_main(count: c_int, arguments: *const *co
 }
 
 fn session(arguments: &[String], callbacks: &mut (dyn Callbacks + Send)) -> c_int {
-    let code = rustc_driver::catch_with_exit_code(|| {
-        rustc_driver::compiler_entrypoint(arguments, callbacks)
-    });
-    if code == ExitCode::SUCCESS { 0 } else { 1 }
+    match catch_unwind(AssertUnwindSafe(|| {
+        rustc_driver::catch_with_exit_code(|| {
+            rustc_driver::compiler_entrypoint(arguments, callbacks)
+        })
+    })) {
+        Ok(ExitCode::SUCCESS) => 0,
+        Ok(_) => 1,
+        Err(_) => {
+            eprintln!("error: gpurs compiler failed while compiling GPU code");
+            eprintln!("  = note: this is a compiler error, not an error in your Rust program");
+            1
+        }
+    }
 }
 
 fn value<'a>(arguments: &'a [String], flag: &str) -> Option<&'a str> {
-    arguments.windows(2).find(|pair| pair[0] == flag).map(|pair| pair[1].as_str())
+    arguments
+        .windows(2)
+        .find(|pair| pair[0] == flag)
+        .map(|pair| pair[1].as_str())
 }
 
 /// The crate name if this invocation compiles a binary or example of the target package.
@@ -76,6 +96,8 @@ fn device_arguments(arguments: &[String]) -> Vec<String> {
         "gpurs_device".to_owned(),
         "-Zcrate-attr=feature(register_tool)".to_owned(),
         "-Zcrate-attr=register_tool(gpurs_tool)".to_owned(),
+        "-Zmir-opt-level=0".to_owned(),
+        "-Coverflow-checks=on".to_owned(),
         "--emit=metadata".to_owned(),
         "--out-dir".to_owned(),
         scratch.display().to_string(),

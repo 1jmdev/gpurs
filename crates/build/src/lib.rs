@@ -15,9 +15,8 @@
 use std::env;
 use std::ffi::{CString, c_char, c_int};
 use std::fs;
-use std::io::BufRead;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use gpurs_artifact::{ARTIFACT_SYMBOL, Artifact};
 use object::write::{Object, StandardSection, Symbol, SymbolSection};
@@ -35,9 +34,12 @@ pub fn compile(architecture: &str) {
         return;
     }
     if !architecture.starts_with("sm_") || architecture[3..].parse::<u32>().is_err() {
-        fail(&format!("GPU architecture must look like `sm_89`, found `{architecture}`"));
+        fail(&format!(
+            "GPU architecture must look like `sm_89`, found `{architecture}`"
+        ));
     }
-    let variable = |name: &str| env::var(name).unwrap_or_else(|_| fail(&format!("{name} is not set")));
+    let variable =
+        |name: &str| env::var(name).unwrap_or_else(|_| fail(&format!("{name} is not set")));
     let manifest_directory = PathBuf::from(variable("CARGO_MANIFEST_DIR"));
     let out_directory = PathBuf::from(variable("OUT_DIR"));
     let package = variable("CARGO_PKG_NAME");
@@ -52,7 +54,7 @@ pub fn compile(architecture: &str) {
 
     let mut check = isolated_cargo(&variable("CARGO"));
     check
-        .args(["check", "--bins", "--examples", "--message-format=json-diagnostic-rendered-ansi"])
+        .args(["check", "--quiet", "--bins", "--examples", "--message-format=json-diagnostic-rendered-ansi"])
         .arg("-p")
         .arg(&package)
         .arg("--manifest-path")
@@ -62,9 +64,9 @@ pub fn compile(architecture: &str) {
         .args((variable("PROFILE") == "release").then_some("--release"))
         .env("RUSTC", variable("RUSTC"))
         .env("RUSTC_WRAPPER", &wrapper)
-        .env("CARGO_ENCODED_RUSTFLAGS", format!("-Zalways-encode-mir\u{1f}-Cmetadata={}", identity(architecture)))
+        .env("CARGO_ENCODED_RUSTFLAGS", format!("-Zalways-encode-mir\u{1f}-Zmir-opt-level=0\u{1f}-Coverflow-checks=on\u{1f}-Cmetadata={}", identity(architecture)))
         // librustc_driver uses initial-exec TLS, which needs room when loaded with dlopen.
-        .env("GLIBC_TUNABLES", "glibc.rtld.optional_static_tls=67108864")
+        .env("GLIBC_TUNABLES", "glibc.rtld.optional_static_tls=65536")
         .env("GPURS_WRAPPER", "1")
         .env("GPURS_DEVICE_BUILD", "1")
         .env("GPURS_PACKAGE", &package)
@@ -72,11 +74,17 @@ pub fn compile(architecture: &str) {
         .env("GPURS_ARTIFACTS", &artifacts);
     let crates = run_check(check, &package);
 
-    let mut artifact = Artifact { architecture: architecture.to_owned(), ..Artifact::default() };
+    let mut artifact = Artifact {
+        architecture: architecture.to_owned(),
+        ..Artifact::default()
+    };
     for name in crates {
         let path = artifacts.join(format!("{name}.gpurs"));
-        let bytes = fs::read(&path)
-            .unwrap_or_else(|_| fail(&format!("the gpurs compiler produced no artifact for `{name}`")));
+        let bytes = fs::read(&path).unwrap_or_else(|_| {
+            fail(&format!(
+                "the gpurs compiler produced no artifact for `{name}`"
+            ))
+        });
         artifact.merge(Artifact::decode(&bytes).unwrap_or_else(|error| fail(&error.to_string())));
     }
     let object = out_directory.join("gpurs_artifact.o");
@@ -96,8 +104,30 @@ fn fail(message: &str) -> ! {
 
 /// Acts as rustc for the private check by delegating to the gpurs compiler library.
 fn run_wrapper() -> i32 {
-    let arguments: Vec<CString> = env::args()
-        .map(|argument| CString::new(argument).expect("arguments contain no NUL bytes"))
+    let arguments: Vec<_> = env::args_os().collect();
+    let target = env::var("CARGO_PKG_NAME").ok() == env::var("GPURS_PACKAGE").ok()
+        && arguments
+            .windows(2)
+            .any(|pair| pair[0] == "--crate-type" && pair[1] == "bin")
+        && !arguments
+            .iter()
+            .any(|argument| argument == "build_script_build")
+        && !arguments
+            .iter()
+            .any(|argument| argument.to_string_lossy().starts_with("--print"));
+    if !target {
+        return Command::new(&arguments[1])
+            .args(&arguments[2..])
+            .status()
+            .unwrap_or_else(|error| fail(&format!("cannot run rustc: {error}")))
+            .code()
+            .unwrap_or(1);
+    }
+    let arguments: Vec<CString> = arguments
+        .iter()
+        .map(|argument| {
+            CString::new(argument.as_encoded_bytes()).expect("arguments contain no NUL bytes")
+        })
         .collect();
     let pointers: Vec<*const c_char> = arguments.iter().map(|argument| argument.as_ptr()).collect();
     // SAFETY: the library is the gpurs compiler built for this toolchain by gpurs-build's
@@ -145,16 +175,13 @@ fn identity(architecture: &str) -> String {
 
 /// Runs the device check and returns the crate names of the package's binaries and examples.
 fn run_check(mut check: Command, package: &str) -> Vec<String> {
-    let mut child = check
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
+    let output = check
+        .output()
         .unwrap_or_else(|error| fail(&format!("cannot run cargo: {error}")));
     let mut crates = Vec::new();
     let mut diagnostics = String::new();
-    let output = child.stdout.take().expect("stdout is piped");
-    for line in std::io::BufReader::new(output).lines().map_while(Result::ok) {
-        let Ok(message) = serde_json::from_str::<serde_json::Value>(&line) else {
+    for line in output.stdout.split(|byte| *byte == b'\n') {
+        let Ok(message) = serde_json::from_slice::<serde_json::Value>(line) else {
             continue;
         };
         let target = &message["target"];
@@ -166,7 +193,12 @@ fn run_check(mut check: Command, package: &str) -> Vec<String> {
         });
         match message["reason"].as_str() {
             Some("compiler-artifact") if executable && ours => {
-                crates.push(target["name"].as_str().unwrap_or_default().replace('-', "_"));
+                crates.push(
+                    target["name"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .replace('-', "_"),
+                );
             }
             Some("compiler-message") if message["message"]["level"] == "error" => {
                 diagnostics.push_str(message["message"]["rendered"].as_str().unwrap_or_default());
@@ -174,9 +206,9 @@ fn run_check(mut check: Command, package: &str) -> Vec<String> {
             _ => {}
         }
     }
-    let status = child.wait().unwrap_or_else(|error| fail(&error.to_string()));
-    if !status.success() {
+    if !output.status.success() {
         eprint!("{diagnostics}");
+        eprint!("{}", String::from_utf8_lossy(&output.stderr));
         fail("GPU compilation failed");
     }
     crates
@@ -198,6 +230,8 @@ fn write_object(artifact: &[u8], path: &Path) {
         section: SymbolSection::Section(section),
         flags: SymbolFlags::None,
     });
-    let bytes = object.write().unwrap_or_else(|error| fail(&error.to_string()));
+    let bytes = object
+        .write()
+        .unwrap_or_else(|error| fail(&error.to_string()));
     fs::write(path, bytes).unwrap_or_else(|error| fail(&error.to_string()));
 }

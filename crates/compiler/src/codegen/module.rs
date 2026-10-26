@@ -28,7 +28,7 @@ pub struct ModuleBuilder<'tcx> {
     pub cx: Cx<'tcx>,
     functions: FxHashMap<Instance<'tcx>, String>,
     queue: Vec<Instance<'tcx>>,
-    definitions: String,
+    pub(super) definitions: String,
     declarations: BTreeSet<String>,
     globals: String,
     pub(super) allocations: FxHashMap<AllocId, (String, String)>,
@@ -78,10 +78,6 @@ impl<'tcx> ModuleBuilder<'tcx> {
         self.globals.push('\n');
     }
 
-    pub(super) fn define(&mut self, definition: &str) {
-        self.definitions.push_str(definition);
-    }
-
     pub fn unique(&mut self, prefix: &str) -> String {
         self.counter += 1;
         format!("{prefix}{}", self.counter)
@@ -99,7 +95,10 @@ impl<'tcx> ModuleBuilder<'tcx> {
             (pass_mode(layout), layout)
         };
         Signature {
-            arguments: body.args_iter().map(|local| layout(body.local_decls[local].ty)).collect(),
+            arguments: body
+                .args_iter()
+                .map(|local| layout(body.local_decls[local].ty))
+                .collect(),
             result: layout(body.return_ty()),
         }
     }
@@ -115,14 +114,32 @@ impl<'tcx> ModuleBuilder<'tcx> {
         for declaration in &self.declarations {
             writeln!(module, "{declaration}").unwrap();
         }
-        writeln!(module, "declare void @llvm.memcpy.p0i8.p0i8.i64(i8*, i8*, i64, i1)").unwrap();
-        writeln!(module, "declare void @llvm.memmove.p0i8.p0i8.i64(i8*, i8*, i64, i1)").unwrap();
-        writeln!(module, "declare void @llvm.memset.p0i8.i64(i8*, i8, i64, i1)").unwrap();
+        writeln!(
+            module,
+            "declare void @llvm.memcpy.p0i8.p0i8.i64(i8*, i8*, i64, i1)"
+        )
+        .unwrap();
+        writeln!(
+            module,
+            "declare void @llvm.memmove.p0i8.p0i8.i64(i8*, i8*, i64, i1)"
+        )
+        .unwrap();
+        writeln!(
+            module,
+            "declare void @llvm.memset.p0i8.i64(i8*, i8, i64, i1)"
+        )
+        .unwrap();
         module.push_str(&self.globals);
         module.push_str(&self.definitions);
-        let annotations: Vec<String> =
-            (0..self.kernels.len()).map(|index| format!("!{index}")).collect();
-        writeln!(module, "!nvvm.annotations = !{{{}}}", annotations.join(", ")).unwrap();
+        let annotations: Vec<String> = (0..self.kernels.len())
+            .map(|index| format!("!{index}"))
+            .collect();
+        writeln!(
+            module,
+            "!nvvm.annotations = !{{{}}}",
+            annotations.join(", ")
+        )
+        .unwrap();
         for (index, kernel) in self.kernels.iter().enumerate() {
             writeln!(module, "!{index} = !{{{kernel}, !\"kernel\", i32 1}}").unwrap();
         }
@@ -143,7 +160,9 @@ impl Signature<'_> {
         for (index, (mode, _)) in self.arguments.iter().enumerate() {
             match mode {
                 PassMode::Ignore => {}
-                PassMode::Direct(scalar) => parameters.push(format!("{} %a{index}", immediate_type(*scalar))),
+                PassMode::Direct(scalar) => {
+                    parameters.push(format!("{} %a{index}", immediate_type(*scalar)))
+                }
                 PassMode::Pair(a, b) => {
                     parameters.push(format!("{} %a{index}.0", immediate_type(*a)));
                     parameters.push(format!("{} %a{index}.1", immediate_type(*b)));

@@ -31,7 +31,10 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
             self.span,
         );
         let destination = self.place(destination);
-        let arguments: Vec<_> = arguments.iter().map(|argument| self.operand(&argument.node)).collect();
+        let arguments: Vec<_> = arguments
+            .iter()
+            .map(|argument| self.operand(&argument.node))
+            .collect();
         if !self.intrinsic(instance, &arguments, &destination) {
             match instance.def {
                 ty::InstanceKind::Virtual(..) | ty::InstanceKind::LlvmIntrinsic(..) => {
@@ -42,7 +45,11 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
                     if self.tcx.intrinsic(def_id).unwrap().must_be_overridden {
                         self.unsupported(&format!("intrinsic `{}`", self.tcx.item_name(def_id)));
                     } else {
-                        self.invoke(Instance::new_raw(def_id, instance.args), &arguments, &destination);
+                        self.invoke(
+                            Instance::new_raw(def_id, instance.args),
+                            &arguments,
+                            &destination,
+                        );
                     }
                 }
                 _ => self.invoke(instance, &arguments, &destination),
@@ -51,8 +58,31 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
         self.branch(target);
     }
 
-    pub fn invoke(&mut self, instance: Instance<'tcx>, arguments: &[Operand<'tcx>], destination: &Place<'tcx>) {
+    pub fn invoke(
+        &mut self,
+        instance: Instance<'tcx>,
+        arguments: &[Operand<'tcx>],
+        destination: &Place<'tcx>,
+    ) {
         let signature = self.module.signature(instance);
+        let mut arguments = arguments.to_vec();
+        if self.tcx.instance_mir(instance.def).spread_arg.is_none()
+            && let Some(last) = arguments.last()
+            && let ty::Tuple(fields) = last.layout.ty.kind()
+            && (arguments.len() != signature.arguments.len()
+                || signature
+                    .arguments
+                    .last()
+                    .is_some_and(|(_, layout)| layout.ty != last.layout.ty))
+        {
+            let count = fields.len();
+            let last = arguments.pop().unwrap();
+            let tuple = self.spill(&last);
+            for index in 0..count {
+                let field = self.field(&tuple, index.into());
+                arguments.push(self.load(&field));
+            }
+        }
         let name = self.module.function(instance);
         let mut parameters = Vec::new();
         let result = match signature.result.0 {
@@ -99,6 +129,12 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
                 Value::Pair(first, second)
             }
         };
-        self.store(destination, &Operand { value, layout: destination.layout });
+        self.store(
+            destination,
+            &Operand {
+                value,
+                layout: destination.layout,
+            },
+        );
     }
 }

@@ -3,8 +3,8 @@ use std::fmt::Write;
 use gpurs_artifact::Failure;
 use rustc_index::IndexVec;
 use rustc_middle::mir::{
-    self, AssertKind, BasicBlock, Body, Local, NonDivergingIntrinsic, StatementKind, TerminatorKind,
-    traversal,
+    self, AssertKind, BasicBlock, Body, Local, NonDivergingIntrinsic, StatementKind,
+    TerminatorKind, traversal,
 };
 use rustc_middle::ty::layout::{LayoutOf, TyAndLayout};
 use rustc_middle::ty::{EarlyBinder, Instance, Ty, TyCtxt, TypeFoldable, TypingEnv};
@@ -88,8 +88,16 @@ impl<'m, 'tcx> FunctionBuilder<'m, 'tcx> {
         let name = format!("%s{}", self.counter);
         let size = layout.size.bytes().max(1);
         let align = layout.align.abi.bytes();
-        writeln!(self.allocas, "  {name}.slot = alloca [{size} x i8], align {align}").unwrap();
-        writeln!(self.allocas, "  {name} = bitcast [{size} x i8]* {name}.slot to i8*").unwrap();
+        writeln!(
+            self.allocas,
+            "  {name}.slot = alloca [{size} x i8], align {align}"
+        )
+        .unwrap();
+        writeln!(
+            self.allocas,
+            "  {name} = bitcast [{size} x i8]* {name}.slot to i8*"
+        )
+        .unwrap();
         Place::new(name, layout)
     }
 
@@ -98,7 +106,12 @@ impl<'m, 'tcx> FunctionBuilder<'m, 'tcx> {
     }
 
     pub fn unsupported(&self, what: &str) {
-        self.error(format!("{what} is not supported in GPU code"));
+        crate::diagnostic::error(
+            self.tcx,
+            self.span,
+            format!("{what} is not supported in GPU code"),
+            "use a supported Rust operation or move this operation to the host before launching the kernel",
+        );
     }
 
     /// Records a device failure and terminates the thread.
@@ -112,8 +125,12 @@ impl<'m, 'tcx> FunctionBuilder<'m, 'tcx> {
         for (local, declaration) in self.body.local_decls.iter_enumerated() {
             let layout = self.layout_of(self.monomorphize(declaration.ty));
             let place = if layout.is_zst() || layout.is_unsized() {
-                Place::new(format!("inttoptr (i64 {} to i8*)", layout.align.abi.bytes()), layout)
-            } else if local == mir::RETURN_PLACE && matches!(signature.result.0, PassMode::Indirect) {
+                Place::new(
+                    format!("inttoptr (i64 {} to i8*)", layout.align.abi.bytes()),
+                    layout,
+                )
+            } else if local == mir::RETURN_PLACE && matches!(signature.result.0, PassMode::Indirect)
+            {
                 Place::new("%result".to_owned(), layout)
             } else if let Some(index) = argument_index(self.body, local)
                 && let PassMode::Indirect = signature.arguments[index].0
@@ -131,7 +148,13 @@ impl<'m, 'tcx> FunctionBuilder<'m, 'tcx> {
                 PassMode::Pair(..) => Value::Pair(format!("%a{index}.0"), format!("%a{index}.1")),
                 PassMode::Ignore | PassMode::Indirect => continue,
             };
-            self.store(&place, &Operand { value, layout: place.layout });
+            self.store(
+                &place,
+                &Operand {
+                    value,
+                    layout: place.layout,
+                },
+            );
         }
         self.emit("br label %bb0");
 
@@ -175,7 +198,10 @@ impl<'m, 'tcx> FunctionBuilder<'m, 'tcx> {
                 let place = self.place(*destination);
                 self.rvalue(&place, rvalue);
             }
-            StatementKind::SetDiscriminant { place, variant_index } => {
+            StatementKind::SetDiscriminant {
+                place,
+                variant_index,
+            } => {
                 let place = self.place(**place);
                 self.set_discriminant(&place, *variant_index);
             }
@@ -199,14 +225,19 @@ impl<'m, 'tcx> FunctionBuilder<'m, 'tcx> {
         }
     }
 
-    fn terminator(&mut self, terminator: &TerminatorKind<'tcx>, result: &(PassMode, TyAndLayout<'tcx>)) {
+    fn terminator(
+        &mut self,
+        terminator: &TerminatorKind<'tcx>,
+        result: &(PassMode, TyAndLayout<'tcx>),
+    ) {
         match terminator {
             TerminatorKind::Goto { target, .. } => self.branch(*target),
             TerminatorKind::FalseEdge { real_target, .. }
             | TerminatorKind::FalseUnwind { real_target, .. } => self.branch(*real_target),
             TerminatorKind::SwitchInt { discr, targets } => {
                 let discriminant = self.operand(discr);
-                let rustc_abi::BackendRepr::Scalar(scalar) = discriminant.layout.backend_repr else {
+                let rustc_abi::BackendRepr::Scalar(scalar) = discriminant.layout.backend_repr
+                else {
                     unreachable!("switch on a non-scalar `{}`", discriminant.layout.ty)
                 };
                 let ty = immediate_type(scalar);
@@ -251,7 +282,13 @@ impl<'m, 'tcx> FunctionBuilder<'m, 'tcx> {
             TerminatorKind::Unreachable
             | TerminatorKind::UnwindResume
             | TerminatorKind::UnwindTerminate(_) => self.emit("unreachable"),
-            TerminatorKind::Assert { cond, expected, msg, target, .. } => {
+            TerminatorKind::Assert {
+                cond,
+                expected,
+                msg,
+                target,
+                ..
+            } => {
                 if !self.tcx.sess.overflow_checks() && msg.is_optional_overflow_check() {
                     return self.branch(*target);
                 }
@@ -261,7 +298,10 @@ impl<'m, 'tcx> FunctionBuilder<'m, 'tcx> {
                     true => (format!("bb{}", target.as_usize()), failure.clone()),
                     false => (failure.clone(), format!("bb{}", target.as_usize())),
                 };
-                self.emit(format!("br i1 {}, label %{on_true}, label %{on_false}", condition.scalar()));
+                self.emit(format!(
+                    "br i1 {}, label %{on_true}, label %{on_false}",
+                    condition.scalar()
+                ));
                 self.start_block(&failure);
                 self.fail(match **msg {
                     AssertKind::BoundsCheck { .. } => Failure::BoundsCheck,
@@ -275,11 +315,27 @@ impl<'m, 'tcx> FunctionBuilder<'m, 'tcx> {
             TerminatorKind::Drop { place, target, .. } => {
                 let ty = self.monomorphize(place.ty(self.body, self.tcx).ty);
                 if ty.needs_drop(self.tcx, TypingEnv::fully_monomorphized()) {
-                    self.error(format!("values of `{ty}` need a destructor, which GPU code cannot run"));
+                    let place = self.place(*place);
+                    let argument = Operand {
+                        value: self.address(&place),
+                        layout: self.layout_of(Ty::new_mut_ptr(self.tcx, ty)),
+                    };
+                    let destination = self.temporary(self.layout_of(self.tcx.types.unit));
+                    self.invoke(
+                        Instance::resolve_drop_glue(self.tcx, ty),
+                        &[argument],
+                        &destination,
+                    );
                 }
                 self.branch(*target);
             }
-            TerminatorKind::Call { func, args, destination, target, .. } => {
+            TerminatorKind::Call {
+                func,
+                args,
+                destination,
+                target,
+                ..
+            } => {
                 self.call(func, args, *destination, *target);
             }
             TerminatorKind::TailCall { func, args, .. } => {
@@ -317,7 +373,9 @@ impl<'m, 'tcx> FunctionBuilder<'m, 'tcx> {
 }
 
 fn argument_index(body: &Body<'_>, local: Local) -> Option<usize> {
-    (1..=body.arg_count).contains(&local.as_usize()).then(|| local.as_usize() - 1)
+    (1..=body.arg_count)
+        .contains(&local.as_usize())
+        .then(|| local.as_usize() - 1)
 }
 
 /// Integer literal of `bits` width, printed as the signed value LLVM expects.

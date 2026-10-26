@@ -20,6 +20,7 @@ extern crate rustc_span;
 
 mod codegen;
 mod device;
+mod diagnostic;
 mod discovery;
 mod nvvm;
 mod paths;

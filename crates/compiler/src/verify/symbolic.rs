@@ -18,7 +18,11 @@ pub struct Polynomial(pub BTreeMap<Vec<Atom>, i128>);
 
 impl Polynomial {
     pub fn constant(value: i128) -> Self {
-        Polynomial(if value == 0 { BTreeMap::new() } else { BTreeMap::from([(Vec::new(), value)]) })
+        Polynomial(if value == 0 {
+            BTreeMap::new()
+        } else {
+            BTreeMap::from([(Vec::new(), value)])
+        })
     }
 
     pub fn atom(atom: Atom) -> Self {
@@ -60,5 +64,25 @@ impl Polynomial {
     pub fn variable(&self) -> Option<&Atom> {
         let (term, coefficient) = self.0.first_key_value()?;
         (self.0.len() == 1 && *coefficient == 1 && term.len() == 1).then(|| &term[0])
+    }
+
+    pub fn divide(&self, divisor: &Self) -> Option<Self> {
+        let (factors, coefficient) = divisor.0.first_key_value()?;
+        if divisor.0.len() != 1 || *coefficient <= 0 {
+            return None;
+        }
+        let mut result = BTreeMap::new();
+        for (term, value) in &self.0 {
+            if value % coefficient != 0 {
+                return None;
+            }
+            let mut remainder = term.clone();
+            for factor in factors {
+                let position = remainder.iter().position(|atom| atom == factor)?;
+                remainder.remove(position);
+            }
+            result.insert(remainder, value / coefficient);
+        }
+        Some(Polynomial(result))
     }
 }

@@ -27,9 +27,13 @@ impl DeviceView {
     fn compile(&self, tcx: TyCtxt<'_>) -> Result<(), String> {
         let architecture = env::var("GPURS_ARCHITECTURE").unwrap();
         let directory = PathBuf::from(env::var_os("GPURS_ARTIFACTS").unwrap());
-        let definitions: Vec<_> = tcx.hir_crate_items(()).definitions().filter_map(|def_id| {
-            marker(tcx, def_id.to_def_id(), "device").map(|tail| (def_id, tail))
-        }).collect();
+        let definitions: Vec<_> = tcx
+            .hir_crate_items(())
+            .definitions()
+            .filter_map(|def_id| {
+                marker(tcx, def_id.to_def_id(), "device").map(|tail| (def_id, tail))
+            })
+            .collect();
         for (def_id, _) in &definitions {
             tcx.ensure_ok().mir_borrowck(*def_id);
         }
@@ -40,22 +44,39 @@ impl DeviceView {
             let Some((def_id, _)) = definitions.iter().find(|(def_id, tail)| {
                 *tail == launch.tail && paths::module_path(tcx, *def_id) == launch.module
             }) else {
-                tcx.dcx().err(format!("GPU definition for `{}` was not found in the device view", launch.key));
+                tcx.dcx().err(format!(
+                    "GPU definition for `{}` was not found in the device view",
+                    launch.key
+                ));
                 continue;
             };
-            let arguments = launch.generics.iter().map(|argument| transfer::restore(tcx, argument)).collect::<Option<Vec<_>>>();
+            let arguments = launch
+                .generics
+                .iter()
+                .map(|argument| transfer::restore(tcx, argument))
+                .collect::<Option<Vec<_>>>();
             let Some(arguments) = arguments else {
-                tcx.dcx().err(format!("cannot restore the concrete types of `{}` in the device view", launch.key));
+                tcx.dcx().err(format!(
+                    "cannot restore the concrete types of `{}` in the device view",
+                    launch.key
+                ));
                 continue;
             };
             let mut arguments = arguments.into_iter();
-            let args = GenericArgs::for_item(tcx, def_id.to_def_id(), |parameter, _| match parameter.kind {
-                ty::GenericParamDefKind::Type { .. } => arguments.next().expect("discovered type argument").into(),
-                ty::GenericParamDefKind::Lifetime => tcx.lifetimes.re_erased.into(),
-                ty::GenericParamDefKind::Const { .. } => unreachable!("GPU const generics"),
-            });
+            let args =
+                GenericArgs::for_item(tcx, def_id.to_def_id(), |parameter, _| {
+                    match parameter.kind {
+                        ty::GenericParamDefKind::Type { .. } => {
+                            arguments.next().expect("discovered type argument").into()
+                        }
+                        ty::GenericParamDefKind::Lifetime => tcx.lifetimes.re_erased.into(),
+                        ty::GenericParamDefKind::Const { .. } => unreachable!("GPU const generics"),
+                    }
+                });
             let instance = Instance::new_raw(def_id.to_def_id(), args);
-            if let Some((parameters, extent, conditions)) = verify::kernel(tcx, instance, launch.configured) {
+            if let Some((parameters, extent, conditions)) =
+                verify::kernel(tcx, instance, launch.configured)
+            {
                 kernels.push(module.kernel(KernelPlan {
                     instance,
                     key: launch.key.clone(),
@@ -68,7 +89,11 @@ impl DeviceView {
         }
         tcx.dcx().abort_if_errors();
         let mut artifact = Artifact {
-            compiler: format!("gpurs-{} {}", env!("CARGO_PKG_VERSION"), rustc_interface::util::rustc_version_str().unwrap_or("unknown rustc")),
+            compiler: format!(
+                "gpurs-{} {}",
+                env!("CARGO_PKG_VERSION"),
+                rustc_interface::util::rustc_version_str().unwrap_or("unknown rustc")
+            ),
             architecture: architecture.clone(),
             types: self.host.types.clone(),
             modules: Vec::new(),
@@ -86,12 +111,16 @@ impl DeviceView {
             let cubin = nvvm::cubin(&toolkit, &ptx, &architecture, &scratch)?;
             if env::var_os("GPURS_KEEP_IR").is_none() {
                 fs::remove_file(scratch.join("kernels.ptx")).map_err(|error| error.to_string())?;
-                fs::remove_file(scratch.join("kernels.cubin")).map_err(|error| error.to_string())?;
+                fs::remove_file(scratch.join("kernels.cubin"))
+                    .map_err(|error| error.to_string())?;
             }
             artifact.modules.push(Module { cubin, kernels });
         }
-        fs::write(directory.join(format!("{}.gpurs", self.crate_name)), artifact.encode())
-            .map_err(|error| error.to_string())
+        fs::write(
+            directory.join(format!("{}.gpurs", self.crate_name)),
+            artifact.encode(),
+        )
+        .map_err(|error| error.to_string())
     }
 }
 
@@ -110,9 +139,16 @@ pub fn marker(tcx: TyCtxt<'_>, def_id: DefId, name: &str) -> Option<String> {
         Some(def_id) => tcx.hir_attrs(tcx.local_def_id_to_hir_id(def_id)),
         None => tcx.attrs_for_def(def_id),
     };
-    attributes.iter().find(|attribute| {
-        attribute.path_matches(&[Symbol::intern("gpurs_tool"), Symbol::intern(name)])
-    }).map(|attribute| attribute.value_str().map_or_else(String::new, |value| value.to_string()))
+    attributes
+        .iter()
+        .find(|attribute| {
+            attribute.path_matches(&[Symbol::intern("gpurs_tool"), Symbol::intern(name)])
+        })
+        .map(|attribute| {
+            attribute
+                .value_str()
+                .map_or_else(String::new, |value| value.to_string())
+        })
 }
 
 pub fn is_device(tcx: TyCtxt<'_>, def_id: DefId) -> bool {

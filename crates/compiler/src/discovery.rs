@@ -52,7 +52,8 @@ impl HostView {
                 Ok(descriptor) if !self.types.contains(&descriptor) => self.types.push(descriptor),
                 Ok(_) => {}
                 Err(message) => {
-                    tcx.dcx().err(format!("cannot transfer `{ty}` to the GPU: {message}"));
+                    tcx.dcx()
+                        .err(format!("cannot transfer `{ty}` to the GPU: {message}"));
                 }
             }
             return;
@@ -62,7 +63,13 @@ impl HostView {
         }
         let body = tcx.instance_mir(instance.def);
         for block in body.basic_blocks.iter() {
-            let TerminatorKind::Call { func, args, fn_span, .. } = &block.terminator().kind else {
+            let TerminatorKind::Call {
+                func,
+                args,
+                fn_span,
+                ..
+            } = &block.terminator().kind
+            else {
                 continue;
             };
             let callee = instance.instantiate_mir_and_normalize_erasing_regions(
@@ -70,19 +77,31 @@ impl HostView {
                 TypingEnv::fully_monomorphized(),
                 EarlyBinder::bind(tcx, func.ty(body, tcx)),
             );
-            let ty::FnDef(callee, callee_args) = *callee.kind() else { continue };
+            let ty::FnDef(callee, callee_args) = *callee.kind() else {
+                continue;
+            };
             if !paths::is(tcx, callee, "gpurs::launch::kernel") {
                 continue;
             }
-            let types: Vec<Ty<'tcx>> = callee_args.no_bound_vars().expect("monomorphic").types().collect();
-            let (Some(module), Some(tail)) =
-                (string(tcx, body, &args[1].node), string(tcx, body, &args[2].node))
-            else {
-                tcx.dcx().span_err(*fn_span, "gpurs launcher arguments must be string literals");
+            let types: Vec<Ty<'tcx>> = callee_args
+                .no_bound_vars()
+                .expect("monomorphic")
+                .types()
+                .collect();
+            let (Some(module), Some(tail)) = (
+                string(tcx, body, &args[1].node),
+                string(tcx, body, &args[2].node),
+            ) else {
+                tcx.dcx()
+                    .span_err(*fn_span, "gpurs launcher arguments must be string literals");
                 continue;
             };
-            let ty::Tuple(elements) = types[1].kind() else { continue };
-            let generics = elements.iter().map(|element| transfer::portable(tcx, element));
+            let ty::Tuple(elements) = types[1].kind() else {
+                continue;
+            };
+            let generics = elements
+                .iter()
+                .map(|element| transfer::portable(tcx, element));
             let generics = match generics.collect::<Result<Vec<_>, _>>() {
                 Ok(generics) => generics,
                 Err(message) => {
@@ -97,7 +116,13 @@ impl HostView {
             };
             let configured = matches!(types[0].kind(), ty::Adt(adt, _)
                 if paths::is(tcx, adt.did(), "gpurs::stream::ConfiguredStream"));
-            let launch = Launch { key: format!("{module}::{tail}{suffix}"), module, tail, generics, configured };
+            let launch = Launch {
+                key: format!("{module}::{tail}{suffix}"),
+                module,
+                tail,
+                generics,
+                configured,
+            };
             if !self.launches.contains(&launch) {
                 self.launches.push(launch);
             }
@@ -105,28 +130,48 @@ impl HostView {
     }
 }
 
-/// Reads a `&str` constant operand, following one level of local assignment.
+/// Reads a `&str` constant through local assignments and reborrows.
 fn string<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>, operand: &Operand<'tcx>) -> Option<String> {
     let constant = match operand {
         Operand::Constant(constant) => constant.const_,
         Operand::Copy(place) | Operand::Move(place) => {
             let local = place.as_local()?;
-            body.basic_blocks.iter().flat_map(|block| &block.statements).find_map(|statement| {
-                let mir::StatementKind::Assign(assign) = &statement.kind else { return None };
-                let (target, mir::Rvalue::Use(Operand::Constant(constant), _)) = &**assign else {
-                    return None;
-                };
-                (target.as_local() == Some(local)).then_some(constant.const_)
-            })?
+            return body
+                .basic_blocks
+                .iter()
+                .flat_map(|block| &block.statements)
+                .find_map(|statement| {
+                    let mir::StatementKind::Assign(assign) = &statement.kind else {
+                        return None;
+                    };
+                    let (target, rvalue) = &**assign;
+                    if target.as_local() != Some(local) {
+                        return None;
+                    }
+                    match rvalue {
+                        mir::Rvalue::Use(operand, _) | mir::Rvalue::Cast(_, operand, _) => {
+                            string(tcx, body, operand)
+                        }
+                        mir::Rvalue::Ref(_, _, place) | mir::Rvalue::Reborrow(_, _, place)
+                            if place.projection.as_ref() == [mir::ProjectionElem::Deref] =>
+                        {
+                            string(tcx, body, &Operand::Copy(place.local.into()))
+                        }
+                        _ => None,
+                    }
+                });
         }
         _ => return None,
     };
-    let ConstValue::Slice { alloc_id, meta } =
-        constant.eval(tcx, TypingEnv::fully_monomorphized(), rustc_span::DUMMY_SP).ok()?
+    let ConstValue::Slice { alloc_id, meta } = constant
+        .eval(tcx, TypingEnv::fully_monomorphized(), rustc_span::DUMMY_SP)
+        .ok()?
     else {
         return None;
     };
     let allocation = tcx.global_alloc(alloc_id).unwrap_memory();
-    let bytes = allocation.inner().inspect_with_uninit_and_ptr_outside_interpreter(0..meta as usize);
+    let bytes = allocation
+        .inner()
+        .inspect_with_uninit_and_ptr_outside_interpreter(0..meta as usize);
     String::from_utf8(bytes.to_vec()).ok()
 }
