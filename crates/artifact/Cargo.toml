@@ -1,0 +1,10 @@
+[package]
+name = "gpurs-artifact"
+description = "Kernel artifact format shared by the gpurs compiler and runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+postcard = { version = "1.1", default-features = false, features = ["alloc"] }
+serde = { version = "1.0", features = ["derive"] }
