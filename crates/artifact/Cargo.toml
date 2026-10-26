@@ -4,6 +4,7 @@ description = "Kernel artifact format shared by the gpurs compiler and runtime"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [dependencies]
 postcard = { version = "1.1", default-features = false, features = ["alloc"] }

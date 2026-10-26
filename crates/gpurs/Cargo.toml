@@ -4,6 +4,7 @@ description = "Safe Rust GPU kernels compiled through rustc MIR, libNVVM, and pt
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [dependencies]
 gpurs-artifact.workspace = true

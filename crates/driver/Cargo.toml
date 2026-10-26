@@ -4,5 +4,6 @@ description = "CUDA driver API bindings used by the gpurs runtime"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [dependencies]

@@ -24,7 +24,7 @@ pub(crate) struct Device {
     pub download: driver::Stream,
     pub release: driver::Stream,
     pub artifact: Artifact,
-    module: OnceCell<Module>,
+    modules: Vec<OnceCell<Module>>,
     kernels: RefCell<HashMap<String, Rc<LoadedKernel>>>,
     statuses: RefCell<Vec<DevicePointer>>,
     status_count: RefCell<usize>,
@@ -62,8 +62,8 @@ impl Gpu {
             transfer: driver::Stream::new(),
             download: driver::Stream::new(),
             release: driver::Stream::new(),
+            modules: artifact.modules.iter().map(|_| OnceCell::new()).collect(),
             artifact,
-            module: OnceCell::new(),
             kernels: RefCell::default(),
             statuses: RefCell::default(),
             status_count: RefCell::new(0),
@@ -124,13 +124,18 @@ impl Device {
         if let Some(kernel) = self.kernels.borrow().get(key) {
             return kernel.clone();
         }
-        let Some(metadata) = self.artifact.kernels.iter().find(|kernel| kernel.key == key) else {
+        let found = self.artifact.modules.iter().enumerate().find_map(|(index, module)| {
+            let metadata = module.kernels.iter().find(|kernel| kernel.key == key)?;
+            Some((index, metadata))
+        });
+        let Some((index, metadata)) = found else {
             panic!(
                 "kernel `{key}` is not part of this executable's GPU artifact; \
                  rebuild so gpurs_build::compile discovers the launch"
             )
         };
-        let module = self.module.get_or_init(|| Module::load(&self.artifact.cubin));
+        let module = self.modules[index]
+            .get_or_init(|| Module::load(&self.artifact.modules[index].cubin));
         let kernel = Rc::new(LoadedKernel {
             function: module.function(&metadata.symbol),
             metadata: metadata.clone(),

@@ -4,6 +4,7 @@ description = "Build-script helper that compiles #[gpu] kernels and embeds them"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [dependencies]
 object = { version = "0.39", default-features = false, features = ["write", "elf"] }

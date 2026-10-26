@@ -1,0 +1,14 @@
+[package]
+name = "gpurs-compiler"
+description = "rustc driver lowering verified #[gpu] MIR to NVVM IR, PTX, and CUBIN"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[package.metadata.rust-analyzer]
+rustc_private = true
+
+[dependencies]
+gpurs-artifact.workspace = true
+libloading = "0.9"

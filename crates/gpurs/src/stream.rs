@@ -33,15 +33,15 @@ pub struct ConfiguredStream<'a> {
 pub trait Launch: sealed::Sealed {
     /// `Pending<T>` for scalar launches, `Buffer<T>` with one value per thread otherwise.
     type Output<T>;
+
+    #[doc(hidden)]
+    fn output<T>(buffer: Buffer<T>) -> Self::Output<T>;
 }
 
 pub(crate) mod sealed {
     pub trait Sealed {
         fn stream(&self) -> &super::Stream;
         fn config(&self) -> Option<super::LaunchConfig>;
-        fn output<T>(buffer: super::Buffer<T>) -> <Self as super::Launch>::Output<T>
-        where
-            Self: super::Launch;
     }
 }
 
@@ -65,10 +65,18 @@ impl Stream {
 
 impl Launch for Stream {
     type Output<T> = Pending<T>;
+
+    fn output<T>(buffer: Buffer<T>) -> Pending<T> {
+        Pending { buffer }
+    }
 }
 
 impl Launch for ConfiguredStream<'_> {
     type Output<T> = Buffer<T>;
+
+    fn output<T>(buffer: Buffer<T>) -> Buffer<T> {
+        buffer
+    }
 }
 
 impl sealed::Sealed for Stream {
@@ -79,10 +87,6 @@ impl sealed::Sealed for Stream {
     fn config(&self) -> Option<LaunchConfig> {
         None
     }
-
-    fn output<T>(buffer: Buffer<T>) -> Pending<T> {
-        Pending { buffer }
-    }
 }
 
 impl sealed::Sealed for ConfiguredStream<'_> {
@@ -92,9 +96,5 @@ impl sealed::Sealed for ConfiguredStream<'_> {
 
     fn config(&self) -> Option<LaunchConfig> {
         Some(self.config)
-    }
-
-    fn output<T>(buffer: Buffer<T>) -> Buffer<T> {
-        buffer
     }
 }

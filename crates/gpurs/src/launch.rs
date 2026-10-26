@@ -13,7 +13,7 @@ use gpurs_driver as driver;
 
 use crate::buffer::{Buffer, DeviceSlice, DeviceSliceMut, DeviceValue};
 use crate::device::{Device, LoadedKernel};
-use crate::stream::{Launch, LaunchConfig, sealed::Sealed as _};
+use crate::stream::{Launch, LaunchConfig};
 use crate::tracking::{self, Access, Allocation};
 
 /// Arguments of one kernel launch, collected in parameter order.
@@ -158,9 +158,9 @@ impl<S: Launch> KernelLaunch<'_, S> {
             let pointer = driver::allocate_async(bytes, &stream.raw);
             Buffer::new(Rc::new(Allocation::new(device.clone(), pointer, bytes)), count)
         });
-        reject_aliasing(&self.accesses, &metadata.name);
-        let mut accesses: Vec<Access> = self
-            .accesses
+        let arguments = std::mem::take(&mut self.accesses);
+        reject_aliasing(&arguments, &metadata.name);
+        let mut accesses: Vec<Access> = arguments
             .iter()
             .map(|(allocation, range, write)| match write {
                 true => Access::write(allocation, range.clone()),

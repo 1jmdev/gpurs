@@ -19,9 +19,15 @@ pub const PARAMETERS_OFFSET: u64 = RESULT_OFFSET + 8;
 pub struct Artifact {
     pub compiler: String,
     pub architecture: String,
+    pub modules: Vec<Module>,
+    pub types: Vec<TransferType>,
+}
+
+/// Kernels compiled from one crate into one CUBIN image.
+#[derive(Serialize, Deserialize, Debug, Default)]
+pub struct Module {
     pub cubin: Vec<u8>,
     pub kernels: Vec<Kernel>,
-    pub types: Vec<TransferType>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -160,5 +166,17 @@ impl Artifact {
 
     pub fn decode(bytes: &[u8]) -> Result<Self, postcard::Error> {
         postcard::from_bytes(bytes)
+    }
+
+    /// Combines per-crate artifacts; transfer descriptors are deduplicated by type name.
+    pub fn merge(&mut self, other: Artifact) {
+        self.compiler = other.compiler;
+        self.architecture = other.architecture;
+        self.modules.extend(other.modules);
+        for descriptor in other.types {
+            if !self.types.contains(&descriptor) {
+                self.types.push(descriptor);
+            }
+        }
     }
 }

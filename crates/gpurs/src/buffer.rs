@@ -37,11 +37,12 @@ pub struct Pending<T> {
     pub(crate) buffer: Buffer<T>,
 }
 
+#[doc(hidden)]
 #[derive(Clone, Copy)]
-pub(crate) struct Span<'a> {
-    pub allocation: &'a Rc<Allocation>,
-    pub start: usize,
-    pub len: usize,
+pub struct Span<'a> {
+    pub(crate) allocation: &'a Rc<Allocation>,
+    pub(crate) start: usize,
+    pub(crate) len: usize,
 }
 
 pub(crate) mod sealed {
