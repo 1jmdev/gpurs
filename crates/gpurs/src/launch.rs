@@ -27,6 +27,7 @@ pub struct KernelLaunch<'a, S: Launch> {
     accesses: Vec<(Rc<Allocation>, Range<usize>, bool)>,
 }
 
+#[inline(never)]
 /// Starts a launch of the kernel `module::tail` instantiated with the generic types `G`.
 #[track_caller]
 pub fn kernel<'a, S: Launch, G>(stream: &'a S, module: &str, tail: &str) -> KernelLaunch<'a, S> {

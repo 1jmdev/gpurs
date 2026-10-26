@@ -71,6 +71,8 @@ dependencies = [
 name = "gpurs-build"
 version = "0.1.0"
 dependencies = [
+ "gpurs-artifact",
+ "libloading",
  "object",
  "serde_json",
 ]
