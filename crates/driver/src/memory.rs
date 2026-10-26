@@ -1,13 +1,17 @@
-use std::ffi::c_void;
-use std::mem::MaybeUninit;
+use std::{ffi::c_void, mem::MaybeUninit};
 
-use crate::Stream;
-use crate::ffi::{self, DevicePointer, check};
+use crate::{
+    Stream,
+    ffi::{self, DevicePointer},
+};
 
 pub fn allocate(bytes: usize) -> DevicePointer {
     let mut pointer = 0;
     // SAFETY: the out-pointer references a valid local.
-    check(unsafe { ffi::cuMemAlloc_v2(&mut pointer, bytes.max(1)) }, "cuMemAlloc");
+    ffi::check(
+        unsafe { ffi::cuMemAlloc_v2(&mut pointer, bytes.max(1)) },
+        "cuMemAlloc",
+    );
     pointer
 }
 
@@ -15,14 +19,14 @@ pub fn allocate(bytes: usize) -> DevicePointer {
 /// No queued or future device work may access `pointer`.
 pub unsafe fn free(pointer: DevicePointer) {
     // SAFETY: guaranteed by the caller.
-    check(unsafe { ffi::cuMemFree_v2(pointer) }, "cuMemFree");
+    ffi::check(unsafe { ffi::cuMemFree_v2(pointer) }, "cuMemFree");
 }
 
 /// Stream-ordered allocation; other streams must order after `stream` before use.
 pub fn allocate_async(bytes: usize, stream: &Stream) -> DevicePointer {
     let mut pointer = 0;
     // SAFETY: the out-pointer references a valid local.
-    check(
+    ffi::check(
         unsafe { ffi::cuMemAllocAsync(&mut pointer, bytes.max(1), stream.raw) },
         "cuMemAllocAsync",
     );
@@ -33,7 +37,10 @@ pub fn allocate_async(bytes: usize, stream: &Stream) -> DevicePointer {
 /// All work accessing `pointer` must be ordered before `stream`'s current position.
 pub unsafe fn free_async(pointer: DevicePointer, stream: &Stream) {
     // SAFETY: guaranteed by the caller.
-    check(unsafe { ffi::cuMemFreeAsync(pointer, stream.raw) }, "cuMemFreeAsync");
+    ffi::check(
+        unsafe { ffi::cuMemFreeAsync(pointer, stream.raw) },
+        "cuMemFreeAsync",
+    );
 }
 
 /// Copies pageable host memory; the driver stages `source` before returning.
@@ -49,7 +56,7 @@ pub unsafe fn copy_to_device_async(
         return;
     }
     // SAFETY: guaranteed by the caller; the source slice is valid for reads.
-    check(
+    ffi::check(
         unsafe {
             ffi::cuMemcpyHtoDAsync_v2(
                 destination,
@@ -73,7 +80,7 @@ pub unsafe fn copy_from_device_async(
         return;
     }
     // SAFETY: guaranteed by the caller.
-    check(
+    ffi::check(
         unsafe {
             ffi::cuMemcpyDtoHAsync_v2(
                 destination.as_mut_ptr().cast::<c_void>(),
@@ -92,7 +99,7 @@ pub unsafe fn copy_from_device_async(
 /// `source` must reference at least `destination.len()` readable device bytes.
 pub unsafe fn copy_from_device(destination: &mut [MaybeUninit<u8>], source: DevicePointer) {
     // SAFETY: guaranteed by the caller.
-    check(
+    ffi::check(
         unsafe {
             ffi::cuMemcpyDtoH_v2(
                 destination.as_mut_ptr().cast::<c_void>(),
@@ -113,7 +120,7 @@ pub unsafe fn fill_async(destination: DevicePointer, value: u8, bytes: usize, st
         return;
     }
     // SAFETY: guaranteed by the caller.
-    check(
+    ffi::check(
         unsafe { ffi::cuMemsetD8Async(destination, value, bytes, stream.raw) },
         "cuMemsetD8Async",
     );

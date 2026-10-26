@@ -1,8 +1,8 @@
 use rustc_abi::{BackendRepr, Float, HasDataLayout, Integer, Primitive, Scalar, TargetDataLayout};
-use rustc_middle::ty::layout::{
-    HasTyCtxt, HasTypingEnv, LayoutError, LayoutOfHelpers, TyAndLayout,
+use rustc_middle::ty::{
+    Ty, TyCtxt, TypingEnv,
+    layout::{HasTyCtxt, HasTypingEnv, LayoutError, LayoutOfHelpers, TyAndLayout},
 };
-use rustc_middle::ty::{Ty, TyCtxt, TypingEnv};
 use rustc_span::Span;
 
 /// Layout context for fully monomorphized device code.
@@ -11,7 +11,9 @@ pub struct Cx<'tcx>(pub TyCtxt<'tcx>);
 
 impl<'tcx> LayoutOfHelpers<'tcx> for Cx<'tcx> {
     fn handle_layout_err(&self, error: LayoutError<'tcx>, span: Span, ty: Ty<'tcx>) -> ! {
-        self.0.dcx().span_fatal(span, format!("failed to get the layout of `{ty}`: {error}"))
+        self.0
+            .dcx()
+            .span_fatal(span, format!("failed to get the layout of `{ty}`: {error}"))
     }
 }
 
@@ -72,7 +74,11 @@ pub fn memory_type(primitive: Primitive) -> &'static str {
 
 /// LLVM type of a scalar held in a register; `bool` is `i1` there and `i8` in memory.
 pub fn immediate_type(scalar: Scalar) -> &'static str {
-    if scalar.is_bool() { "i1" } else { memory_type(scalar.primitive()) }
+    if scalar.is_bool() {
+        "i1"
+    } else {
+        memory_type(scalar.primitive())
+    }
 }
 
 pub fn is_float(scalar: Scalar) -> bool {

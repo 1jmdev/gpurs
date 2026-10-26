@@ -1,12 +1,20 @@
-use rustc_abi::{BackendRepr, FIRST_VARIANT, Primitive, Scalar, TagEncoding, VariantIdx, Variants};
-use rustc_middle::mir::{AggregateKind, BinOp, CastKind, Rvalue, UnOp};
-use rustc_middle::ty;
-use rustc_middle::ty::adjustment::PointerCoercion;
-use rustc_middle::ty::layout::TyAndLayout;
+use std::cmp::Ordering;
 
-use super::function::{FunctionBuilder, integer_text};
-use super::layout::{bits, immediate_type, is_float, is_signed};
-use super::place::{Operand, Place, Value};
+use rustc_abi::{
+    BackendRepr, FIRST_VARIANT, Integer, Primitive, Scalar, Size, TagEncoding, VariantIdx,
+    Variants, WrappingRange,
+};
+use rustc_middle::{
+    mir::{AggregateKind, BinOp, CastKind, Rvalue, UnOp},
+    ty,
+    ty::{adjustment::PointerCoercion, layout::TyAndLayout},
+};
+
+use super::{
+    function::{self, FunctionBuilder},
+    layout,
+    place::{Operand, Place, Value},
+};
 
 /// Floating-point flags for `#[gpu(fast_math)]`; NaN and infinity stay well defined.
 pub const FAST_FLAGS: &str = "reassoc nsz arcp contract afn ";
@@ -156,7 +164,7 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
             self.unsupported("comparison of wide pointers");
             return Operand::zst(result);
         };
-        let ty = immediate_type(scalar);
+        let ty = layout::immediate_type(scalar);
         let (a, b) = (left.scalar().to_owned(), right.scalar().to_owned());
         if let Some(wrapping) = operation.overflowing_to_wrapping() {
             let kind = match wrapping {
@@ -164,7 +172,7 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
                 BinOp::Sub => "sub",
                 _ => "mul",
             };
-            let sign = if is_signed(scalar) { "s" } else { "u" };
+            let sign = if layout::is_signed(scalar) { "s" } else { "u" };
             let name = format!("llvm.{sign}{kind}.with.overflow.{ty}");
             self.module
                 .declare(format!("declare {{{ty}, i1}} @{name}({ty}, {ty})"));
@@ -176,7 +184,7 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
                 layout: result,
             };
         }
-        let value = if is_float(scalar) {
+        let value = if layout::is_float(scalar) {
             let flags = if self.fast_math { FAST_FLAGS } else { "" };
             let instruction = match operation {
                 BinOp::Add => format!("fadd {flags}{ty} {a}, {b}"),
@@ -203,7 +211,7 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
             };
             self.instruction(instruction)
         } else {
-            let signed = is_signed(scalar);
+            let signed = layout::is_signed(scalar);
             let (division, remainder, shift, less) = if signed {
                 ("sdiv", "srem", "ashr", "slt")
             } else {
@@ -260,8 +268,8 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
         let amount = self.integer_cast(right.scalar(), amount_scalar, scalar, false);
         match operation {
             BinOp::Shl | BinOp::Shr => {
-                let ty = immediate_type(scalar);
-                self.instruction(format!("and {ty} {amount}, {}", bits(scalar) - 1))
+                let ty = layout::immediate_type(scalar);
+                self.instruction(format!("and {ty} {amount}, {}", layout::bits(scalar) - 1))
             }
             _ => amount,
         }
@@ -299,11 +307,11 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
                 let BackendRepr::Scalar(scalar) = operand.layout.backend_repr else {
                     unreachable!()
                 };
-                let ty = immediate_type(scalar);
+                let ty = layout::immediate_type(scalar);
                 match operation {
                     UnOp::Not if ty == "i1" => self.instruction(format!("xor i1 {value}, true")),
                     UnOp::Not => self.instruction(format!("xor {ty} {value}, -1")),
-                    UnOp::Neg if is_float(scalar) => {
+                    UnOp::Neg if layout::is_float(scalar) => {
                         self.instruction(format!("fsub {ty} -0.0, {value}"))
                     }
                     UnOp::Neg => self.instruction(format!("sub {ty} 0, {value}")),
@@ -319,16 +327,20 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
     }
 
     pub fn integer_cast(&mut self, value: &str, from: Scalar, to: Scalar, signed: bool) -> String {
-        let (from_type, to_type) = (immediate_type(from), immediate_type(to));
+        let (from_type, to_type) = (layout::immediate_type(from), layout::immediate_type(to));
         let (from_bits, to_bits) = (
-            if from_type == "i1" { 1 } else { bits(from) },
-            if to_type == "i1" { 1 } else { bits(to) },
+            if from_type == "i1" {
+                1
+            } else {
+                layout::bits(from)
+            },
+            if to_type == "i1" { 1 } else { layout::bits(to) },
         );
         let instruction = match from_bits.cmp(&to_bits) {
-            std::cmp::Ordering::Equal => return value.to_owned(),
-            std::cmp::Ordering::Greater => "trunc",
-            std::cmp::Ordering::Less if signed && from_type != "i1" => "sext",
-            std::cmp::Ordering::Less => "zext",
+            Ordering::Equal => return value.to_owned(),
+            Ordering::Greater => "trunc",
+            Ordering::Less if signed && from_type != "i1" => "sext",
+            Ordering::Less => "zext",
         };
         self.instruction(format!("{instruction} {from_type} {value} to {to_type}"))
     }
@@ -350,13 +362,17 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
         match kind {
             CastKind::IntToInt => {
                 let (from, to) = scalars.expect("integer cast");
-                let value = self.integer_cast(operand.scalar(), from, to, is_signed(from));
+                let value = self.integer_cast(operand.scalar(), from, to, layout::is_signed(from));
                 scalar_value(value)
             }
             CastKind::IntToFloat => {
                 let (from, to) = scalars.expect("integer to float cast");
-                let instruction = if is_signed(from) { "sitofp" } else { "uitofp" };
-                let from_type = immediate_type(from);
+                let instruction = if layout::is_signed(from) {
+                    "sitofp"
+                } else {
+                    "uitofp"
+                };
+                let from_type = layout::immediate_type(from);
                 let value = match from_type {
                     "i1" => self.instruction(format!("zext i1 {} to i8", operand.scalar())),
                     _ => operand.scalar().to_owned(),
@@ -364,21 +380,21 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
                 let from_type = if from_type == "i1" { "i8" } else { from_type };
                 scalar_value(self.instruction(format!(
                     "{instruction} {from_type} {value} to {}",
-                    immediate_type(to)
+                    layout::immediate_type(to)
                 )))
             }
             CastKind::FloatToFloat => {
                 let (from, to) = scalars.expect("float cast");
-                let instruction = match bits(from).cmp(&bits(to)) {
-                    std::cmp::Ordering::Less => "fpext",
-                    std::cmp::Ordering::Greater => "fptrunc",
-                    std::cmp::Ordering::Equal => return scalar_value(operand.scalar().to_owned()),
+                let instruction = match layout::bits(from).cmp(&layout::bits(to)) {
+                    Ordering::Less => "fpext",
+                    Ordering::Greater => "fptrunc",
+                    Ordering::Equal => return scalar_value(operand.scalar().to_owned()),
                 };
                 scalar_value(self.instruction(format!(
                     "{instruction} {} {} to {}",
-                    immediate_type(from),
+                    layout::immediate_type(from),
                     operand.scalar(),
-                    immediate_type(to)
+                    layout::immediate_type(to)
                 )))
             }
             CastKind::FloatToInt => {
@@ -442,9 +458,9 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
 
     /// Rust `as` semantics: NaN becomes zero and out-of-range values saturate.
     fn saturating_float_to_int(&mut self, value: &str, from: Scalar, to: Scalar) -> String {
-        let (float, integer) = (immediate_type(from), immediate_type(to));
-        let signed = is_signed(to);
-        let width = bits(to) as u32;
+        let (float, integer) = (layout::immediate_type(from), layout::immediate_type(to));
+        let signed = layout::is_signed(to);
+        let width = layout::bits(to) as u32;
         let (minimum, maximum): (i128, u128) = if signed {
             (i128::MIN >> (128 - width), (1u128 << (width - 1)) - 1)
         } else {
@@ -464,8 +480,8 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
         let below = self.instruction(format!("fcmp olt {float} {value}, {low}"));
         let above = self.instruction(format!("fcmp oge {float} {value}, {high}"));
         let is_nan = self.instruction(format!("fcmp uno {float} {value}, {value}"));
-        let low_value = integer_text(minimum as u128, integer, width as u64);
-        let high_value = integer_text(maximum, integer, width as u64);
+        let low_value = function::integer_text(minimum as u128, integer, width as u64);
+        let high_value = function::integer_text(maximum, integer, width as u64);
         let clamped = self.instruction(format!(
             "select i1 {below}, {integer} {low_value}, {integer} {raw}"
         ));
@@ -528,7 +544,9 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
         let text = match scalar.primitive() {
             Primitive::Pointer(_) if value == 0 => "null".to_owned(),
             Primitive::Pointer(_) => format!("inttoptr (i64 {value} to i8*)"),
-            _ => integer_text(value, immediate_type(scalar), bits(scalar)),
+            _ => {
+                function::integer_text(value, layout::immediate_type(scalar), layout::bits(scalar))
+            }
         };
         let operand = Operand {
             value: Value::Scalar(text),
@@ -542,8 +560,9 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
         let BackendRepr::Scalar(target) = result.backend_repr else {
             unreachable!()
         };
-        let target_type = immediate_type(target);
-        let constant = |value: u128| integer_text(value, target_type, bits(target));
+        let target_type = layout::immediate_type(target);
+        let constant =
+            |value: u128| function::integer_text(value, target_type, layout::bits(target));
         let (tag_scalar, tag_field, encoding) = match &layout.variants {
             Variants::Empty => {
                 return Operand {
@@ -566,7 +585,7 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
                 tag_field,
                 tag_encoding,
                 ..
-            } => (*tag, *tag_field, tag_encoding.clone()),
+            } => (*tag, *tag_field, *tag_encoding),
         };
         let tag_place = self.field(place, tag_field);
         let tag = self.load(&tag_place).scalar().to_owned();
@@ -576,15 +595,15 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
         };
         let tag_scalar = match tag_scalar.primitive() {
             Primitive::Pointer(_) => Scalar::Initialized {
-                value: Primitive::Int(rustc_abi::Integer::I64, false),
-                valid_range: rustc_abi::WrappingRange::full(rustc_abi::Size::from_bytes(8)),
+                value: Primitive::Int(Integer::I64, false),
+                valid_range: WrappingRange::full(Size::from_bytes(8)),
             },
             _ => tag_scalar,
         };
-        let tag_type = immediate_type(tag_scalar);
+        let tag_type = layout::immediate_type(tag_scalar);
         let value = match encoding {
             TagEncoding::Direct => {
-                self.integer_cast(&tag, tag_scalar, target, is_signed(tag_scalar))
+                self.integer_cast(&tag, tag_scalar, target, layout::is_signed(tag_scalar))
             }
             TagEncoding::Niche {
                 untagged_variant,
@@ -593,9 +612,10 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
             } => {
                 let relative_max =
                     (niche_variants.last.as_u32() - niche_variants.start.as_u32()) as u128;
-                let start = integer_text(niche_start, tag_type, bits(tag_scalar));
+                let start = function::integer_text(niche_start, tag_type, layout::bits(tag_scalar));
                 let relative = self.instruction(format!("sub {tag_type} {tag}, {start}"));
-                let limit = integer_text(relative_max, tag_type, bits(tag_scalar));
+                let limit =
+                    function::integer_text(relative_max, tag_type, layout::bits(tag_scalar));
                 let is_niche = self.instruction(format!("icmp ule {tag_type} {relative}, {limit}"));
                 let relative = self.integer_cast(&relative, tag_scalar, target, false);
                 let first = constant(niche_variants.start.as_u32() as u128);

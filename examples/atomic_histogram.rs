@@ -1,5 +1,7 @@
-use gpurs::gpu::atomic::{AtomicU32, Ordering};
-use gpurs::*;
+use gpurs::{
+    gpu::atomic::{AtomicU32, Ordering},
+    *,
+};
 
 const BIN_COUNT: usize = 16;
 

@@ -1,11 +1,15 @@
 use gpurs_artifact::Failure;
-use rustc_middle::mir::{self, BasicBlock};
-use rustc_middle::ty::{self, Instance, TypingEnv};
+use rustc_middle::{
+    mir::{self, BasicBlock},
+    ty::{self, Instance, TypingEnv},
+};
 use rustc_span::Spanned;
 
-use super::function::FunctionBuilder;
-use super::layout::{PassMode, immediate_type};
-use super::place::{Operand, Place, Value};
+use super::{
+    function::FunctionBuilder,
+    layout::{self, PassMode},
+    place::{Operand, Place, Value},
+};
 
 impl<'tcx> FunctionBuilder<'_, 'tcx> {
     pub fn call(
@@ -97,12 +101,16 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
             match mode {
                 PassMode::Ignore => {}
                 PassMode::Direct(scalar) => {
-                    parameters.push(format!("{} {}", immediate_type(*scalar), argument.scalar()));
+                    parameters.push(format!(
+                        "{} {}",
+                        layout::immediate_type(*scalar),
+                        argument.scalar()
+                    ));
                 }
                 PassMode::Pair(a, b) => {
                     let (first, second) = argument.pair();
-                    parameters.push(format!("{} {first}", immediate_type(*a)));
-                    parameters.push(format!("{} {second}", immediate_type(*b)));
+                    parameters.push(format!("{} {first}", layout::immediate_type(*a)));
+                    parameters.push(format!("{} {second}", layout::immediate_type(*b)));
                 }
                 PassMode::Indirect => {
                     let place = self.spill(argument);

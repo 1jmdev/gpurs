@@ -4,10 +4,7 @@
 //! waits for overlapping records when either side writes, and inherits the failure status of
 //! overlapping writes unless it is a verified full overwrite that recovers the region.
 
-use std::cell::RefCell;
-use std::mem::MaybeUninit;
-use std::ops::Range;
-use std::rc::Rc;
+use std::{cell::RefCell, mem::MaybeUninit, ops::Range, rc::Rc};
 
 use gpurs_artifact::Failure;
 use gpurs_driver::{self as driver, DevicePointer, Event};
@@ -21,6 +18,7 @@ pub(crate) struct Allocation {
     records: RefCell<Vec<Record>>,
 }
 
+#[derive(Clone)]
 struct Record {
     range: Range<usize>,
     write: bool,
@@ -34,8 +32,8 @@ pub(crate) struct Status {
     pub kernel: String,
 }
 
-pub(crate) struct Access<'a> {
-    pub allocation: &'a Allocation,
+pub(crate) struct Access {
+    pub allocation: Rc<Allocation>,
     pub range: Range<usize>,
     pub write: bool,
     /// A full overwrite that does not depend on, and therefore recovers, previous contents.
@@ -44,32 +42,40 @@ pub(crate) struct Access<'a> {
 
 impl Allocation {
     pub fn new(device: Rc<Device>, pointer: DevicePointer, bytes: usize) -> Self {
-        Allocation { device, pointer, bytes, records: RefCell::default() }
+        Allocation {
+            device,
+            pointer,
+            bytes,
+            records: RefCell::default(),
+        }
     }
 }
 
 impl Drop for Allocation {
     fn drop(&mut self) {
         let release = &self.device.release;
-        for record in self.records.get_mut() {
-            release.wait(&record.event);
-        }
-        // SAFETY: the release stream is ordered after every recorded use of the allocation.
+        // SAFETY: complete orders the release stream after every use of the allocation.
         unsafe { driver::free_async(self.pointer, release) };
     }
 }
 
-impl<'a> Access<'a> {
-    pub fn read(allocation: &'a Allocation, range: Range<usize>) -> Self {
-        Access { allocation, range, write: false, recovers: false }
+impl Access {
+    pub fn read(allocation: &Rc<Allocation>, range: Range<usize>) -> Self {
+        Access {
+            allocation: allocation.clone(),
+            range,
+            write: false,
+            recovers: false,
+        }
     }
 
-    pub fn write(allocation: &'a Allocation, range: Range<usize>) -> Self {
-        Access { allocation, range, write: true, recovers: false }
-    }
-
-    pub fn recovering(allocation: &'a Allocation, range: Range<usize>) -> Self {
-        Access { allocation, range, write: true, recovers: true }
+    pub fn recovering(allocation: &Rc<Allocation>, range: Range<usize>) -> Self {
+        Access {
+            allocation: allocation.clone(),
+            range,
+            write: true,
+            recovers: true,
+        }
     }
 }
 
@@ -87,13 +93,17 @@ impl Status {
     pub fn observe(&self) {
         match self.code() {
             0 => {}
-            code => panic!("GPU kernel `{}` failed: {}", self.kernel, Failure::describe(code)),
+            code => panic!(
+                "GPU kernel `{}` failed: {}",
+                self.kernel,
+                Failure::describe(code)
+            ),
         }
     }
 }
 
-fn overlaps(left: &Range<usize>, right: &Range<usize>) -> bool {
-    left.start < right.end && right.start < left.end
+pub(crate) fn overlaps(left: &Range<usize>, right: &Range<usize>) -> bool {
+    !left.is_empty() && !right.is_empty() && left.start < right.end && right.start < left.end
 }
 
 /// Orders `stream` after conflicting earlier work and returns the failure sources the
@@ -120,12 +130,26 @@ pub(crate) fn order(stream: &driver::Stream, accesses: &[Access]) -> Vec<Rc<Stat
 pub(crate) fn complete(stream: &driver::Stream, accesses: &[Access], status: Option<Rc<Status>>) {
     let event = Rc::new(stream.record());
     for access in accesses {
+        access.allocation.device.release.wait(&event);
         let mut records = access.allocation.records.borrow_mut();
         if access.write {
-            // Later operations reach covered records through this one, which waited for them.
-            records.retain(|record| {
-                record.range.start < access.range.start || record.range.end > access.range.end
-            });
+            // Preserve failure sources only for bytes this write did not replace.
+            for index in (0..records.len()).rev() {
+                if !overlaps(&records[index].range, &access.range) {
+                    continue;
+                }
+                let mut record = records.swap_remove(index);
+                if record.range.start < access.range.start {
+                    records.push(Record {
+                        range: record.range.start..access.range.start,
+                        ..record.clone()
+                    });
+                }
+                if record.range.end > access.range.end {
+                    record.range.start = access.range.end;
+                    records.push(record);
+                }
+            }
         }
         records.retain(|record| !record.event.is_complete() || record.status.is_some());
         records.push(Record {
@@ -134,5 +158,26 @@ pub(crate) fn complete(stream: &driver::Stream, accesses: &[Access], status: Opt
             event: event.clone(),
             status: status.clone().filter(|_| access.write),
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::tracking;
+
+    #[test]
+    fn range_overlap_excludes_empty_and_adjacent_ranges() {
+        for (left, right, expected) in [
+            (0..8, 4..12, true),
+            (0..8, 2..4, true),
+            (0..8, 0..8, true),
+            (0..8, 8..12, false),
+            (0..8, 12..16, false),
+            (0..8, 4..4, false),
+            (0..0, 0..0, false),
+        ] {
+            assert_eq!(tracking::overlaps(&left, &right), expected);
+            assert_eq!(tracking::overlaps(&right, &left), expected);
+        }
     }
 }

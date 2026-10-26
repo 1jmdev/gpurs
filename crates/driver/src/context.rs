@@ -1,6 +1,6 @@
 use std::ptr;
 
-use crate::ffi::{self, CUcontext, CUdevice, check};
+use crate::ffi::{self, CUcontext, CUdevice};
 
 /// The primary context of one device, current on the creating thread.
 #[derive(Debug)]
@@ -16,9 +16,12 @@ impl Context {
         let mut raw = ptr::null_mut();
         // SAFETY: out-pointers reference valid locals.
         unsafe {
-            check(ffi::cuInit(0), "cuInit");
-            check(ffi::cuDeviceGet(&mut device, ordinal as i32), "cuDeviceGet");
-            check(ffi::cuDevicePrimaryCtxRetain(&mut raw, device), "cuDevicePrimaryCtxRetain");
+            ffi::check(ffi::cuInit(0), "cuInit");
+            ffi::check(ffi::cuDeviceGet(&mut device, ordinal as i32), "cuDeviceGet");
+            ffi::check(
+                ffi::cuDevicePrimaryCtxRetain(&mut raw, device),
+                "cuDevicePrimaryCtxRetain",
+            );
         }
         let context = Context { device, raw };
         context.make_current();
@@ -27,7 +30,7 @@ impl Context {
 
     pub fn make_current(&self) {
         // SAFETY: `raw` is a retained primary context.
-        check(unsafe { ffi::cuCtxSetCurrent(self.raw) }, "cuCtxSetCurrent");
+        ffi::check(unsafe { ffi::cuCtxSetCurrent(self.raw) }, "cuCtxSetCurrent");
     }
 
     /// Compute capability as `major * 10 + minor`.
@@ -35,7 +38,7 @@ impl Context {
         let attribute = |attribute| {
             let mut value = 0;
             // SAFETY: the out-pointer references a valid local.
-            check(
+            ffi::check(
                 unsafe { ffi::cuDeviceGetAttribute(&mut value, attribute, self.device) },
                 "cuDeviceGetAttribute",
             );
@@ -47,7 +50,7 @@ impl Context {
 
     pub fn synchronize(&self) {
         // SAFETY: the context is current on this thread.
-        check(unsafe { ffi::cuCtxSynchronize() }, "cuCtxSynchronize");
+        ffi::check(unsafe { ffi::cuCtxSynchronize() }, "cuCtxSynchronize");
     }
 }
 

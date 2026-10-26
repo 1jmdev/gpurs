@@ -1,14 +1,16 @@
 //! Entry point used by `gpurs-build` when this library acts as the rustc wrapper.
 
-use std::env;
-use std::ffi::{CStr, c_char, c_int};
-use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::process::ExitCode;
+use std::{
+    env,
+    ffi::{CStr, c_char, c_int},
+    mem,
+    panic::{self, AssertUnwindSafe},
+    process::ExitCode,
+};
 
 use rustc_driver::Callbacks;
 
-use crate::device::DeviceView;
-use crate::discovery::HostView;
+use crate::{device::DeviceView, discovery::HostView};
 
 struct Passthrough;
 
@@ -39,12 +41,12 @@ pub unsafe extern "C" fn gpurs_compiler_main(
     if code != 0 {
         return code;
     }
-    let mut device = DeviceView::new(crate_name, host);
+    let mut device = DeviceView { crate_name, host };
     session(&device_arguments(rustc), &mut device)
 }
 
 fn session(arguments: &[String], callbacks: &mut (dyn Callbacks + Send)) -> c_int {
-    match catch_unwind(AssertUnwindSafe(|| {
+    match panic::catch_unwind(AssertUnwindSafe(|| {
         rustc_driver::catch_with_exit_code(|| {
             rustc_driver::compiler_entrypoint(arguments, callbacks)
         })
@@ -81,7 +83,7 @@ fn device_arguments(arguments: &[String]) -> Vec<String> {
     let mut device = Vec::with_capacity(arguments.len() + 8);
     let mut skip = false;
     for argument in arguments {
-        if std::mem::take(&mut skip) {
+        if mem::take(&mut skip) {
             continue;
         }
         if argument == "--out-dir" || argument == "--emit" || argument == "-o" {

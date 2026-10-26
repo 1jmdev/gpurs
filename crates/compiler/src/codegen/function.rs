@@ -1,18 +1,26 @@
 use std::fmt::Write;
 
 use gpurs_artifact::Failure;
+use rustc_abi::BackendRepr;
 use rustc_index::IndexVec;
-use rustc_middle::mir::{
-    self, AssertKind, BasicBlock, Body, Local, NonDivergingIntrinsic, StatementKind,
-    TerminatorKind, traversal,
+use rustc_middle::{
+    mir::{
+        self, AssertKind, BasicBlock, Body, Local, NonDivergingIntrinsic, StatementKind,
+        TerminatorKind, traversal,
+    },
+    ty::{
+        EarlyBinder, Instance, Ty, TyCtxt, TypeFoldable, TypingEnv,
+        layout::{LayoutOf, TyAndLayout},
+    },
 };
-use rustc_middle::ty::layout::{LayoutOf, TyAndLayout};
-use rustc_middle::ty::{EarlyBinder, Instance, Ty, TyCtxt, TypeFoldable, TypingEnv};
 use rustc_span::Span;
 
-use super::layout::{PassMode, immediate_type};
-use super::module::ModuleBuilder;
-use super::place::{Operand, Place, Value};
+use super::{
+    layout::{self, PassMode},
+    module::ModuleBuilder,
+    place::{Operand, Place, Value},
+};
+use crate::{attributes, diagnostic};
 
 /// Lowers the MIR body of one monomorphic instance to an NVVM IR function.
 pub struct FunctionBuilder<'m, 'tcx> {
@@ -35,7 +43,7 @@ impl<'m, 'tcx> FunctionBuilder<'m, 'tcx> {
         let body = tcx.instance_mir(instance.def);
         FunctionBuilder {
             tcx,
-            fast_math: crate::device::is_fast_math(tcx, instance.def_id()),
+            fast_math: attributes::is_fast_math(tcx, instance.def_id()),
             module,
             instance,
             body,
@@ -106,7 +114,7 @@ impl<'m, 'tcx> FunctionBuilder<'m, 'tcx> {
     }
 
     pub fn unsupported(&self, what: &str) {
-        crate::diagnostic::error(
+        diagnostic::error(
             self.tcx,
             self.span,
             format!("{what} is not supported in GPU code"),
@@ -236,15 +244,14 @@ impl<'m, 'tcx> FunctionBuilder<'m, 'tcx> {
             | TerminatorKind::FalseUnwind { real_target, .. } => self.branch(*real_target),
             TerminatorKind::SwitchInt { discr, targets } => {
                 let discriminant = self.operand(discr);
-                let rustc_abi::BackendRepr::Scalar(scalar) = discriminant.layout.backend_repr
-                else {
+                let BackendRepr::Scalar(scalar) = discriminant.layout.backend_repr else {
                     unreachable!("switch on a non-scalar `{}`", discriminant.layout.ty)
                 };
-                let ty = immediate_type(scalar);
+                let ty = layout::immediate_type(scalar);
                 let cases: Vec<String> = targets
                     .iter()
                     .map(|(value, target)| {
-                        let value = integer_text(value, ty, super::layout::bits(scalar));
+                        let value = integer_text(value, ty, layout::bits(scalar));
                         format!("{ty} {value}, label %bb{}", target.as_usize())
                     })
                     .collect();
@@ -261,19 +268,27 @@ impl<'m, 'tcx> FunctionBuilder<'m, 'tcx> {
                     PassMode::Ignore | PassMode::Indirect => self.emit("ret void"),
                     PassMode::Direct(scalar) => {
                         let value = self.load(&place);
-                        self.emit(format!("ret {} {}", immediate_type(scalar), value.scalar()));
+                        self.emit(format!(
+                            "ret {} {}",
+                            layout::immediate_type(scalar),
+                            value.scalar()
+                        ));
                     }
                     PassMode::Pair(a, b) => {
                         let value = self.load(&place);
                         let (first, second) = value.pair();
-                        let ty = format!("{{ {}, {} }}", immediate_type(a), immediate_type(b));
+                        let ty = format!(
+                            "{{ {}, {} }}",
+                            layout::immediate_type(a),
+                            layout::immediate_type(b)
+                        );
                         let partial = self.instruction(format!(
                             "insertvalue {ty} undef, {} {first}, 0",
-                            immediate_type(a)
+                            layout::immediate_type(a)
                         ));
                         let whole = self.instruction(format!(
                             "insertvalue {ty} {partial}, {} {second}, 1",
-                            immediate_type(b)
+                            layout::immediate_type(b)
                         ));
                         self.emit(format!("ret {ty} {whole}"));
                     }

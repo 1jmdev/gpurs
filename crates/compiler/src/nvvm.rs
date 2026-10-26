@@ -1,10 +1,15 @@
 //! libNVVM (NVVM IR to PTX) and ptxas (PTX to CUBIN).
 
-use std::env;
-use std::ffi::{CStr, c_char, c_int, c_void};
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::{
+    env,
+    ffi::{CStr, c_char, c_int, c_void},
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+    ptr,
+};
+
+use libloading::Library;
 
 type Program = *mut c_void;
 
@@ -23,7 +28,7 @@ pub fn toolkit() -> Result<PathBuf, String> {
 pub fn ptx(toolkit: &Path, ir: &str, architecture: &str) -> Result<String, String> {
     // SAFETY: libNVVM is a C library whose entry points match the declared signatures.
     unsafe {
-        let library = libloading::Library::new(toolkit.join("nvvm/lib64/libnvvm.so"))
+        let library = Library::new(toolkit.join("nvvm/lib64/libnvvm.so"))
             .map_err(|error| format!("cannot load libNVVM: {error}"))?;
         macro_rules! entry {
             ($name:literal: $($argument:ty),*) => {
@@ -35,7 +40,8 @@ pub fn ptx(toolkit: &Path, ir: &str, architecture: &str) -> Result<String, Strin
         let create = entry!(b"nvvmCreateProgram": *mut Program);
         let destroy = entry!(b"nvvmDestroyProgram": *mut Program);
         let add = entry!(b"nvvmAddModuleToProgram": Program, *const c_char, usize, *const c_char);
-        let lazy = entry!(b"nvvmLazyAddModuleToProgram": Program, *const c_char, usize, *const c_char);
+        let lazy =
+            entry!(b"nvvmLazyAddModuleToProgram": Program, *const c_char, usize, *const c_char);
         let compile = entry!(b"nvvmCompileProgram": Program, c_int, *const *const c_char);
         let log_size = entry!(b"nvvmGetProgramLogSize": Program, *mut usize);
         let log = entry!(b"nvvmGetProgramLog": Program, *mut c_char);
@@ -44,10 +50,15 @@ pub fn ptx(toolkit: &Path, ir: &str, architecture: &str) -> Result<String, Strin
 
         let libdevice = fs::read(toolkit.join("nvvm/libdevice/libdevice.10.bc"))
             .map_err(|error| format!("cannot read libdevice: {error}"))?;
-        let mut program = std::ptr::null_mut();
+        let mut program = ptr::null_mut();
         create(&mut program);
         add(program, ir.as_ptr().cast(), ir.len(), c"gpurs".as_ptr());
-        lazy(program, libdevice.as_ptr().cast(), libdevice.len(), c"libdevice".as_ptr());
+        lazy(
+            program,
+            libdevice.as_ptr().cast(),
+            libdevice.len(),
+            c"libdevice".as_ptr(),
+        );
         let architecture = format!("-arch=compute_{}\0", &architecture[3..]);
         let options: [&CStr; 6] = [
             CStr::from_bytes_with_nul(architecture.as_bytes()).expect("NUL-terminated"),
@@ -71,7 +82,10 @@ pub fn ptx(toolkit: &Path, ir: &str, architecture: &str) -> Result<String, Strin
         };
         let outcome = match status {
             0 => Ok(read(result_size, result)),
-            _ => Err(format!("libNVVM rejected the generated IR:\n{}", read(log_size, log))),
+            _ => Err(format!(
+                "libNVVM rejected the generated IR:\n{}",
+                read(log_size, log)
+            )),
         };
         destroy(&mut program);
         outcome
@@ -79,7 +93,12 @@ pub fn ptx(toolkit: &Path, ir: &str, architecture: &str) -> Result<String, Strin
 }
 
 /// Assembles PTX into native CUBIN for `sm_XY` with ptxas.
-pub fn cubin(toolkit: &Path, ptx: &str, architecture: &str, directory: &Path) -> Result<Vec<u8>, String> {
+pub fn cubin(
+    toolkit: &Path,
+    ptx: &str,
+    architecture: &str,
+    directory: &Path,
+) -> Result<Vec<u8>, String> {
     let source = directory.join("kernels.ptx");
     let output = directory.join("kernels.cubin");
     fs::write(&source, ptx).map_err(|error| error.to_string())?;
@@ -92,7 +111,10 @@ pub fn cubin(toolkit: &Path, ptx: &str, architecture: &str, directory: &Path) ->
         .output()
         .map_err(|error| format!("cannot run ptxas: {error}"))?;
     if !result.status.success() {
-        return Err(format!("ptxas failed:\n{}", String::from_utf8_lossy(&result.stderr)));
+        return Err(format!(
+            "ptxas failed:\n{}",
+            String::from_utf8_lossy(&result.stderr)
+        ));
     }
     fs::read(&output).map_err(|error| error.to_string())
 }

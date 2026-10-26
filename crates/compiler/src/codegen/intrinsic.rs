@@ -1,11 +1,16 @@
 use gpurs_artifact::Failure;
 use rustc_abi::{BackendRepr, Primitive};
-use rustc_middle::mir::BinOp;
-use rustc_middle::ty::{self, Instance, Ty};
+use rustc_const_eval::util;
+use rustc_middle::{
+    mir::BinOp,
+    ty::{self, Instance, Ty},
+};
 
-use super::function::{FunctionBuilder, integer_text};
-use super::layout::{bits, immediate_type, is_signed, memory_type};
-use super::place::{Operand, Place, Value};
+use super::{
+    function::{self, FunctionBuilder},
+    layout,
+    place::{Operand, Place, Value},
+};
 use crate::paths;
 
 impl<'tcx> FunctionBuilder<'_, 'tcx> {
@@ -99,17 +104,17 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
             );
             return true;
         }
-        if let Some(name) = paths::math(self.tcx, instance.def_id()) {
-            if let Some(value) = self.math(&name, arguments) {
-                self.store(
-                    destination,
-                    &Operand {
-                        value,
-                        layout: destination.layout,
-                    },
-                );
-                return true;
-            }
+        if let Some(name) = paths::math(self.tcx, instance.def_id())
+            && let Some(value) = self.math(&name, arguments)
+        {
+            self.store(
+                destination,
+                &Operand {
+                    value,
+                    layout: destination.layout,
+                },
+            );
+            return true;
         }
         let Some(intrinsic) = self.tcx.intrinsic(instance.def_id()) else {
             return false;
@@ -134,8 +139,7 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
                 };
                 let input =
                     ty::TypingEnv::fully_monomorphized().as_query_input(instance.args.type_at(0));
-                if !rustc_const_eval::util::check_validity_requirement(self.tcx, requirement, input)
-                    .unwrap_or(false)
+                if !util::check_validity_requirement(self.tcx, requirement, input).unwrap_or(false)
                 {
                     self.error("invalid value initialization in GPU code");
                 }
@@ -181,7 +185,7 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
                 let BackendRepr::Scalar(scalar) = arguments[0].layout.backend_repr else {
                     unreachable!()
                 };
-                let ty = immediate_type(scalar);
+                let ty = layout::immediate_type(scalar);
                 let operation = name.trim_end_matches("_nonzero");
                 let extra = if matches!(operation, "ctlz" | "cttz") {
                     ", i1"
@@ -207,9 +211,9 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
                 let BackendRepr::Scalar(shift) = arguments[1].layout.backend_repr else {
                     unreachable!()
                 };
-                let ty = immediate_type(scalar);
+                let ty = layout::immediate_type(scalar);
                 let shift = self.integer_cast(arguments[1].scalar(), shift, scalar, false);
-                let width = bits(scalar);
+                let width = layout::bits(scalar);
                 let shift = self.instruction(format!("and {ty} {shift}, {}", width - 1));
                 let reverse = self.instruction(format!("sub {ty} 0, {shift}"));
                 let reverse = self.instruction(format!("and {ty} {reverse}, {}", width - 1));
@@ -230,7 +234,7 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
                 let BackendRepr::Scalar(scalar) = arguments[0].layout.backend_repr else {
                     unreachable!()
                 };
-                let ty = immediate_type(scalar);
+                let ty = layout::immediate_type(scalar);
                 let operation = if name == "saturating_add" {
                     BinOp::AddWithOverflow
                 } else {
@@ -238,12 +242,12 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
                 };
                 let pair = self.binary(operation, &arguments[0], &arguments[1], destination.layout);
                 let (value, overflow) = pair.pair();
-                let limit = if is_signed(scalar) {
+                let limit = if layout::is_signed(scalar) {
                     let negative =
                         self.instruction(format!("icmp slt {ty} {}, 0", arguments[0].scalar()));
-                    let minimum = 1u128 << (bits(scalar) - 1);
-                    let low = integer_text(minimum, ty, bits(scalar));
-                    let high = integer_text(minimum - 1, ty, bits(scalar));
+                    let minimum = 1u128 << (layout::bits(scalar) - 1);
+                    let low = function::integer_text(minimum, ty, layout::bits(scalar));
+                    let high = function::integer_text(minimum - 1, ty, layout::bits(scalar));
                     self.instruction(format!("select i1 {negative}, {ty} {low}, {ty} {high}"))
                 } else if name == "saturating_sub" {
                     "0".to_owned()
@@ -258,8 +262,8 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
                 let BackendRepr::Scalar(scalar) = arguments[0].layout.backend_repr else {
                     unreachable!()
                 };
-                let ty = immediate_type(scalar);
-                let sign = if is_signed(scalar) { "s" } else { "u" };
+                let ty = layout::immediate_type(scalar);
+                let sign = if layout::is_signed(scalar) { "s" } else { "u" };
                 let operation = if name == "unchecked_rem" {
                     "rem"
                 } else {
@@ -342,7 +346,7 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
                     self.unsupported("aggregate volatile operations");
                     return true;
                 };
-                let ty = memory_type(scalar.primitive());
+                let ty = layout::memory_type(scalar.primitive());
                 let pointer =
                     self.instruction(format!("bitcast i8* {} to {ty}*", arguments[0].scalar()));
                 if name == "volatile_store" {
@@ -413,10 +417,8 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
     fn math(&mut self, name: &str, arguments: &[Operand<'tcx>]) -> Option<Value> {
         let (operation, suffix, ty) = if let Some(operation) = name.strip_suffix("f32") {
             (operation, "f32", "float")
-        } else if let Some(operation) = name.strip_suffix("f64") {
-            (operation, "f64", "double")
         } else {
-            return None;
+            (name.strip_suffix("f64")?, "f64", "double")
         };
         let operation = operation.trim_end_matches('_');
         let llvm = match operation {
@@ -458,7 +460,7 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
                 let BackendRepr::Scalar(scalar) = argument.layout.backend_repr else {
                     unreachable!()
                 };
-                immediate_type(scalar)
+                layout::immediate_type(scalar)
             })
             .collect();
         self.module
@@ -506,7 +508,7 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
         let ty = if pointer_value {
             "i64"
         } else {
-            memory_type(scalar.primitive())
+            layout::memory_type(scalar.primitive())
         };
         let pointer = self.instruction(format!("bitcast i8* {} to {ty}*", arguments[0].scalar()));
         let values: Vec<_> = arguments[1..]

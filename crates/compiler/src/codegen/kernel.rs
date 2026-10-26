@@ -4,12 +4,9 @@ use gpurs_artifact::{
     Condition, Extent, Failure, INPUT_CAPACITY, INPUTS_OFFSET, Kernel, Parameter, RESULT_OFFSET,
     Value, parameter_offsets,
 };
-use rustc_middle::ty::Instance;
-use rustc_middle::ty::layout::TyAndLayout;
+use rustc_middle::ty::{Instance, layout::TyAndLayout};
 
-use super::function::FunctionBuilder;
-use super::module::ModuleBuilder;
-use super::place::Place;
+use super::{function::FunctionBuilder, module::ModuleBuilder, place::Place};
 
 pub struct KernelParameter<'tcx> {
     pub layout: TyAndLayout<'tcx>,

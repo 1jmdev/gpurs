@@ -1,9 +1,11 @@
 use rustc_data_structures::fx::FxHashSet;
-use rustc_middle::mir::{TerminatorKind, traversal};
-use rustc_middle::ty::{self, EarlyBinder, Instance, TyCtxt, TypingEnv};
+use rustc_middle::{
+    mir::{TerminatorKind, traversal},
+    ty::{self, EarlyBinder, Instance, TyCtxt, TypingEnv},
+};
 use rustc_span::Span;
 
-use crate::{device, paths};
+use crate::{attributes, diagnostic, paths};
 
 pub fn verify<'tcx>(tcx: TyCtxt<'tcx>, root: Instance<'tcx>) -> FxHashSet<Instance<'tcx>> {
     let mut checked = FxHashSet::default();
@@ -18,7 +20,7 @@ fn visit<'tcx>(
     checked: &mut FxHashSet<Instance<'tcx>>,
 ) {
     if active.contains(&instance) {
-        crate::diagnostic::error(
+        diagnostic::error(
             tcx,
             tcx.def_span(instance.def_id()),
             format!("recursive GPU call to `{instance}`"),
@@ -57,7 +59,7 @@ fn visit<'tcx>(
                     EarlyBinder::bind(tcx, func.ty(body, tcx)),
                 );
                 let ty::FnDef(def_id, args) = *ty.kind() else {
-                    crate::diagnostic::error(
+                    diagnostic::error(
                         tcx,
                         terminator.source_info.span,
                         "indirect function calls are not supported in GPU code",
@@ -74,12 +76,12 @@ fn visit<'tcx>(
                 );
                 let path = paths::path(tcx, callee.def_id());
                 if active.len() > 1
-                    && device::is_device(tcx, instance.def_id())
+                    && attributes::is_device(tcx, instance.def_id())
                     && (path == "gpurs::gpu::thread::sync_block"
                         || path == "gpurs::gpu::shared::shared_array"
                         || (path.starts_with("gpurs::gpu::warp::") && !path.ends_with("::lane_id")))
                 {
-                    crate::diagnostic::error(
+                    diagnostic::error(
                         tcx,
                         terminator.source_info.span,
                         "cannot verify shared memory or collective participation inside this device helper",
@@ -117,7 +119,7 @@ fn visit<'tcx>(
 
 fn allowed(tcx: TyCtxt<'_>, instance: Instance<'_>, span: Span) -> bool {
     if matches!(instance.def, ty::InstanceKind::Virtual(..)) {
-        crate::diagnostic::error(
+        diagnostic::error(
             tcx,
             span,
             "dynamic dispatch is not supported in GPU code",
@@ -126,7 +128,7 @@ fn allowed(tcx: TyCtxt<'_>, instance: Instance<'_>, span: Span) -> bool {
         return false;
     }
     let path = paths::path(tcx, instance.def_id());
-    let approved = device::is_device(tcx, instance.def_id())
+    let approved = attributes::is_device(tcx, instance.def_id())
         || leaf(tcx, instance)
         || path.starts_with("gpurs::gpu::")
         || [
@@ -157,7 +159,7 @@ fn allowed(tcx: TyCtxt<'_>, instance: Instance<'_>, span: Span) -> bool {
             .iter()
             .any(|prefix| path.starts_with(prefix));
     if !approved {
-        crate::diagnostic::error(
+        diagnostic::error(
             tcx,
             span,
             format!("`{instance}` is unavailable in GPU code"),

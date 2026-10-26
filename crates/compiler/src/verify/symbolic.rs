@@ -1,5 +1,10 @@
 use std::collections::BTreeMap;
 
+use rustc_middle::mir::BinOp;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Fact(pub BinOp, pub Polynomial, pub Polynomial);
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Atom {
     Index,

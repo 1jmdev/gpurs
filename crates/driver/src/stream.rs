@@ -1,6 +1,6 @@
 use std::ptr;
 
-use crate::ffi::{self, CUevent, CUstream, check};
+use crate::ffi::{self, CUevent, CUstream};
 
 #[derive(Debug)]
 pub struct Stream {
@@ -12,7 +12,7 @@ impl Stream {
     pub fn new() -> Self {
         let mut raw = ptr::null_mut();
         // SAFETY: the out-pointer references a valid local.
-        check(
+        ffi::check(
             unsafe { ffi::cuStreamCreate(&mut raw, ffi::CU_STREAM_NON_BLOCKING) },
             "cuStreamCreate",
         );
@@ -21,7 +21,7 @@ impl Stream {
 
     pub fn wait(&self, event: &Event) {
         // SAFETY: both handles are live.
-        check(
+        ffi::check(
             unsafe { ffi::cuStreamWaitEvent(self.raw, event.raw, 0) },
             "cuStreamWaitEvent",
         );
@@ -29,7 +29,10 @@ impl Stream {
 
     pub fn synchronize(&self) {
         // SAFETY: the stream handle is live.
-        check(unsafe { ffi::cuStreamSynchronize(self.raw) }, "cuStreamSynchronize");
+        ffi::check(
+            unsafe { ffi::cuStreamSynchronize(self.raw) },
+            "cuStreamSynchronize",
+        );
     }
 
     /// Records a new event capturing all work submitted to this stream so far.
@@ -37,11 +40,11 @@ impl Stream {
         let mut raw = ptr::null_mut();
         // SAFETY: the out-pointer references a valid local and the stream is live.
         unsafe {
-            check(
+            ffi::check(
                 ffi::cuEventCreate(&mut raw, ffi::CU_EVENT_DISABLE_TIMING),
                 "cuEventCreate",
             );
-            check(ffi::cuEventRecord(raw, self.raw), "cuEventRecord");
+            ffi::check(ffi::cuEventRecord(raw, self.raw), "cuEventRecord");
         }
         Event { raw }
     }
@@ -71,7 +74,7 @@ impl Event {
         match unsafe { ffi::cuEventQuery(self.raw) } {
             ffi::CUDA_ERROR_NOT_READY => false,
             result => {
-                check(result, "cuEventQuery");
+                ffi::check(result, "cuEventQuery");
                 true
             }
         }
@@ -79,7 +82,10 @@ impl Event {
 
     pub fn synchronize(&self) {
         // SAFETY: the event handle is live.
-        check(unsafe { ffi::cuEventSynchronize(self.raw) }, "cuEventSynchronize");
+        ffi::check(
+            unsafe { ffi::cuEventSynchronize(self.raw) },
+            "cuEventSynchronize",
+        );
     }
 }
 

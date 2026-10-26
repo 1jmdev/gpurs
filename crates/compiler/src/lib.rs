@@ -18,6 +18,7 @@ extern crate rustc_middle;
 extern crate rustc_session;
 extern crate rustc_span;
 
+mod attributes;
 mod codegen;
 mod device;
 mod diagnostic;

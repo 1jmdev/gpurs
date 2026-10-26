@@ -1,10 +1,10 @@
 use rustc_abi::{Align, BackendRepr, FieldIdx, FieldsShape, Scalar, Size, VariantIdx};
-use rustc_middle::mir::{self, ProjectionElem};
-use rustc_middle::ty::layout::TyAndLayout;
-use rustc_middle::ty::{self, Ty};
+use rustc_middle::{
+    mir::{self, ProjectionElem},
+    ty::{self, Ty, layout::TyAndLayout},
+};
 
-use super::function::FunctionBuilder;
-use super::layout::{immediate_type, memory_type};
+use super::{function::FunctionBuilder, layout};
 
 /// A value in registers or, for aggregates, behind a pointer to read-only memory.
 #[derive(Clone, Debug)]
@@ -276,7 +276,7 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
     }
 
     pub fn load_scalar(&mut self, pointer: &str, scalar: Scalar, align: Align) -> String {
-        let ty = memory_type(scalar.primitive());
+        let ty = layout::memory_type(scalar.primitive());
         let typed = self.instruction(format!("bitcast i8* {pointer} to {ty}*"));
         let value = self.instruction(format!("load {ty}, {ty}* {typed}, align {}", align.bytes()));
         match scalar.is_bool() {
@@ -286,7 +286,7 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
     }
 
     pub fn store_scalar(&mut self, pointer: &str, value: &str, scalar: Scalar, align: Align) {
-        let ty = memory_type(scalar.primitive());
+        let ty = layout::memory_type(scalar.primitive());
         let value = match scalar.is_bool() {
             true => self.instruction(format!("zext i1 {value} to i8")),
             false => value.to_owned(),
@@ -326,7 +326,7 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
             layout.backend_repr,
             &operand.value,
         ) {
-            let (from_type, to_type) = (immediate_type(from), immediate_type(to));
+            let (from_type, to_type) = (layout::immediate_type(from), layout::immediate_type(to));
             let instruction = match (from_type, to_type) {
                 (from, to) if from == to => None,
                 ("i8*", _) => Some("ptrtoint"),

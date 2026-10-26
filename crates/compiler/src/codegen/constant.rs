@@ -1,13 +1,19 @@
-use rustc_abi::{BackendRepr, Primitive, Size};
-use rustc_middle::mir::interpret::{AllocId, GlobalAlloc, Scalar as ConstScalar};
-use rustc_middle::mir::{ConstOperand, ConstValue};
-use rustc_middle::ty::TypingEnv;
+use rustc_abi::{BackendRepr, Float, Primitive, Size};
+use rustc_middle::{
+    mir::{
+        ConstOperand, ConstValue,
+        interpret::{AllocId, GlobalAlloc, Scalar as ConstScalar},
+    },
+    ty::TypingEnv,
+};
 
-use super::function::{FunctionBuilder, integer_text};
-use super::layout::{bits, immediate_type};
-use super::module::ModuleBuilder;
-use super::place::{Operand, Place, Value};
-use super::rvalue::float_text;
+use super::{
+    function::{self, FunctionBuilder},
+    layout,
+    module::ModuleBuilder,
+    place::{Operand, Place, Value},
+    rvalue,
+};
 
 impl<'tcx> FunctionBuilder<'_, 'tcx> {
     pub fn constant(&mut self, constant: &ConstOperand<'tcx>) -> Operand<'tcx> {
@@ -31,14 +37,18 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
                     ConstScalar::Int(value) => {
                         let value = value.to_bits(value.size());
                         match scalar.primitive() {
-                            Primitive::Float(rustc_abi::Float::F32) => {
-                                float_text(f32::from_bits(value as u32) as f64, "float")
+                            Primitive::Float(Float::F32) => {
+                                rvalue::float_text(f32::from_bits(value as u32) as f64, "float")
                             }
-                            Primitive::Float(rustc_abi::Float::F64) => {
-                                float_text(f64::from_bits(value as u64), "double")
+                            Primitive::Float(Float::F64) => {
+                                rvalue::float_text(f64::from_bits(value as u64), "double")
                             }
                             Primitive::Pointer(_) => format!("inttoptr (i64 {value} to i8*)"),
-                            _ => integer_text(value, immediate_type(scalar), bits(scalar)),
+                            _ => function::integer_text(
+                                value,
+                                layout::immediate_type(scalar),
+                                layout::bits(scalar),
+                            ),
                         }
                     }
                     ConstScalar::Ptr(pointer, _) => {

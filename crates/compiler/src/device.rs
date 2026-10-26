@@ -1,29 +1,23 @@
-use std::env;
-use std::fs;
-use std::path::PathBuf;
+use std::{env, fs, path::PathBuf};
 
 use gpurs_artifact::{Artifact, Module};
-use rustc_ast::attr::AttributeExt;
 use rustc_driver::{Callbacks, Compilation};
-use rustc_hir::def_id::DefId;
-use rustc_interface::interface::Compiler;
+use rustc_interface::{interface::Compiler, util};
 use rustc_middle::ty::{self, GenericArgs, Instance, TyCtxt};
-use rustc_span::Symbol;
 
-use crate::codegen::{KernelPlan, ModuleBuilder};
-use crate::discovery::HostView;
-use crate::{nvvm, paths, transfer, verify};
+use crate::{
+    attributes,
+    codegen::{KernelPlan, ModuleBuilder},
+    discovery::HostView,
+    nvvm, paths, transfer, verify,
+};
 
 pub struct DeviceView {
-    crate_name: String,
-    host: HostView,
+    pub crate_name: String,
+    pub host: HostView,
 }
 
 impl DeviceView {
-    pub fn new(crate_name: String, host: HostView) -> Self {
-        DeviceView { crate_name, host }
-    }
-
     fn compile(&self, tcx: TyCtxt<'_>) -> Result<(), String> {
         let architecture = env::var("GPURS_ARCHITECTURE").unwrap();
         let directory = PathBuf::from(env::var_os("GPURS_ARTIFACTS").unwrap());
@@ -31,7 +25,7 @@ impl DeviceView {
             .hir_crate_items(())
             .definitions()
             .filter_map(|def_id| {
-                marker(tcx, def_id.to_def_id(), "device").map(|tail| (def_id, tail))
+                attributes::marker(tcx, def_id.to_def_id(), "device").map(|tail| (def_id, tail))
             })
             .collect();
         for (def_id, _) in &definitions {
@@ -92,7 +86,7 @@ impl DeviceView {
             compiler: format!(
                 "gpurs-{} {}",
                 env!("CARGO_PKG_VERSION"),
-                rustc_interface::util::rustc_version_str().unwrap_or("unknown rustc")
+                util::rustc_version_str().unwrap_or("unknown rustc")
             ),
             architecture: architecture.clone(),
             types: self.host.types.clone(),
@@ -132,30 +126,4 @@ impl Callbacks for DeviceView {
         tcx.dcx().abort_if_errors();
         Compilation::Stop
     }
-}
-
-pub fn marker(tcx: TyCtxt<'_>, def_id: DefId, name: &str) -> Option<String> {
-    let attributes = match def_id.as_local() {
-        Some(def_id) => tcx.hir_attrs(tcx.local_def_id_to_hir_id(def_id)),
-        None => tcx.attrs_for_def(def_id),
-    };
-    attributes
-        .iter()
-        .find(|attribute| {
-            attribute.path_matches(&[Symbol::intern("gpurs_tool"), Symbol::intern(name)])
-        })
-        .map(|attribute| {
-            attribute
-                .value_str()
-                .map_or_else(String::new, |value| value.to_string())
-        })
-}
-
-pub fn is_device(tcx: TyCtxt<'_>, def_id: DefId) -> bool {
-    marker(tcx, def_id, "device").is_some()
-        || (tcx.is_closure_like(def_id) && is_device(tcx, tcx.typeck_root_def_id(def_id)))
-}
-
-pub fn is_fast_math(tcx: TyCtxt<'_>, def_id: DefId) -> bool {
-    marker(tcx, tcx.typeck_root_def_id(def_id), "fast_math").is_some()
 }

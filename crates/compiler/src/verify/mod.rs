@@ -6,8 +6,10 @@ mod symbolic;
 use gpurs_artifact::{Access, Condition, Extent, Parameter, Value};
 use rustc_middle::ty::{self, Instance, TyCtxt, TypingEnv};
 
-use crate::codegen::{KernelParameter, ModuleBuilder};
-use crate::transfer;
+use crate::{
+    codegen::{KernelParameter, ModuleBuilder},
+    transfer,
+};
 
 pub fn kernel<'tcx>(
     tcx: TyCtxt<'tcx>,

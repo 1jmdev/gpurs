@@ -1,11 +1,12 @@
-use std::cell::RefCell;
-use std::rc::Rc;
+use std::{cell::RefCell, rc::Rc};
 
 use gpurs_driver as driver;
 
-use crate::buffer::{Buffer, Pending};
-use crate::device::Device;
-use crate::tracking::Status;
+use crate::{
+    buffer::{Buffer, Pending},
+    device::Device,
+    tracking::Status,
+};
 
 /// An ordered queue of GPU work. Launches return without waiting for completion.
 pub struct Stream {
@@ -39,27 +40,39 @@ pub trait Launch: sealed::Sealed {
 }
 
 pub(crate) mod sealed {
+    use super::{LaunchConfig, Stream};
+
     pub trait Sealed {
-        fn stream(&self) -> &super::Stream;
-        fn config(&self) -> Option<super::LaunchConfig>;
+        fn stream(&self) -> &Stream;
+        fn config(&self) -> Option<LaunchConfig>;
     }
 }
 
 impl Stream {
     pub(crate) fn new(device: Rc<Device>) -> Self {
-        Stream { device, raw: driver::Stream::new(), launched: RefCell::default() }
+        Stream {
+            device,
+            raw: driver::Stream::new(),
+            launched: RefCell::default(),
+        }
     }
 
     /// A view of this stream that launches with `config` instead of inferred geometry.
     pub fn with_launch(&self, config: LaunchConfig) -> ConfiguredStream<'_> {
-        ConfiguredStream { stream: self, config }
+        ConfiguredStream {
+            stream: self,
+            config,
+        }
     }
 
     /// Waits for all work on this stream and panics if any of its launches failed.
     #[track_caller]
     pub fn synchronize(&self) {
         self.raw.synchronize();
-        self.launched.take().iter().for_each(|status| status.observe());
+        self.launched
+            .take()
+            .iter()
+            .for_each(|status| status.observe());
     }
 }
 

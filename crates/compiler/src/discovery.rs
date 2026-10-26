@@ -1,14 +1,20 @@
 //! Host view: discovers kernel launches and transfer types from monomorphized host code.
 
 use gpurs_artifact::TransferType;
+use rustc_const_eval::util;
 use rustc_driver::{Callbacks, Compilation};
 use rustc_interface::interface::Compiler;
-use rustc_middle::mir::{self, Body, ConstValue, Operand, TerminatorKind};
-use rustc_middle::mono::MonoItem;
-use rustc_middle::ty::{self, EarlyBinder, Instance, Ty, TyCtxt, TypingEnv};
+use rustc_middle::{
+    mir::{self, Body, ConstValue, Operand, TerminatorKind},
+    mono::MonoItem,
+    ty::{self, EarlyBinder, Instance, TyCtxt, TypingEnv},
+};
+use rustc_span::DUMMY_SP;
 
-use crate::paths;
-use crate::transfer::{self, Portable};
+use crate::{
+    paths,
+    transfer::{self, Portable},
+};
 
 /// One launcher instantiation found in host code.
 #[derive(Clone, Debug, PartialEq)]
@@ -83,11 +89,7 @@ impl HostView {
             if !paths::is(tcx, callee, "gpurs::launch::kernel") {
                 continue;
             }
-            let types: Vec<Ty<'tcx>> = callee_args
-                .no_bound_vars()
-                .expect("monomorphic")
-                .types()
-                .collect();
+            let callee_args = callee_args.no_bound_vars().expect("monomorphic");
             let (Some(module), Some(tail)) = (
                 string(tcx, body, &args[1].node),
                 string(tcx, body, &args[2].node),
@@ -96,7 +98,7 @@ impl HostView {
                     .span_err(*fn_span, "gpurs launcher arguments must be string literals");
                 continue;
             };
-            let ty::Tuple(elements) = types[1].kind() else {
+            let ty::Tuple(elements) = callee_args.type_at(1).kind() else {
                 continue;
             };
             let generics = elements
@@ -112,9 +114,9 @@ impl HostView {
             let suffix = if elements.is_empty() {
                 String::new()
             } else {
-                rustc_const_eval::util::type_name(tcx, types[1])
+                util::type_name(tcx, callee_args.type_at(1))
             };
-            let configured = matches!(types[0].kind(), ty::Adt(adt, _)
+            let configured = matches!(callee_args.type_at(0).kind(), ty::Adt(adt, _)
                 if paths::is(tcx, adt.did(), "gpurs::stream::ConfiguredStream"));
             let launch = Launch {
                 key: format!("{module}::{tail}{suffix}"),
@@ -164,7 +166,7 @@ fn string<'tcx>(tcx: TyCtxt<'tcx>, body: &Body<'tcx>, operand: &Operand<'tcx>) -
         _ => return None,
     };
     let ConstValue::Slice { alloc_id, meta } = constant
-        .eval(tcx, TypingEnv::fully_monomorphized(), rustc_span::DUMMY_SP)
+        .eval(tcx, TypingEnv::fully_monomorphized(), DUMMY_SP)
         .ok()?
     else {
         return None;

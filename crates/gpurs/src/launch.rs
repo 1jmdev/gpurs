@@ -1,20 +1,24 @@
 //! Kernel submission used by `#[gpu]` launchers.
 
-use std::any::type_name;
-use std::mem::MaybeUninit;
-use std::ops::Range;
-use std::rc::Rc;
+use std::{
+    any, array,
+    mem::{self, MaybeUninit},
+    rc::Rc,
+    slice,
+};
 
 use gpurs_artifact::{
-    Access as Effect, Condition, Expression, Extent, INPUT_CAPACITY, INPUTS_OFFSET, Parameter,
-    RESULT_OFFSET, Relation, STATUS_OFFSET, TransferType, parameter_offsets,
+    self as artifact, Access as Effect, Condition, Expression, Extent, INPUT_CAPACITY,
+    INPUTS_OFFSET, Parameter, RESULT_OFFSET, Relation, STATUS_OFFSET, TransferType,
 };
 use gpurs_driver as driver;
 
-use crate::buffer::{Buffer, DeviceSlice, DeviceSliceMut, DeviceValue};
-use crate::device::{Device, LoadedKernel};
-use crate::stream::{Launch, LaunchConfig};
-use crate::tracking::{self, Access, Allocation};
+use crate::{
+    buffer::{Buffer, DeviceSlice, DeviceSliceMut, DeviceValue, Span},
+    device::{Device, LoadedKernel},
+    stream::{Launch, LaunchConfig},
+    tracking::{self, Access, Allocation},
+};
 
 /// Arguments of one kernel launch, collected in parameter order.
 pub struct KernelLaunch<'a, S: Launch> {
@@ -24,20 +28,19 @@ pub struct KernelLaunch<'a, S: Launch> {
     offsets: Vec<u64>,
     position: usize,
     lengths: Vec<u64>,
-    accesses: Vec<(Rc<Allocation>, Range<usize>, bool)>,
+    accesses: Vec<Access>,
 }
 
 #[inline(never)]
 /// Starts a launch of the kernel `module::tail` instantiated with the generic types `G`.
 #[track_caller]
 pub fn kernel<'a, S: Launch, G>(stream: &'a S, module: &str, tail: &str) -> KernelLaunch<'a, S> {
-    let generics = type_name::<G>();
-    let key = match generics {
+    let key = match any::type_name::<G>() {
         "()" => format!("{module}::{tail}"),
         generics => format!("{module}::{tail}{generics}"),
     };
     let kernel = stream.stream().device.kernel(&key);
-    let (offsets, size) = parameter_offsets(&kernel.metadata.parameters);
+    let (offsets, size) = artifact::parameter_offsets(&kernel.metadata.parameters);
     KernelLaunch {
         stream,
         lengths: vec![0; offsets.len()],
@@ -71,7 +74,10 @@ impl<S: Launch> KernelLaunch<'_, S> {
         // SAFETY: kernel parameter types are verified transfer types, so their bytes may be
         // copied as `MaybeUninit<u8>`.
         let bytes = unsafe {
-            std::slice::from_raw_parts((argument as *const T).cast::<MaybeUninit<u8>>(), size_of::<T>())
+            slice::from_raw_parts(
+                (argument as *const T).cast::<MaybeUninit<u8>>(),
+                size_of::<T>(),
+            )
         };
         self.arguments[offset..offset + bytes.len()].copy_from_slice(bytes);
     }
@@ -83,32 +89,48 @@ impl<S: Launch> KernelLaunch<'_, S> {
 
     #[track_caller]
     pub fn finish<R>(self) -> S::Output<R> {
-        let buffer = self.submit::<R>().expect("value-returning kernels have a result");
+        let buffer = self
+            .submit::<R>()
+            .expect("value-returning kernels have a result");
         S::output(buffer)
     }
 
-    fn slice_argument<T>(&mut self, span: crate::buffer::Span<'_>, mutable: bool) {
+    fn slice_argument<T>(&mut self, span: Span<'_>, mutable: bool) {
         let effect = self.effect(mutable);
         let offset = self.next() as usize;
         let pointer = span.allocation.pointer + (span.start * size_of::<T>()) as u64;
         self.write_word(offset, pointer);
         self.write_word(offset + 8, span.len as u64);
         self.lengths[self.position - 1] = span.len as u64;
-        self.accesses.push((span.allocation.clone(), span.bytes::<T>(), effect));
+        self.accesses.push(Access {
+            allocation: span.allocation.clone(),
+            range: span.bytes::<T>(),
+            write: effect,
+            recovers: false,
+        });
     }
 
     fn reference_argument<T>(&mut self, buffer: &Buffer<T>, mutable: bool) {
         let effect = self.effect(mutable);
         let offset = self.next() as usize;
         self.write_word(offset, buffer.allocation.pointer);
-        self.accesses.push((buffer.allocation.clone(), 0..size_of::<T>(), effect));
+        self.accesses.push(Access {
+            allocation: buffer.allocation.clone(),
+            range: 0..size_of::<T>(),
+            write: effect,
+            recovers: false,
+        });
     }
 
     fn effect(&self, mutable: bool) -> bool {
         mutable
             || matches!(
                 self.kernel.metadata.parameters[self.position],
-                Parameter::Slice { access: Effect::Write } | Parameter::Reference { access: Effect::Write }
+                Parameter::Slice {
+                    access: Effect::Write
+                } | Parameter::Reference {
+                    access: Effect::Write
+                }
             )
     }
 
@@ -124,7 +146,7 @@ impl<S: Launch> KernelLaunch<'_, S> {
 
     fn word(&self, offset: usize) -> u64 {
         // SAFETY: integer scalar parameters and header words are fully initialized.
-        u64::from_ne_bytes(std::array::from_fn(|byte| unsafe {
+        u64::from_ne_bytes(array::from_fn(|byte| unsafe {
             self.arguments[offset + byte].assume_init()
         }))
     }
@@ -136,40 +158,55 @@ impl<S: Launch> KernelLaunch<'_, S> {
         let metadata = &self.kernel.metadata;
         let explicit = self.stream.config();
         let config = explicit.unwrap_or_else(|| match metadata.extent {
-            Extent::Single => single(),
+            Extent::Single => LaunchConfig {
+                grid: [1, 1, 1],
+                block: [1, 1, 1],
+                shared_bytes: 0,
+            },
             Extent::Length(parameter) => {
                 let block = *self
                     .kernel
                     .block_size
                     .get_or_init(|| self.kernel.function.preferred_block_size().clamp(32, 1024));
                 let threads = self.lengths[parameter] as usize;
-                LaunchConfig { grid: [threads.div_ceil(block as usize), 1, 1], block: [block as usize, 1, 1], shared_bytes: 0 }
+                LaunchConfig {
+                    grid: [threads.div_ceil(block as usize), 1, 1],
+                    block: [block as usize, 1, 1],
+                    shared_bytes: 0,
+                }
             }
             Extent::Explicit => panic!(
                 "kernel `{}` needs explicit geometry; launch it with `stream.with_launch(config)`",
                 metadata.name
             ),
         });
-        metadata.conditions.iter().for_each(|condition| self.check(condition, &config));
+        metadata
+            .conditions
+            .iter()
+            .for_each(|condition| self.check(condition, &config));
         let threads = config.grid.iter().chain(&config.block).product::<usize>();
         let result = metadata.result.map(|value| {
-            assert_eq!(value.size, size_of::<R>() as u64, "result layout of `{}` changed", metadata.name);
+            assert_eq!(
+                value.size,
+                size_of::<R>() as u64,
+                "result layout of `{}` changed",
+                metadata.name
+            );
             let count = if explicit.is_some() { threads } else { 1 };
             let bytes = count * size_of::<R>();
             let pointer = driver::allocate_async(bytes, &stream.raw);
-            Buffer::new(Rc::new(Allocation::new(device.clone(), pointer, bytes)), count)
+            Buffer::new(
+                Rc::new(Allocation::new(device.clone(), pointer, bytes)),
+                count,
+            )
         });
-        let arguments = std::mem::take(&mut self.accesses);
-        reject_aliasing(&arguments, &metadata.name);
-        let mut accesses: Vec<Access> = arguments
-            .iter()
-            .map(|(allocation, range, write)| match write {
-                true => Access::write(allocation, range.clone()),
-                false => Access::read(allocation, range.clone()),
-            })
-            .collect();
+        let mut accesses = mem::take(&mut self.accesses);
+        reject_aliasing(&accesses, &metadata.name);
         if let Some(buffer) = &result {
-            accesses.push(Access::recovering(&buffer.allocation, 0..buffer.allocation.bytes));
+            accesses.push(Access::recovering(
+                &buffer.allocation,
+                0..buffer.allocation.bytes,
+            ));
         }
         let sources = tracking::order(&stream.raw, &accesses);
         if sources.len() > INPUT_CAPACITY {
@@ -184,7 +221,9 @@ impl<S: Launch> KernelLaunch<'_, S> {
         for (index, source) in sources.iter().enumerate() {
             self.write_word(INPUTS_OFFSET as usize + 8 * index, source.pointer);
         }
-        let result_pointer = result.as_ref().map_or(0, |buffer| buffer.allocation.pointer);
+        let result_pointer = result
+            .as_ref()
+            .map_or(0, |buffer| buffer.allocation.pointer);
         self.write_word(RESULT_OFFSET as usize, result_pointer);
         if threads == 0 {
             return result;
@@ -231,18 +270,13 @@ impl<S: Launch> KernelLaunch<'_, S> {
     }
 }
 
-fn single() -> LaunchConfig {
-    LaunchConfig { grid: [1, 1, 1], block: [1, 1, 1], shared_bytes: 0 }
-}
-
 #[track_caller]
-fn reject_aliasing(accesses: &[(Rc<Allocation>, Range<usize>, bool)], kernel: &str) {
-    for (index, (allocation, range, write)) in accesses.iter().enumerate() {
-        for (other, other_range, other_write) in &accesses[index + 1..] {
-            if Rc::ptr_eq(allocation, other)
-                && (write | other_write)
-                && range.start < other_range.end
-                && other_range.start < range.end
+fn reject_aliasing(accesses: &[Access], kernel: &str) {
+    for (index, access) in accesses.iter().enumerate() {
+        for other in &accesses[index + 1..] {
+            if Rc::ptr_eq(&access.allocation, &other.allocation)
+                && (access.write || other.write)
+                && tracking::overlaps(&access.range, &other.range)
             {
                 panic!("arguments of `{kernel}` overlap while at least one of them is written");
             }
@@ -254,7 +288,7 @@ fn reject_aliasing(accesses: &[(Rc<Allocation>, Range<usize>, bool)], kernel: &s
 #[inline(never)]
 #[track_caller]
 pub(crate) fn verified<T>(device: &Device) -> &TransferType {
-    let name = type_name::<T>();
+    let name = any::type_name::<T>();
     device
         .artifact
         .types

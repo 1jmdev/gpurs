@@ -1,4 +1,7 @@
-use std::ffi::{CStr, c_char, c_int, c_uint, c_void};
+use std::{
+    ffi::{CStr, c_char, c_int, c_uint, c_void},
+    ptr,
+};
 
 pub type DevicePointer = u64;
 pub type CUresult = c_int;
@@ -98,13 +101,16 @@ unsafe extern "C" {
 #[track_caller]
 pub fn check(result: CUresult, operation: &str) {
     if result != CUDA_SUCCESS {
-        panic!("CUDA driver call `{operation}` failed: {}", describe(result));
+        panic!(
+            "CUDA driver call `{operation}` failed: {}",
+            describe(result)
+        );
     }
 }
 
 pub fn describe(result: CUresult) -> String {
-    let mut name = std::ptr::null();
-    let mut description = std::ptr::null();
+    let mut name = ptr::null();
+    let mut description = ptr::null();
     // SAFETY: the driver writes pointers to static strings or leaves them null.
     unsafe {
         cuGetErrorName(result, &mut name);

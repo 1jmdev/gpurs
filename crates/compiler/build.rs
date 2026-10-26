@@ -1,7 +1,6 @@
 //! Lets the library find librustc_driver in the toolchain sysroot when loaded.
 
-use std::env;
-use std::process::Command;
+use std::{env, process::Command};
 
 fn main() {
     let output = Command::new(env::var("RUSTC").unwrap())

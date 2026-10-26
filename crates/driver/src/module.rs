@@ -1,9 +1,13 @@
-use std::ffi::{CString, c_void};
-use std::mem::MaybeUninit;
-use std::ptr;
+use std::{
+    ffi::{CString, c_void},
+    mem::MaybeUninit,
+    ptr,
+};
 
-use crate::Stream;
-use crate::ffi::{self, CUfunction, CUmodule, check};
+use crate::{
+    Stream,
+    ffi::{self, CUfunction, CUmodule},
+};
 
 #[derive(Debug)]
 pub struct Module {
@@ -15,7 +19,7 @@ impl Module {
     pub fn load(image: &[u8]) -> Self {
         let mut raw = ptr::null_mut();
         // SAFETY: `image` is a complete CUBIN image that outlives the call.
-        check(
+        ffi::check(
             unsafe { ffi::cuModuleLoadData(&mut raw, image.as_ptr().cast()) },
             "cuModuleLoadData",
         );
@@ -27,7 +31,7 @@ impl Module {
         let name = CString::new(name).expect("kernel names contain no NUL bytes");
         let mut raw = ptr::null_mut();
         // SAFETY: the module is loaded and `name` is NUL-terminated.
-        check(
+        ffi::check(
             unsafe { ffi::cuModuleGetFunction(&mut raw, self.raw, name.as_ptr()) },
             "cuModuleGetFunction",
         );
@@ -53,7 +57,7 @@ impl Function {
     pub fn preferred_block_size(&self) -> u32 {
         let (mut grid, mut block) = (0, 0);
         // SAFETY: out-pointers reference valid locals and the function is live.
-        check(
+        ffi::check(
             unsafe {
                 ffi::cuOccupancyMaxPotentialBlockSize(&mut grid, &mut block, self.raw, None, 0, 0)
             },
@@ -77,7 +81,7 @@ impl Function {
     ) {
         let mut parameters = [arguments.as_mut_ptr().cast::<c_void>()];
         // SAFETY: guaranteed by the caller; the driver copies the block during the call.
-        check(
+        ffi::check(
             unsafe {
                 ffi::cuLaunchKernel(
                     self.raw,

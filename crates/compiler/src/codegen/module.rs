@@ -1,13 +1,18 @@
-use std::collections::BTreeSet;
-use std::fmt::Write;
+use std::{collections::BTreeSet, fmt::Write};
 
 use rustc_data_structures::fx::FxHashMap;
-use rustc_middle::mir::interpret::AllocId;
-use rustc_middle::ty::layout::{LayoutOf, TyAndLayout};
-use rustc_middle::ty::{EarlyBinder, Instance, TyCtxt, TypingEnv};
+use rustc_middle::{
+    mir::interpret::AllocId,
+    ty::{
+        EarlyBinder, Instance, TyCtxt, TypingEnv,
+        layout::{LayoutOf, TyAndLayout},
+    },
+};
 
-use super::function::FunctionBuilder;
-use super::layout::{Cx, PassMode, immediate_type, pass_mode};
+use super::{
+    function::FunctionBuilder,
+    layout::{self, Cx, PassMode},
+};
 
 const HEADER: &str = r#"target datalayout = "e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-i128:128:128-f32:32:32-f64:64:64-v16:16:16-v32:32:32-v64:64:64-v128:128:128-n16:32:64"
 target triple = "nvptx64-nvidia-cuda"
@@ -92,7 +97,7 @@ impl<'tcx> ModuleBuilder<'tcx> {
                 EarlyBinder::bind(self.tcx, ty),
             );
             let layout = self.cx.layout_of(ty);
-            (pass_mode(layout), layout)
+            (layout::pass_mode(layout), layout)
         };
         Signature {
             arguments: body
@@ -161,11 +166,11 @@ impl Signature<'_> {
             match mode {
                 PassMode::Ignore => {}
                 PassMode::Direct(scalar) => {
-                    parameters.push(format!("{} %a{index}", immediate_type(*scalar)))
+                    parameters.push(format!("{} %a{index}", layout::immediate_type(*scalar)))
                 }
                 PassMode::Pair(a, b) => {
-                    parameters.push(format!("{} %a{index}.0", immediate_type(*a)));
-                    parameters.push(format!("{} %a{index}.1", immediate_type(*b)));
+                    parameters.push(format!("{} %a{index}.0", layout::immediate_type(*a)));
+                    parameters.push(format!("{} %a{index}.1", layout::immediate_type(*b)));
                 }
                 PassMode::Indirect => parameters.push(format!("i8* %a{index}")),
             }
@@ -176,8 +181,12 @@ impl Signature<'_> {
     pub fn return_type(&self) -> String {
         match self.result.0 {
             PassMode::Ignore | PassMode::Indirect => "void".to_owned(),
-            PassMode::Direct(scalar) => immediate_type(scalar).to_owned(),
-            PassMode::Pair(a, b) => format!("{{ {}, {} }}", immediate_type(a), immediate_type(b)),
+            PassMode::Direct(scalar) => layout::immediate_type(scalar).to_owned(),
+            PassMode::Pair(a, b) => format!(
+                "{{ {}, {} }}",
+                layout::immediate_type(a),
+                layout::immediate_type(b)
+            ),
         }
     }
 }

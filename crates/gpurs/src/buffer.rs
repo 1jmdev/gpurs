@@ -1,12 +1,17 @@
-use std::marker::PhantomData;
-use std::mem::MaybeUninit;
-use std::ops::{Bound, Range, RangeBounds};
-use std::rc::Rc;
+use std::{
+    marker::PhantomData,
+    mem::MaybeUninit,
+    ops::{Bound, Range, RangeBounds},
+    rc::Rc,
+    slice,
+};
 
 use gpurs_driver as driver;
 
-use crate::stream::Stream;
-use crate::tracking::{self, Access, Allocation};
+use crate::{
+    stream::Stream,
+    tracking::{self, Access, Allocation},
+};
 
 /// GPU-resident elements owned by the host. Storage outlives queued work after a drop.
 pub struct Buffer<T> {
@@ -46,8 +51,10 @@ pub struct Span<'a> {
 }
 
 pub(crate) mod sealed {
+    use super::Span;
+
     pub trait Sealed<T> {
-        fn span(&self) -> super::Span<'_>;
+        fn span(&self) -> Span<'_>;
     }
 }
 
@@ -67,7 +74,11 @@ pub trait DeviceSliceMut<T>: DeviceSlice<T> {}
 
 impl<T> Buffer<T> {
     pub(crate) fn new(allocation: Rc<Allocation>, len: usize) -> Self {
-        Buffer { allocation, len, marker: PhantomData }
+        Buffer {
+            allocation,
+            len,
+            marker: PhantomData,
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -88,12 +99,18 @@ impl<T> Buffer<T> {
 
     #[track_caller]
     pub fn view(&self, range: impl RangeBounds<usize>) -> View<'_, T> {
-        View { span: self.whole().slice(range), marker: PhantomData }
+        View {
+            span: self.whole().slice(range),
+            marker: PhantomData,
+        }
     }
 
     #[track_caller]
     pub fn view_mut(&mut self, range: impl RangeBounds<usize>) -> ViewMut<'_, T> {
-        ViewMut { span: self.whole().slice(range), marker: PhantomData }
+        ViewMut {
+            span: self.whole().slice(range),
+            marker: PhantomData,
+        }
     }
 
     #[track_caller]
@@ -105,8 +122,14 @@ impl<T> Buffer<T> {
     pub fn split_at_mut(&mut self, mid: usize) -> (ViewMut<'_, T>, ViewMut<'_, T>) {
         let whole = self.whole();
         (
-            ViewMut { span: whole.slice(..mid), marker: PhantomData },
-            ViewMut { span: whole.slice(mid..), marker: PhantomData },
+            ViewMut {
+                span: whole.slice(..mid),
+                marker: PhantomData,
+            },
+            ViewMut {
+                span: whole.slice(mid..),
+                marker: PhantomData,
+            },
         )
     }
 
@@ -119,7 +142,11 @@ impl<T> Buffer<T> {
     }
 
     fn whole(&self) -> Span<'_> {
-        Span { allocation: &self.allocation, start: 0, len: self.len }
+        Span {
+            allocation: &self.allocation,
+            start: 0,
+            len: self.len,
+        }
     }
 }
 
@@ -174,9 +201,16 @@ impl<'a> Span<'a> {
             Bound::Unbounded => self.len,
         };
         if start > end || end > self.len {
-            panic!("range {start}..{end} is out of bounds for a GPU buffer of length {}", self.len);
+            panic!(
+                "range {start}..{end} is out of bounds for a GPU buffer of length {}",
+                self.len
+            );
         }
-        Span { allocation: self.allocation, start: self.start + start, len: end - start }
+        Span {
+            allocation: self.allocation,
+            start: self.start + start,
+            len: end - start,
+        }
     }
 
     pub fn bytes<T>(&self) -> Range<usize> {
@@ -193,10 +227,8 @@ fn download<T>(span: Span<'_>) -> Vec<T> {
     // SAFETY: the spare capacity holds `range.len()` bytes and stays untouched until the
     // stream is synchronized below; the source range lies inside the allocation.
     unsafe {
-        let destination = std::slice::from_raw_parts_mut(
-            host.as_mut_ptr().cast::<MaybeUninit<u8>>(),
-            range.len(),
-        );
+        let destination =
+            slice::from_raw_parts_mut(host.as_mut_ptr().cast::<MaybeUninit<u8>>(), range.len());
         driver::copy_from_device_async(
             destination,
             span.allocation.pointer + range.start as u64,
@@ -212,18 +244,20 @@ fn download<T>(span: Span<'_>) -> Vec<T> {
 
 #[track_caller]
 fn read<T>(buffer: &Buffer<T>) -> T {
-    download(buffer.whole()).pop().expect("device values hold one element")
+    download(buffer.whole())
+        .pop()
+        .expect("device values hold one element")
 }
 
 fn fill<T: Copy>(span: Span<'_>, stream: &Stream, value: T) {
     let access = Access::recovering(span.allocation, span.bytes::<T>());
-    tracking::order(&stream.raw, std::slice::from_ref(&access));
+    tracking::order(&stream.raw, slice::from_ref(&access));
     let host = vec![value; span.len];
     // SAFETY: `T` is a verified transfer type, so its bytes may be read as `MaybeUninit<u8>`;
     // the driver stages the pageable source before returning.
     unsafe {
         let source =
-            std::slice::from_raw_parts(host.as_ptr().cast::<MaybeUninit<u8>>(), size_of_val(&*host));
+            slice::from_raw_parts(host.as_ptr().cast::<MaybeUninit<u8>>(), size_of_val(&*host));
         driver::copy_to_device_async(
             span.allocation.pointer + access.range.start as u64,
             source,

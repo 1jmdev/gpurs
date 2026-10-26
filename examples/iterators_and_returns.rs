@@ -1,5 +1,6 @@
-use gpurs::*;
 use std::ops::{Add, Mul};
+
+use gpurs::*;
 
 #[gpu]
 fn dot<T>(left: &[T], right: &[T], zero: T) -> T
