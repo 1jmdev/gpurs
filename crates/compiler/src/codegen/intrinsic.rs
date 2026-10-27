@@ -370,6 +370,13 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                 }
                 return;
             }
+            Lowering::Register(register) if self.linear && register == "laneid" => {
+                let thread = self.special_register("tid.x");
+                let lane = self
+                    .ir
+                    .binary(Binary::And, Flags::empty(), thread, ir::Value::i32(31));
+                self.ir.cast(Conversion::ZExt, lane, Type::I64)
+            }
             Lowering::Register(register) => self.extended_register(&register),
             Lowering::Index => {
                 let registers = [

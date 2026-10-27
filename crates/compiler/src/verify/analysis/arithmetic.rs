@@ -7,6 +7,7 @@ use crate::{
 /// `(signed, bits)` of an integer type.
 pub fn integer_kind(ty: Ty) -> Option<(bool, u32)> {
     match ty.kind() {
+        TyKind::RigidTy(RigidTy::Bool) => Some((false, 1)),
         TyKind::RigidTy(RigidTy::Uint(kind)) => Some((false, bits(kind))),
         TyKind::RigidTy(RigidTy::Int(kind)) => Some((
             true,
@@ -202,6 +203,8 @@ impl Analysis<'_, '_> {
                 BinOp::AddUnchecked => (a.add(&b, 1)?, true),
                 BinOp::SubUnchecked => (a.add(&b, -1)?, true),
                 BinOp::MulUnchecked => (a.multiply(&b)?, true),
+                BinOp::BitXor => (Polynomial::constant(a.value()? ^ b.value()?), true),
+                BinOp::BitOr => (Polynomial::constant(a.value()? | b.value()?), true),
                 BinOp::Shl | BinOp::ShlUnchecked if !signed => {
                     (a.scale(1 << shift()?)?, operation == BinOp::ShlUnchecked)
                 }
@@ -292,8 +295,13 @@ impl Analysis<'_, '_> {
             value.variance = 1;
         }
         if checked {
+            let overflow = if value.integer.is_some() && value.requirement.is_empty() {
+                Value::integer(Polynomial::constant(0), variance)
+            } else {
+                Value::varying(variance)
+            };
             Value {
-                fields: vec![value, Value::varying(variance)],
+                fields: vec![value, overflow],
                 variance,
                 ..Value::default()
             }

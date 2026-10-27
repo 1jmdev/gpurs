@@ -231,20 +231,27 @@ impl Analysis<'_, '_> {
             .into_iter()
             .enumerate()
             .map(|(field, element)| {
-                let Some(kind @ (false, _)) = integer_kind(element) else {
+                let Some(kind) = integer_kind(element) else {
                     return Value::default();
                 };
                 let start = shape.offset(field).bytes();
-                let size = (kind.1 / 8) as usize;
+                let size = kind.1.div_ceil(8) as usize;
                 let Some(bytes) = bytes.get(start..start + size) else {
                     return Value::default();
                 };
-                let mut integer = [0u8; 16];
+                let mut integer = [if kind.0 && bytes[size - 1] & 128 != 0 {
+                    255
+                } else {
+                    0
+                }; 16];
                 integer[..size].copy_from_slice(bytes);
                 Value {
-                    integer: i128::try_from(u128::from_le_bytes(integer))
-                        .ok()
-                        .map(Polynomial::constant),
+                    integer: if kind.0 {
+                        Some(i128::from_le_bytes(integer))
+                    } else {
+                        i128::try_from(u128::from_le_bytes(integer)).ok()
+                    }
+                    .map(Polynomial::constant),
                     ..Value::default()
                 }
             })
