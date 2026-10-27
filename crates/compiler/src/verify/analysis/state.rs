@@ -1,44 +1,92 @@
-use gpurs_artifact::{Bound, Condition};
-use rustc_data_structures::fx::FxHashSet;
+use std::{collections::BTreeMap, rc::Rc};
 
-use crate::{
-    codegen::KernelParameter,
-    stable,
-    stable::*,
-    verify::symbolic::{Fact, Polynomial},
-};
+use super::super::symbolic::{Fact, Polynomial, Predicate, Requirement};
+use crate::stable::*;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum Region {
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Region {
     Parameter(usize),
     Shared(usize, u64),
     Unknown,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct Origin {
+/// A position in device memory: `index` counts elements of the region, and `inner` marks a
+/// pointer into one element.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Origin {
     pub region: Region,
     pub index: Option<Polynomial>,
+    pub inner: bool,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(super) struct Value {
-    pub expression: Option<Polynomial>,
-    /// Inclusive upper bound in launch variables when the exact expression is unknown.
-    pub maximum: Option<Polynomial>,
-    pub origin: Option<Origin>,
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Pointer {
+    /// A local of some frame, and the field path inside it; `usize::MAX` is an unknown element.
+    Slot(usize, Vec<usize>),
+    Memory(Origin),
+    Unknown,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Value {
+    /// The exact integer value; an opaque variable when only its interval is known.
+    pub integer: Option<Polynomial>,
+    /// Launch clauses under which `integer` is exact.
+    pub requirement: Requirement,
+    /// Facts that hold when the value, or the discriminant it holds, equals the key.
+    pub guards: Vec<(i128, Vec<Fact>)>,
+    /// Number of values a boolean or discriminant can take.
+    pub domain: Option<usize>,
+    pub variant: Option<i128>,
     pub fields: Vec<Value>,
-    pub comparison: Option<Fact>,
+    pub pointer: Option<Pointer>,
+    /// 0: uniform across the launch, 1: uniform within a warp, 2: per thread.
     pub variance: u8,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct State {
-    pub locals: Vec<Value>,
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct State {
+    pub slots: Vec<Value>,
     pub facts: Vec<Fact>,
 }
 
-pub(super) struct Access {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    /// A memory-safety check: no certified entry point exists unless it is discharged.
+    Memory,
+    /// A data-dependent arithmetic check the certified entry point records and survives.
+    Arithmetic,
+    /// A panic: no certified entry point exists unless it is unreachable.
+    Panic,
+}
+
+pub struct Obligation {
+    pub context: usize,
+    pub block: usize,
+    pub kind: Kind,
+    pub goal: Option<Predicate>,
+    pub description: String,
+    pub verdict: Option<Requirement>,
+    pub span: Span,
+}
+
+pub struct Context {
+    pub instance: Instance,
+    /// Child contexts by call block.
+    pub calls: BTreeMap<usize, usize>,
+}
+
+pub struct Frame {
+    pub body: Rc<Body>,
+    /// Facts the caller established before entering; a panic is never blamed on them.
+    pub inherited: Vec<Fact>,
+    pub base: usize,
+    pub context: usize,
+    pub block: usize,
+    pub statement: usize,
+}
+
+pub struct Access {
     pub origin: Origin,
     pub write: bool,
     pub atomic: bool,
@@ -47,111 +95,63 @@ pub(super) struct Access {
     pub span: Span,
 }
 
-pub(super) struct Analysis<'a, 'sess> {
-    pub sess: Sess<'sess>,
-    pub instance: Instance,
-    pub body: Body,
-    pub parameters: &'a [KernelParameter],
-    pub accesses: Vec<Access>,
-    pub barriers: FxHashSet<usize>,
-    pub collectives: Vec<(usize, u8, Span)>,
-    pub controls: Vec<Vec<(usize, usize)>>,
-    pub comparisons: Vec<Option<Fact>>,
-    pub conditions: Vec<Condition>,
-    /// Runtime checks of the kernel body, by block, that cannot fail when the bound holds.
-    pub proofs: Vec<(usize, Bound)>,
-    /// Shared-memory accesses, by block, whose index bound was proven for this launch.
-    pub shared_proofs: Vec<usize>,
-    /// Shared-array accessors with at least one call site whose bound was not proven.
-    pub shared_unproven: FxHashSet<Instance>,
-    /// Shared-array accessors whose every call site was proven.
-    pub shared_proven: FxHashSet<Instance>,
-    /// Locals whose address escapes, so their values are unknown after any call.
-    pub escaped: FxHashSet<usize>,
-    pub uses_index: bool,
-    pub geometry: bool,
-    pub collect: bool,
-    pub block: usize,
-    pub span: Span,
-}
-
 impl Value {
-    pub(super) fn expression(expression: Polynomial, variance: u8) -> Self {
+    pub fn integer(integer: Polynomial, variance: u8) -> Self {
         Value {
-            expression: Some(expression),
+            integer: Some(integer),
             variance,
             ..Value::default()
         }
     }
 
-    /// Drops numeric knowledge, which code holding the value's address may have changed.
-    pub(super) fn forget(&mut self) {
-        self.expression = None;
-        self.maximum = None;
-        self.comparison = None;
-        self.fields.iter_mut().for_each(Value::forget);
+    pub fn varying(variance: u8) -> Self {
+        Value {
+            variance,
+            ..Value::default()
+        }
     }
 
-    pub(super) fn join(&mut self, other: &Self) {
-        if self.expression != other.expression {
-            self.expression = None;
-        }
-        if self.maximum != other.maximum {
-            self.maximum = None;
-        }
-        if self.origin != other.origin {
-            self.origin = match (&self.origin, &other.origin) {
-                (Some(left), Some(right)) if left.region == right.region => Some(Origin {
-                    region: left.region.clone(),
-                    index: None,
-                }),
-                (None, None) => None,
-                _ => Some(Origin {
-                    region: Region::Unknown,
-                    index: None,
-                }),
-            };
-        }
-        if self.comparison != other.comparison {
-            self.comparison = None;
-        }
-        if self.fields.len() == other.fields.len() {
-            self.fields
-                .iter_mut()
-                .zip(&other.fields)
-                .for_each(|(left, right)| left.join(right));
-        } else {
-            self.fields.clear();
-        }
-        self.variance = self.variance.max(other.variance);
+    /// Facts that hold when the value equals `key`.
+    pub fn guard(&self, key: i128) -> Option<&Vec<Fact>> {
+        self.guards
+            .iter()
+            .find(|(candidate, _)| *candidate == key)
+            .map(|(_, facts)| facts)
     }
 }
 
-impl Analysis<'_, '_> {
-    /// The type of a place, following its projections.
-    pub(super) fn place_type(&self, place: &Place) -> Ty {
-        let mut ty = self
-            .body
-            .local_decl(place.local)
-            .unwrap_or_else(|| panic!("no declaration for local {}", place.local))
-            .ty;
-        for element in &place.projection {
-            ty = match element {
-                ProjectionElem::Deref => {
-                    ty.kind()
-                        .builtin_deref(true)
-                        .unwrap_or_else(|| panic!("dereference of non-pointer"))
-                        .ty
-                }
-                ProjectionElem::Field(_, field) => *field,
-                ProjectionElem::Downcast(..) => ty,
-                ProjectionElem::OpaqueCast(cast) => *cast,
-                _ => match stable::rigid(ty) {
-                    RigidTy::Array(element, _) | RigidTy::Slice(element) => element,
-                    _ => ty,
-                },
-            };
-        }
-        ty
+pub fn get(value: &Value, path: &[usize]) -> Value {
+    match path.split_first() {
+        None => value.clone(),
+        Some((field, rest)) => value
+            .fields
+            .get(*field)
+            .map_or_else(|| Value::varying(value.variance), |field| get(field, rest)),
     }
+}
+
+pub fn set(value: &mut Value, path: &[usize], replacement: Value) {
+    let Some((field, rest)) = path.split_first() else {
+        *value = replacement;
+        return;
+    };
+    if *field == usize::MAX {
+        value.fields.clear();
+        value.variance = value.variance.max(replacement.variance);
+        return;
+    }
+    if value.fields.len() <= *field {
+        value.fields.resize_with(field + 1, Value::default);
+    }
+    value.integer = None;
+    set(&mut value.fields[*field], rest, replacement);
+}
+
+/// Slots that a value points into.
+pub fn pointed_slots(value: &Value) -> Vec<usize> {
+    let mut slots: Vec<usize> = value.fields.iter().flat_map(pointed_slots).collect();
+    if let Some(Pointer::Slot(slot, _)) = value.pointer {
+        slots.push(slot);
+    }
+    slots
 }

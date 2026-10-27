@@ -31,9 +31,8 @@ impl DeviceView {
             })
             .collect();
         let mut module = ModuleBuilder::new(sess);
-        let mut proven = ModuleBuilder::new(sess);
-        proven.checked = false;
         let mut kernels = Vec::new();
+        let mut report = String::new();
         for launch in &self.host.launches {
             let Some((def_id, _)) = definitions.iter().find(|(def_id, tail)| {
                 *tail == launch.tail && paths::module_path(sess, *def_id) == launch.module
@@ -99,9 +98,7 @@ impl DeviceView {
                 launch.key.clone(),
                 format!("gpurs_kernel_{}", kernels.len()),
             ) {
-                if plan.infallible {
-                    proven.kernel(plan.clone());
-                }
+                report.push_str(&plan.summary);
                 kernels.push(module.kernel(plan));
             }
         }
@@ -124,20 +121,15 @@ impl DeviceView {
             fs::create_dir_all(&scratch).map_err(|error| error.to_string())?;
             let ptx = nvvm::ptx(&toolkit, &ir, &architecture)?;
             let cubin = nvvm::cubin(&toolkit, &ptx, &architecture, &scratch)?;
-            let infallible = if kernels.iter().any(|kernel| kernel.infallible.is_some()) {
-                let proven = nvvm::ptx(&toolkit, &proven.finish(), &architecture)?;
-                nvvm::cubin(&toolkit, &proven, &architecture, &scratch)?
-            } else {
-                Vec::new()
-            };
             fs::remove_file(scratch.join("kernels.ptx")).map_err(|error| error.to_string())?;
             fs::remove_file(scratch.join("kernels.cubin")).map_err(|error| error.to_string())?;
-            artifact.modules.push(Module {
-                cubin,
-                infallible,
-                kernels,
-            });
+            artifact.modules.push(Module { cubin, kernels });
         }
+        fs::write(
+            directory.join(format!("{}.preconditions", self.crate_name)),
+            report,
+        )
+        .map_err(|error| error.to_string())?;
         fs::write(
             directory.join(format!("{}.gpurs", self.crate_name)),
             artifact.encode(),

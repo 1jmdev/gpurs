@@ -1,6 +1,6 @@
-use std::mem;
+use std::collections::{BTreeMap, BTreeSet};
 
-use rustc_data_structures::fx::{FxHashMap, FxHashSet};
+use rustc_data_structures::fx::FxHashMap;
 
 use super::{
     function::FunctionBuilder,
@@ -9,17 +9,36 @@ use super::{
 };
 use crate::stable::*;
 
+/// Which checks of one function copy the verifier discharged, by MIR block.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Certificate {
+    /// Blocks whose assertion or panic cannot fail; their checks are omitted.
+    pub discharged: BTreeSet<usize>,
+    /// Blocks whose data-dependent arithmetic check records the failure and continues.
+    pub recorded: BTreeSet<usize>,
+    /// Certificates of the callees, by call block.
+    pub calls: BTreeMap<usize, Certificate>,
+}
+
+impl Certificate {
+    /// Whether a check of this copy or of a callee reports through the status word.
+    pub fn records(&self) -> bool {
+        !self.recorded.is_empty() || self.calls.values().any(Certificate::records)
+    }
+}
+
+/// One copy of a function: certified with its certificate, or instrumented; `linear` folds a
+/// one-dimensional launch geometry.
+type Copy = (Instance, Option<Certificate>, bool);
+
 /// One NVVM IR module holding every device function reachable from the requested kernels.
 pub struct ModuleBuilder<'sess> {
     pub sess: Sess<'sess>,
-    pub checked: bool,
     pub ir: ir::Module,
     /// The block-shared slot holding the launch's failure status pointer.
     pub status: ir::Value,
-    functions: FxHashMap<Instance, String>,
-    queue: Vec<Instance>,
-    /// Copies of kernel bodies that skip the assertions in the proven blocks.
-    variants: Vec<(Instance, String, FxHashSet<usize>, FxHashSet<usize>, bool)>,
+    functions: FxHashMap<Copy, String>,
+    queue: Vec<Copy>,
     pub(super) allocations: FxHashMap<AllocId, ir::Value>,
 }
 
@@ -42,39 +61,29 @@ impl<'sess> ModuleBuilder<'sess> {
         );
         ModuleBuilder {
             sess,
-            checked: true,
             ir,
             status,
             functions: FxHashMap::default(),
             queue: Vec::new(),
-            variants: Vec::new(),
             allocations: FxHashMap::default(),
         }
     }
 
-    /// Name of the device function for `instance`, queueing it for lowering on first use.
-    pub fn function(&mut self, instance: Instance) -> String {
-        if let Some(name) = self.functions.get(&instance) {
+    /// Name of the device function for one copy of `instance`, queueing it for lowering on
+    /// first use.
+    pub fn function(
+        &mut self,
+        instance: Instance,
+        certificate: Option<Certificate>,
+        linear: bool,
+    ) -> String {
+        let copy = (instance, certificate, linear);
+        if let Some(name) = self.functions.get(&copy) {
             return name.clone();
         }
         let name = format!("gpurs.f{}", self.functions.len());
-        self.functions.insert(instance, name.clone());
-        self.queue.push(instance);
-        name
-    }
-
-    /// Name of a copy of `instance` that omits the assertions ending the `skipped` blocks and
-    /// the checked accessors of the `shared` blocks, and folds the launch geometry when `linear`.
-    pub fn variant(
-        &mut self,
-        instance: Instance,
-        skipped: FxHashSet<usize>,
-        shared: FxHashSet<usize>,
-        linear: bool,
-    ) -> String {
-        let name = format!("gpurs.v{}", self.variants.len());
-        self.variants
-            .push((instance, name.clone(), skipped, shared, linear));
+        self.functions.insert(copy.clone(), name.clone());
+        self.queue.push(copy);
         name
     }
 
@@ -98,41 +107,39 @@ impl<'sess> ModuleBuilder<'sess> {
 
     /// Lowers every queued function and renders the module.
     pub fn finish(mut self) -> String {
-        for (instance, name, skipped, shared, linear) in mem::take(&mut self.variants) {
+        while let Some(copy) = self.queue.pop() {
+            let name = self.functions[&copy].clone();
+            let (instance, certificate, linear) = copy;
             let mut builder = FunctionBuilder::new(&mut self, instance);
-            builder.skipped = skipped;
-            builder.unchecked_shared = shared;
+            builder.certificate = certificate;
             builder.linear = linear;
             builder.lower(&name);
         }
-        while let Some(instance) = self.queue.pop() {
-            let name = self.functions[&instance].clone();
-            FunctionBuilder::new(&mut self, instance).lower(&name);
-        }
-        self.ir.define(self.failure());
+        self.ir.define(self.failure("gpurs.fail", true));
+        self.ir.define(self.failure("gpurs.record", false));
         self.ir.to_string()
     }
 
-    /// `gpurs.fail(code)`: records the first failure of the launch and stops the thread, or
-    /// traps when the module is the proven, unchecked copy.
-    fn failure(&self) -> ir::Function {
-        let mut function = ir::Function::new("gpurs.fail", Type::Void, vec![Type::I32]);
+    /// `gpurs.fail(code)` records the first failure of the launch and stops the thread;
+    /// `gpurs.record(code)` records it and returns.
+    fn failure(&self, name: &str, stop: bool) -> ir::Function {
+        let mut function = ir::Function::new(name, Type::Void, vec![Type::I32]);
         function.cold = true;
-        if self.checked {
-            let status = function.load(Type::I32.pointer(), self.status.clone(), 8, Access::Plain);
-            let code = function.parameter(0);
-            function.compare_exchange(
-                status,
-                ir::Value::i32(0),
-                code,
-                (Ordering::Monotonic, Ordering::Monotonic),
-                false,
-            );
+        let status = function.load(Type::I32.pointer(), self.status.clone(), 8, Access::Plain);
+        let code = function.parameter(0);
+        function.compare_exchange(
+            status,
+            ir::Value::i32(0),
+            code,
+            (Ordering::Monotonic, Ordering::Monotonic),
+            false,
+        );
+        if stop {
             function.assembly("exit;", "", Type::Void, Vec::new());
+            function.unreachable();
         } else {
-            function.assembly("trap;", "", Type::Void, Vec::new());
+            function.ret(None);
         }
-        function.unreachable();
         function
     }
 }

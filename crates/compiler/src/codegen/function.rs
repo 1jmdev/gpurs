@@ -4,7 +4,7 @@ use rustc_data_structures::fx::FxHashSet;
 use super::{
     ir::{self, Type},
     layout::{self, PassMode, Shape},
-    module::ModuleBuilder,
+    module::{Certificate, ModuleBuilder},
     place::{Operand, Place, Value},
 };
 use crate::{
@@ -24,10 +24,10 @@ pub struct FunctionBuilder<'m, 'sess> {
     pub ir: ir::Function,
     /// The IR block of each MIR block.
     blocks: Vec<ir::Block>,
-    /// Blocks whose assertion is proven for this copy of the body and is omitted.
-    pub skipped: FxHashSet<usize>,
-    /// Blocks whose shared-memory access index is proven, so the accessor's check is omitted.
-    pub unchecked_shared: FxHashSet<usize>,
+    /// The checks this certified copy omits or records; `None` for the instrumented copy.
+    pub certificate: Option<Certificate>,
+    /// Blocks whose divisions follow a recorded zero-divisor check and use a safe divisor.
+    pub guarded: FxHashSet<usize>,
     /// Whether the launch has one block and thread dimension.
     pub linear: bool,
     pub block: usize,
@@ -50,8 +50,8 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
             span,
             ir: ir::Function::new("", Type::Void, Vec::new()),
             blocks: Vec::new(),
-            skipped: FxHashSet::default(),
-            unchecked_shared: FxHashSet::default(),
+            certificate: None,
+            guarded: FxHashSet::default(),
             linear: false,
             block: 0,
         }
@@ -97,6 +97,22 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
             self.span,
             format!("{what} is not supported in GPU code"),
             "use a supported Rust operation or move this operation to the host before launching the kernel",
+        );
+    }
+
+    /// Whether the certificate discharges the check ending the current block.
+    pub fn discharged(&self) -> bool {
+        self.certificate
+            .as_ref()
+            .is_some_and(|certificate| certificate.discharged.contains(&self.block))
+    }
+
+    /// Records a device failure; the thread continues.
+    pub fn record(&mut self, failure: Failure) {
+        self.ir.call(
+            "gpurs.record",
+            Type::Void,
+            vec![ir::Value::i32(failure as i32)],
         );
     }
 
@@ -173,6 +189,23 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
         self.ir.branch(self.blocks[0]);
 
         let reachable = reachable_blocks(&self.body);
+        for block in self
+            .certificate
+            .iter()
+            .flat_map(|certificate| &certificate.recorded)
+        {
+            if let TerminatorKind::Assert {
+                msg:
+                    AssertMessage::DivisionByZero(_)
+                    | AssertMessage::RemainderByZero(_)
+                    | AssertMessage::Overflow(BinOp::Div | BinOp::Rem, ..),
+                target,
+                ..
+            } = self.body.blocks[*block].terminator.kind
+            {
+                self.guarded.insert(target);
+            }
+        }
         for block in 0..self.body.blocks.len() {
             self.block = block;
             self.ir.position(self.blocks[block]);
@@ -283,13 +316,13 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
                 target,
                 ..
             } => {
-                if self.skipped.contains(&self.block)
-                    || (!self.sess.overflow_checks() && optional_overflow(msg))
-                    || crate::policy::unchecked_overflow(msg)
-                    || crate::policy::precondition_check(self.sess, self.instance)
-                {
+                if crate::policy::unchecked_overflow(msg) || self.discharged() {
                     return self.branch(*target);
                 }
+                let record = self
+                    .certificate
+                    .as_ref()
+                    .is_some_and(|certificate| certificate.recorded.contains(&self.block));
                 let condition = self.operand(cond);
                 let failure = self.ir.fresh_block("assert");
                 let target = self.target(*target);
@@ -299,7 +332,7 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
                 };
                 self.ir.branch_if(condition.scalar(), on_true, on_false);
                 self.ir.position(failure);
-                self.fail(match msg {
+                let failure = match msg {
                     AssertMessage::BoundsCheck { .. } => Failure::BoundsCheck,
                     AssertMessage::Overflow(..) | AssertMessage::OverflowNeg(_) => {
                         Failure::Overflow
@@ -308,7 +341,13 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
                         Failure::DivisionByZero
                     }
                     _ => Failure::Panic,
-                });
+                };
+                if record {
+                    self.record(failure);
+                    self.ir.branch(target);
+                } else {
+                    self.fail(failure);
+                }
             }
             TerminatorKind::Drop { place, target, .. } => {
                 let ty = self.place_type(place);
@@ -356,10 +395,7 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
             }
             MirOperand::Constant(constant) => self.constant(constant),
             MirOperand::RuntimeChecks(checks) => {
-                let value = match checks {
-                    RuntimeChecks::OverflowChecks => self.sess.overflow_checks(),
-                    _ => true,
-                };
+                let value = crate::policy::runtime_check(self.sess, checks);
                 Operand {
                     value: Value::Scalar(ir::Value::bool(value)),
                     shape: self.shape_of(Ty::bool_ty()),
@@ -406,16 +442,6 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
 
 fn argument_index(argument_count: usize, local: usize) -> Option<usize> {
     (1..=argument_count).contains(&local).then(|| local - 1)
-}
-
-pub fn optional_overflow(message: &AssertMessage) -> bool {
-    matches!(
-        message,
-        AssertMessage::Overflow(..)
-            | AssertMessage::OverflowNeg(_)
-            | AssertMessage::DivisionByZero(_)
-            | AssertMessage::RemainderByZero(_)
-    )
 }
 
 struct Reachable {

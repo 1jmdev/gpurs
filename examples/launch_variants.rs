@@ -74,8 +74,13 @@ fn main() {
 
     let short = gpu.upload(&values[..500]);
     let mut output = gpu.zeros::<f32>(1000);
-    offset_copy(&stream, &short, &mut output);
-    println!("Short input fails: {}", fails(|| output.download()));
+    println!(
+        "Short input fails: {}",
+        fails(|| {
+            offset_copy(&stream, &short, &mut output);
+            output.download()
+        })
+    );
 
     let input = gpu.upload(&values);
     let mut output = gpu.zeros::<f32>(100);
@@ -89,12 +94,22 @@ fn main() {
     );
 
     let mut output = gpu.zeros::<f32>(100);
-    strided_sum(&stream, &input, &mut output, 400);
-    println!("Stride past the end fails: {}", fails(|| output.download()));
+    println!(
+        "Stride past the end fails: {}",
+        fails(|| {
+            strided_sum(&stream, &input, &mut output, 400);
+            output.download()
+        })
+    );
 
     let mut output = gpu.zeros::<f32>(100);
-    strided_sum(&stream, &input, &mut output, usize::MAX / 2);
-    println!("Overflowing stride fails: {}", fails(|| output.download()));
+    println!(
+        "Overflowing stride fails: {}",
+        fails(|| {
+            strided_sum(&stream, &input, &mut output, usize::MAX / 2);
+            output.download()
+        })
+    );
 
     let config = LaunchConfig {
         grid: [2, 1, 1],
@@ -108,10 +123,12 @@ fn main() {
 
     let short = gpu.upload(&vec![1.0_f32; 2 * BLOCK - 1]);
     let mut totals = gpu.zeros::<f32>(2);
-    block_sum(&stream.with_launch(config), &short, &mut totals);
     println!(
         "Failure before a barrier fails: {}",
-        fails(|| totals.download())
+        fails(|| {
+            block_sum(&stream.with_launch(config), &short, &mut totals);
+            totals.download()
+        })
     );
 
     panic::set_hook(hook);

@@ -1,8 +1,9 @@
 //! Region-based dependency tracking and launch failure propagation.
 //!
 //! Every allocation keeps records of submitted operations over byte ranges. A new operation
-//! waits for overlapping records when either side writes, and inherits the failure status of
-//! overlapping writes unless it is a verified full overwrite that recovers the region.
+//! waits for overlapping records when either side writes, and its writes inherit the failure
+//! statuses of the overlapping writes it read, unless it is a full overwrite that recovers the
+//! region. Failures therefore propagate on the host; kernels never inspect other launches.
 
 use std::{
     cell::{Cell, RefCell},
@@ -30,7 +31,7 @@ struct Record {
     stream: Rc<driver::Stream>,
     sequence: u64,
     waited: Vec<Weak<driver::Stream>>,
-    status: Option<Rc<Status>>,
+    statuses: Vec<Rc<Status>>,
 }
 
 /// Device status word of one launch; zero while the launch has not failed.
@@ -169,23 +170,24 @@ pub(crate) fn order(stream: &Rc<driver::Stream>, accesses: &[Access]) -> Vec<Rc<
                 stream.wait(&record.stream.event());
                 record.waited.push(Rc::downgrade(stream));
             }
-            if let Some(status) = record.status.as_ref().filter(|_| !access.recovers)
-                && status.observed.get() != Some(0)
-                && !sources.iter().any(|source| Rc::ptr_eq(source, status))
-            {
-                sources.push(status.clone());
+            if access.recovers {
+                continue;
+            }
+            for status in &record.statuses {
+                if status.observed.get() != Some(0)
+                    && !sources.iter().any(|source| Rc::ptr_eq(source, status))
+                {
+                    sources.push(status.clone());
+                }
             }
         }
     }
     sources
 }
 
-/// Records the operation just submitted to `stream`; writes carry the launch `status`.
-pub(crate) fn complete(
-    stream: &Rc<driver::Stream>,
-    accesses: &[Access],
-    status: Option<Rc<Status>>,
-) {
+/// Records the operation just submitted to `stream`; its writes carry `statuses`,
+/// the launch's own status and the failure sources it depends on.
+pub(crate) fn complete(stream: &Rc<driver::Stream>, accesses: &[Access], statuses: &[Rc<Status>]) {
     let sequence = stream.submitted.get() + 1;
     stream.submitted.set(sequence);
     for access in accesses {
@@ -212,9 +214,9 @@ pub(crate) fn complete(
         records.retain(|record| {
             let pending = record.sequence > record.stream.completed.get()
                 || record
-                    .status
-                    .as_ref()
-                    .is_some_and(|status| status.observed.get() != Some(0));
+                    .statuses
+                    .iter()
+                    .any(|status| status.observed.get() != Some(0));
             pending
                 && (access.write
                     || record.write
@@ -228,7 +230,11 @@ pub(crate) fn complete(
             stream: stream.clone(),
             sequence,
             waited: Vec::new(),
-            status: status.clone().filter(|_| access.write),
+            statuses: if access.write {
+                statuses.to_vec()
+            } else {
+                Vec::new()
+            },
         });
     }
 }

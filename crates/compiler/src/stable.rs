@@ -18,9 +18,9 @@ pub use rustc_public::{
         VariantsShape,
     },
     mir::{
-        AggregateKind, AssertMessage, BasicBlock, BinOp, Body, BorrowKind, CastKind, ConstOperand,
-        Local, Mutability, NonDivergingIntrinsic, Operand, Place, PointerCoercion, ProjectionElem,
-        RETURN_LOCAL, RuntimeChecks, Rvalue, StatementKind, TerminatorKind, UnOp,
+        AggregateKind, AssertMessage, BinOp, Body, CastKind, ConstOperand, Mutability,
+        NonDivergingIntrinsic, Operand, Place, PointerCoercion, ProjectionElem, RETURN_LOCAL,
+        RuntimeChecks, Rvalue, StatementKind, TerminatorKind, UnOp,
         alloc::{AllocId, GlobalAlloc},
         mono::{Instance, InstanceKind},
     },
@@ -292,6 +292,24 @@ impl<'tcx> Session<'tcx> {
         let span = self.internal_span(span);
         let mut diagnostic = self.tcx.dcx().struct_span_err(span, message.into());
         diagnostic.help(help);
+        diagnostic.emit();
+    }
+
+    pub fn warning_notes(&self, span: Span, message: impl Into<String>, notes: &[String]) {
+        let span = self.internal_span(span);
+        let mut diagnostic = self.tcx.dcx().struct_span_warn(span, message.into());
+        for note in notes {
+            diagnostic.note(note.clone());
+        }
+        diagnostic.emit();
+    }
+
+    pub fn error_notes(&self, span: Span, message: impl Into<String>, notes: &[String]) {
+        let span = self.internal_span(span);
+        let mut diagnostic = self.tcx.dcx().struct_span_err(span, message.into());
+        for note in notes {
+            diagnostic.note(note.clone());
+        }
         diagnostic.emit();
     }
 

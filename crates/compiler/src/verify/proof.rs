@@ -1,41 +1,331 @@
+//! Race-freedom and initialization proofs over the indices of memory accesses.
+
 use std::collections::BTreeSet;
 
-use gpurs_artifact::{Condition, Expression, Relation};
+use super::{
+    engine::Variable,
+    symbolic::{Atom, Clause, Fact, Polynomial, Predicate, Relation},
+};
+use crate::stable::BinOp;
 
-use super::symbolic::{Atom, Fact, Polynomial};
-use crate::stable::*;
+/// A path fact as an ordered comparison between a per-thread side and a launch side.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Comparison(pub BinOp, pub Polynomial, pub Polynomial);
 
-pub fn injective(expression: &Polynomial, facts: &[Fact], shared: bool) -> Option<Vec<Condition>> {
-    let mut conditions = Vec::new();
-    let mut expression = expression.clone();
-    expression.0.remove(&Vec::new());
-    let covered = decompose(&expression, facts, &mut conditions, 0)?;
-    for axis in 0..3 {
-        for atom in [Atom::Thread(axis), Atom::Block(axis)] {
-            if (shared && matches!(atom, Atom::Block(_)))
-                || covered.contains(&atom)
-                || pinned(&Polynomial::atom(atom.clone()), facts)
-            {
-                continue;
+/// The comparisons that path facts state between per-thread expressions and launch values.
+pub fn comparisons(facts: &[Fact]) -> Vec<Comparison> {
+    facts
+        .iter()
+        .filter_map(|fact| {
+            let polynomial = &fact.predicate.polynomial;
+            let mut varying = Polynomial::default();
+            let mut launch = Polynomial::default();
+            for (monomial, coefficient) in &polynomial.0 {
+                let side = if monomial.iter().all(Atom::launch) {
+                    &mut launch
+                } else {
+                    &mut varying
+                };
+                *side = side.add(&Polynomial::monomial(monomial.clone(), *coefficient), 1)?;
             }
-            let dimension = match atom {
-                Atom::Thread(axis) => Expression::BlockDimension(axis),
-                Atom::Block(axis) => Expression::GridDimension(axis),
-                _ => unreachable!(),
-            };
-            conditions.push(Condition {
-                left: dimension,
-                relation: Relation::Equal,
-                right: Expression::Constant(1),
-                reason: "unindexed launch dimensions must contain one thread or block".to_owned(),
-            });
-        }
-    }
-    Some(conditions)
+            if varying.0.is_empty() {
+                return None;
+            }
+            let positive = varying.0.values().all(|coefficient| *coefficient > 0);
+            let negative = varying.0.values().all(|coefficient| *coefficient < 0);
+            match fact.predicate.relation {
+                Relation::NonNegative if negative => {
+                    Some(Comparison(BinOp::Lt, varying.scale(-1)?, launch.offset(1)?))
+                }
+                Relation::Zero if positive => {
+                    Some(Comparison(BinOp::Eq, varying, launch.scale(-1)?))
+                }
+                Relation::Zero if negative => {
+                    Some(Comparison(BinOp::Eq, varying.scale(-1)?, launch))
+                }
+                _ => None,
+            }
+        })
+        .collect()
 }
 
-pub fn disjoint(left: &Polynomial, right: &Polynomial) -> Option<Vec<Condition>> {
-    let difference = left.add(right, -1).value()?;
+/// A division by a positive constant.
+fn division(atom: &Atom) -> Option<(&Polynomial, u64)> {
+    match atom {
+        Atom::Quotient(value, divisor) | Atom::Remainder(value, divisor) => Some((
+            value,
+            u64::try_from(divisor.value()?).ok().filter(|d| *d > 0)?,
+        )),
+        _ => None,
+    }
+}
+
+fn quotient(value: &Polynomial, divisor: u64) -> Polynomial {
+    Polynomial::quotient(value.clone(), Polynomial::constant(divisor as i128))
+}
+
+fn remainder(value: &Polynomial, divisor: u64) -> Polynomial {
+    Polynomial::remainder(value.clone(), Polynomial::constant(divisor as i128))
+}
+
+pub struct Proofs<'a> {
+    pub facts: &'a [Comparison],
+    pub variables: &'a [Variable],
+}
+
+impl Proofs<'_> {
+    pub fn injective(&self, expression: &Polynomial, shared: bool) -> Option<Vec<Clause>> {
+        let mut clauses = Vec::new();
+        let mut expression = expression.clone();
+        expression.0.remove(&Vec::new());
+        let covered = self.decompose(&expression, &mut clauses, 0)?;
+        for axis in 0..3 {
+            for atom in [Atom::Thread(axis), Atom::Block(axis)] {
+                if (shared && matches!(atom, Atom::Block(_)))
+                    || covered.contains(&atom)
+                    || self.pinned(&Polynomial::atom(atom.clone()))
+                {
+                    continue;
+                }
+                let dimension = match atom {
+                    Atom::Thread(axis) => Atom::BlockDimension(axis),
+                    _ => Atom::GridDimension(axis),
+                };
+                clauses.push(Clause::single(
+                    Predicate::new(
+                        Polynomial::atom(dimension).offset(-1).unwrap(),
+                        Relation::Zero,
+                    ),
+                    "unindexed launch dimensions must contain one thread or block",
+                ));
+            }
+        }
+        Some(clauses)
+    }
+
+    pub fn coverage(&self, expression: &Polynomial, length: u64) -> Option<Vec<Clause>> {
+        let dimensions = match expression.variable() {
+            Some(Atom::Thread(0)) => [length, 1, 1],
+            Some(atom @ Atom::Quotient(..))
+                if let Some((value, divisor)) = division(atom)
+                    && value.variable() == Some(&Atom::Thread(0))
+                    && self.pinned(&remainder(value, divisor)) =>
+            {
+                [length.checked_mul(divisor)?, 1, 1]
+            }
+            _ => {
+                let x = expression.0.get(&vec![Atom::Thread(0)]).copied();
+                let y = expression.0.get(&vec![Atom::Thread(1)]).copied();
+                let (Some(1), Some(stride)) = (x, y) else {
+                    return None;
+                };
+                let stride = u64::try_from(stride).ok().filter(|stride| *stride > 0)?;
+                if expression.0.len() != 2 || !length.is_multiple_of(stride) {
+                    return None;
+                }
+                [stride, length / stride, 1]
+            }
+        };
+        Some(
+            dimensions
+                .into_iter()
+                .enumerate()
+                .map(|(axis, value)| {
+                    Clause::single(
+                        Predicate::new(
+                            Polynomial::atom(Atom::BlockDimension(axis))
+                                .offset(-(value as i128))
+                                .unwrap(),
+                            Relation::Zero,
+                        ),
+                        "every shared-memory element must be initialized before it is read",
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    fn decompose(
+        &self,
+        expression: &Polynomial,
+        clauses: &mut Vec<Clause>,
+        depth: usize,
+    ) -> Option<BTreeSet<Atom>> {
+        if depth > 6 {
+            return None;
+        }
+        if expression.value().is_some() || self.pinned(expression) {
+            return Some(BTreeSet::new());
+        }
+        if expression.0.len() == 1 {
+            let (term, coefficient) = expression.0.first_key_value().unwrap();
+            let varying: Vec<_> = term.iter().filter(|atom| !atom.launch()).collect();
+            if *coefficient > 0 && varying.len() == 1 {
+                let mut proposed = clauses.clone();
+                if term.iter().filter(|atom| atom.launch()).all(|atom| {
+                    less_equal(
+                        &Polynomial::constant(1),
+                        &Polynomial::atom(atom.clone()),
+                        &mut proposed,
+                    )
+                }) {
+                    let covered = self.covers(varying[0], &mut proposed)?;
+                    *clauses = proposed;
+                    return Some(covered);
+                }
+            }
+        }
+        let mut digits = Vec::new();
+        let mut bases = vec![Polynomial::constant(1)];
+        for (term, coefficient) in &expression.0 {
+            if *coefficient > 0 {
+                bases.push(Polynomial::constant(*coefficient));
+            }
+            for atom in term {
+                if atom.launch() {
+                    bases.push(Polynomial::atom(atom.clone()));
+                } else {
+                    digits.push(Polynomial::atom(atom.clone()));
+                }
+            }
+        }
+        for Comparison(operation, left, right) in self.facts {
+            if *operation == BinOp::Lt && right.launch() {
+                digits.push(left.clone());
+                bases.push(right.clone());
+            }
+        }
+        let weight = |digit: &Polynomial| {
+            digit
+                .variable()
+                .and_then(|atom| expression.0.get(&vec![atom.clone()]))
+                .copied()
+                .unwrap_or(i128::MAX)
+        };
+        digits.sort_by(|left, right| {
+            right
+                .0
+                .len()
+                .cmp(&left.0.len())
+                .then_with(|| weight(left).cmp(&weight(right)))
+                .then(left.cmp(right))
+        });
+        digits.dedup();
+        bases.sort_by(|left, right| right.cmp(left));
+        bases.dedup();
+        for digit in digits {
+            if digit == *expression || digit.value().is_some() {
+                continue;
+            }
+            let Some(rest) = expression.add(&digit, -1) else {
+                continue;
+            };
+            if rest.0.values().any(|coefficient| *coefficient < 0) {
+                continue;
+            }
+            let Some(bound) = self.bound(&digit) else {
+                continue;
+            };
+            for base in &bases {
+                let Some(quotient) = divide(&rest, base) else {
+                    continue;
+                };
+                let mut proposed = clauses.clone();
+                if !less_equal(&bound, base, &mut proposed) {
+                    continue;
+                }
+                let Some(mut first) = self.decompose(&digit, &mut proposed, depth + 1) else {
+                    continue;
+                };
+                let Some(second) = self.decompose(&quotient, &mut proposed, depth + 1) else {
+                    continue;
+                };
+                if !first.is_disjoint(&second) {
+                    continue;
+                }
+                first.extend(second);
+                *clauses = proposed;
+                return Some(first);
+            }
+        }
+        None
+    }
+
+    fn covers(&self, atom: &Atom, clauses: &mut Vec<Clause>) -> Option<BTreeSet<Atom>> {
+        Some(match atom {
+            Atom::Thread(_) | Atom::Block(_) | Atom::Variable(_) => BTreeSet::from([atom.clone()]),
+            Atom::Index => (0..3)
+                .flat_map(|axis| [Atom::Thread(axis), Atom::Block(axis)])
+                .collect(),
+            Atom::Quotient(..) => {
+                let (value, divisor) = division(atom)?;
+                if !self.pinned(&remainder(value, divisor)) {
+                    return None;
+                }
+                self.covers(value.variable()?, clauses)?
+            }
+            Atom::Remainder(..) => {
+                let (value, divisor) = division(atom)?;
+                if !self.pinned(&quotient(value, divisor))
+                    && !less_equal(
+                        &self.bound(value)?,
+                        &Polynomial::constant(divisor as i128),
+                        clauses,
+                    )
+                {
+                    return None;
+                }
+                self.covers(value.variable()?, clauses)?
+            }
+            _ => return None,
+        })
+    }
+
+    /// An exclusive upper bound.
+    fn bound(&self, expression: &Polynomial) -> Option<Polynomial> {
+        if let Some(Comparison(_, _, right)) = self
+            .facts
+            .iter()
+            .find(|Comparison(operation, left, _)| *operation == BinOp::Lt && left == expression)
+        {
+            return Some(right.clone());
+        }
+        let atom = expression.variable()?;
+        Some(match atom {
+            Atom::Thread(axis) => Polynomial::atom(Atom::BlockDimension(*axis)),
+            Atom::Block(axis) => Polynomial::atom(Atom::GridDimension(*axis)),
+            Atom::Remainder(..) => Polynomial::constant(division(atom)?.1 as i128),
+            Atom::Variable(variable) => {
+                let upper = self.variables[*variable].upper.as_ref()?;
+                upper.launch().then(|| upper.offset(1))??
+            }
+            _ => return None,
+        })
+    }
+
+    fn pinned(&self, expression: &Polynomial) -> bool {
+        self.facts.iter().any(|Comparison(operation, left, right)| {
+            *operation == BinOp::Eq
+                && ((left == expression && right.value().is_some())
+                    || (right == expression && left.value().is_some()))
+        }) || matches!(expression.variable(), Some(Atom::Thread(_)))
+            && self.facts.iter().any(|Comparison(operation, left, right)| {
+                if *operation != BinOp::Eq || right.value().is_none() {
+                    return false;
+                }
+                let Some(atom @ Atom::Quotient(..)) = left.variable() else {
+                    return false;
+                };
+                let Some((value, divisor)) = division(atom) else {
+                    return false;
+                };
+                *value == *expression && self.pinned(&remainder(value, divisor))
+            })
+    }
+}
+
+pub fn disjoint(left: &Polynomial, right: &Polynomial) -> Option<Vec<Clause>> {
+    let difference = left.add(right, -1)?.value()?;
     let modulus = left
         .0
         .iter()
@@ -53,267 +343,51 @@ pub fn disjoint(left: &Polynomial, right: &Polynomial) -> Option<Vec<Condition>>
     let distance = difference.rem_euclid(modulus);
     let limit = distance.min(modulus - distance);
     (limit > 0).then(|| {
-        vec![Condition {
-            left: Expression::BlockDimension(0),
-            relation: Relation::LessEqual,
-            right: Expression::Constant(limit as u64),
-            reason: "thread-strided stores must occupy disjoint vector ranges".to_owned(),
-        }]
+        vec![Clause::single(
+            Predicate::new(
+                Polynomial::constant(limit)
+                    .add(&Polynomial::atom(Atom::BlockDimension(0)), -1)
+                    .unwrap(),
+                Relation::NonNegative,
+            ),
+            "thread-strided stores must occupy disjoint vector ranges",
+        )]
     })
 }
 
-pub fn coverage(expression: &Polynomial, facts: &[Fact], length: u64) -> Option<Vec<Condition>> {
-    let dimensions = match expression.variable() {
-        Some(Atom::Thread(0)) => [length, 1, 1],
-        Some(Atom::Quotient(value, divisor))
-            if value.variable() == Some(&Atom::Thread(0))
-                && pinned(
-                    &Polynomial::atom(Atom::Remainder(value.clone(), *divisor)),
-                    facts,
-                ) =>
-        {
-            [length.checked_mul(*divisor)?, 1, 1]
-        }
-        _ => {
-            let x = expression.0.get(&vec![Atom::Thread(0)]).copied();
-            let y = expression.0.get(&vec![Atom::Thread(1)]).copied();
-            let (Some(1), Some(stride)) = (x, y) else {
-                return None;
-            };
-            let stride = u64::try_from(stride).ok().filter(|stride| *stride > 0)?;
-            if expression.0.len() != 2 || !length.is_multiple_of(stride) {
-                return None;
-            }
-            [stride, length / stride, 1]
-        }
-    };
-    Some(
-        dimensions
-            .into_iter()
-            .enumerate()
-            .map(|(axis, value)| Condition {
-                left: Expression::BlockDimension(axis),
-                relation: Relation::Equal,
-                right: Expression::Constant(value),
-                reason: "every shared-memory element must be initialized before it is read"
-                    .to_owned(),
-            })
-            .collect(),
-    )
-}
-
-fn decompose(
-    expression: &Polynomial,
-    facts: &[Fact],
-    conditions: &mut Vec<Condition>,
-    depth: usize,
-) -> Option<BTreeSet<Atom>> {
-    if depth > 6 {
+/// `expression / divisor` when every term divides exactly by the monomial `divisor`.
+fn divide(expression: &Polynomial, divisor: &Polynomial) -> Option<Polynomial> {
+    let (factors, coefficient) = divisor.0.first_key_value()?;
+    if divisor.0.len() != 1 || *coefficient <= 0 {
         return None;
     }
-    if expression.value().is_some() || pinned(expression, facts) {
-        return Some(BTreeSet::new());
+    let mut result = Polynomial::default();
+    for (term, value) in &expression.0 {
+        if value % coefficient != 0 {
+            return None;
+        }
+        let rest = super::symbolic::divide_monomial(term, factors)?;
+        result = result.add(&Polynomial::monomial(rest, value / coefficient), 1)?;
     }
-    if expression.0.len() == 1 {
-        let (term, coefficient) = expression.0.first_key_value().unwrap();
-        let varying: Vec<_> = term.iter().filter(|atom| varying_atom(atom)).collect();
-        if *coefficient > 0 && varying.len() == 1 {
-            let mut proposed = conditions.clone();
-            if term.iter().filter(|atom| !varying_atom(atom)).all(|atom| {
-                less_equal(
-                    &Polynomial::constant(1),
-                    &Polynomial::atom(atom.clone()),
-                    &mut proposed,
-                )
-            }) {
-                let covered = covers(varying[0], facts, &mut proposed)?;
-                *conditions = proposed;
-                return Some(covered);
-            }
-        }
-    }
-    let mut digits = Vec::new();
-    let mut bases = vec![Polynomial::constant(1)];
-    for (term, coefficient) in &expression.0 {
-        if *coefficient > 0 {
-            bases.push(Polynomial::constant(*coefficient));
-        }
-        for atom in term {
-            if varying_atom(atom) {
-                digits.push(Polynomial::atom(atom.clone()));
-            } else {
-                bases.push(Polynomial::atom(atom.clone()));
-            }
-        }
-    }
-    for Fact(operation, left, right) in facts {
-        if *operation == BinOp::Lt && !right.0.keys().flatten().any(varying_atom) {
-            digits.push(left.clone());
-            bases.push(right.clone());
-        }
-    }
-    let weight = |digit: &Polynomial| {
-        digit
-            .variable()
-            .and_then(|atom| expression.0.get(&vec![atom.clone()]))
-            .copied()
-            .unwrap_or(i128::MAX)
-    };
-    digits.sort_by(|left, right| {
-        right
-            .0
-            .len()
-            .cmp(&left.0.len())
-            .then_with(|| weight(left).cmp(&weight(right)))
-            .then(left.cmp(right))
-    });
-    digits.dedup();
-    bases.sort_by(|left, right| right.cmp(left));
-    bases.dedup();
-    for digit in digits {
-        if digit == *expression || digit.value().is_some() {
-            continue;
-        }
-        let remainder = expression.add(&digit, -1);
-        if remainder.0.values().any(|coefficient| *coefficient < 0) {
-            continue;
-        }
-        let bound = bound(&digit, facts);
-        for base in &bases {
-            let Some(quotient) = remainder.divide(base) else {
-                continue;
-            };
-            let Some(bound) = &bound else { continue };
-            let mut proposed = conditions.clone();
-            if !less_equal(bound, base, &mut proposed) {
-                continue;
-            }
-            let Some(mut first) = decompose(&digit, facts, &mut proposed, depth + 1) else {
-                continue;
-            };
-            let Some(second) = decompose(&quotient, facts, &mut proposed, depth + 1) else {
-                continue;
-            };
-            if !first.is_disjoint(&second) {
-                continue;
-            }
-            first.extend(second);
-            *conditions = proposed;
-            return Some(first);
-        }
-    }
-    None
+    Some(result)
 }
 
-fn covers(atom: &Atom, facts: &[Fact], conditions: &mut Vec<Condition>) -> Option<BTreeSet<Atom>> {
-    Some(match atom {
-        Atom::Thread(_) | Atom::Block(_) | Atom::Iteration(..) => BTreeSet::from([atom.clone()]),
-        Atom::Index => (0..3)
-            .flat_map(|axis| [Atom::Thread(axis), Atom::Block(axis)])
-            .collect(),
-        Atom::Quotient(value, divisor) => {
-            if !pinned(
-                &Polynomial::atom(Atom::Remainder(value.clone(), *divisor)),
-                facts,
-            ) {
-                return None;
-            }
-            covers(value.variable()?, facts, conditions)?
-        }
-        Atom::Remainder(value, divisor) => {
-            if !pinned(
-                &Polynomial::atom(Atom::Quotient(value.clone(), *divisor)),
-                facts,
-            ) && !less_equal(
-                &bound(value, facts)?,
-                &Polynomial::constant(*divisor as i128),
-                conditions,
-            ) {
-                return None;
-            }
-            covers(value.variable()?, facts, conditions)?
-        }
-        _ => return None,
-    })
-}
-
-fn bound(expression: &Polynomial, facts: &[Fact]) -> Option<Polynomial> {
-    if let Some(Fact(_, _, right)) = facts
-        .iter()
-        .find(|Fact(operation, left, _)| *operation == BinOp::Lt && left == expression)
-    {
-        return Some(right.clone());
-    }
-    Some(match expression.variable()? {
-        Atom::Thread(axis) => Polynomial::atom(Atom::BlockDimension(*axis)),
-        Atom::Block(axis) => Polynomial::atom(Atom::GridDimension(*axis)),
-        Atom::Remainder(_, divisor) => Polynomial::constant(*divisor as i128),
-        Atom::Iteration(_, end) => Polynomial::constant(*end as i128),
-        _ => return None,
-    })
-}
-
-fn pinned(expression: &Polynomial, facts: &[Fact]) -> bool {
-    facts.iter().any(|Fact(operation, left, right)| {
-        *operation == BinOp::Eq
-            && ((left == expression && right.value().is_some())
-                || (right == expression && left.value().is_some()))
-    }) || matches!(expression.variable(), Some(Atom::Thread(_)))
-        && facts.iter().any(|Fact(operation, left, right)| {
-            if *operation != BinOp::Eq || right.value().is_none() {
-                return false;
-            }
-            let Some(Atom::Quotient(value, divisor)) = left.variable() else {
-                return false;
-            };
-            **value == *expression
-                && pinned(
-                    &Polynomial::atom(Atom::Remainder(value.clone(), *divisor)),
-                    facts,
-                )
-        })
-}
-
-fn varying_atom(atom: &Atom) -> bool {
-    matches!(
-        atom,
-        Atom::Index
-            | Atom::Thread(_)
-            | Atom::Block(_)
-            | Atom::Iteration(..)
-            | Atom::Quotient(..)
-            | Atom::Remainder(..)
-    )
-}
-
-fn less_equal(left: &Polynomial, right: &Polynomial, conditions: &mut Vec<Condition>) -> bool {
+fn less_equal(left: &Polynomial, right: &Polynomial, clauses: &mut Vec<Clause>) -> bool {
     if left == right {
         return true;
     }
     if let (Some(left), Some(right)) = (left.value(), right.value()) {
         return left <= right;
     }
-    let (Some(left), Some(right)) = (runtime(left), runtime(right)) else {
+    if !left.launch() || !right.launch() {
+        return false;
+    }
+    let Some(difference) = right.add(left, -1) else {
         return false;
     };
-    conditions.push(Condition {
-        left,
-        relation: Relation::LessEqual,
-        right,
-        reason: "index strides must keep accesses from different threads disjoint".to_owned(),
-    });
+    clauses.push(Clause::single(
+        Predicate::new(difference, Relation::NonNegative),
+        "index strides must keep accesses from different threads disjoint",
+    ));
     true
-}
-
-fn runtime(expression: &Polynomial) -> Option<Expression> {
-    if let Some(value) = expression.value() {
-        return u64::try_from(value).ok().map(Expression::Constant);
-    }
-    Some(match expression.variable()? {
-        Atom::BlockDimension(axis) => Expression::BlockDimension(*axis),
-        Atom::GridDimension(axis) => Expression::GridDimension(*axis),
-        Atom::Scalar(parameter) => Expression::Scalar(*parameter),
-        Atom::Length(parameter) => Expression::Length(*parameter),
-        _ => return None,
-    })
 }

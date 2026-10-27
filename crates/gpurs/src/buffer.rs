@@ -264,7 +264,7 @@ fn fill<T: Copy>(span: Span<'_>, stream: &Stream, value: T) {
             &stream.raw,
         );
     }
-    tracking::complete(&stream.raw, &[access], None);
+    tracking::complete(&stream.raw, &[access], &[]);
 }
 
 impl<T> sealed::Sealed<T> for Buffer<T> {

@@ -3,17 +3,12 @@ use std::env;
 use gpurs_artifact::{Convergence, Memory};
 use rustc_data_structures::fx::FxHashSet;
 
-use crate::{attributes, codegen::optional_overflow, diagnostic, paths, stable::*};
+use crate::{attributes, diagnostic, paths, stable::*};
 
-/// Every function reachable from `root`, and the blocks whose terminators can fail at runtime.
-pub fn verify<'sess>(
-    sess: Sess<'sess>,
-    root: Instance,
-) -> (FxHashSet<Instance>, Vec<(Instance, usize)>) {
-    let mut checked = FxHashSet::default();
-    let mut failures = Vec::new();
-    visit(sess, root, &mut Vec::new(), &mut checked, &mut failures);
-    (checked, failures)
+/// Rejects call graphs that GPU code cannot express: recursion, dynamic dispatch, host-only
+/// callees, and primitives beyond the target architecture.
+pub fn verify(sess: Sess<'_>, root: Instance) {
+    visit(sess, root, &mut Vec::new(), &mut FxHashSet::default());
 }
 
 fn visit(
@@ -21,7 +16,6 @@ fn visit(
     instance: Instance,
     active: &mut Vec<Instance>,
     checked: &mut FxHashSet<Instance>,
-    failures: &mut Vec<(Instance, usize)>,
 ) {
     if active.contains(&instance) {
         diagnostic::error(
@@ -105,22 +99,8 @@ fn visit(
                     );
                 }
                 if allowed(sess, callee, terminator.source_info.span) {
-                    visit(sess, callee, active, checked, failures);
+                    visit(sess, callee, active, checked);
                 }
-            }
-            TerminatorKind::Assert { msg, .. }
-                if !crate::policy::unchecked_overflow(msg)
-                    && !crate::policy::precondition_check(sess, instance)
-                    && (sess.overflow_checks() || !optional_overflow(msg)) =>
-            {
-                failures.push((instance, block));
-            }
-            // Drop glue is not visited, so it is assumed to fail. A diverging call that only
-            // reports a violated `unsafe` precondition is a debug facility and is dropped.
-            TerminatorKind::Call { target: None, .. } | TerminatorKind::Drop { .. }
-                if !crate::policy::precondition_check(sess, instance) =>
-            {
-                failures.push((instance, block));
             }
             TerminatorKind::InlineAsm { .. } => {
                 sess.error(
@@ -186,7 +166,7 @@ fn allowed(sess: Sess<'_>, instance: Instance, span: Span) -> bool {
     approved
 }
 
-fn leaf(sess: Sess<'_>, instance: Instance) -> bool {
+pub fn leaf(sess: Sess<'_>, instance: Instance) -> bool {
     instance.intrinsic_name().is_some()
         || paths::math(sess, instance.def.def_id()).is_some()
         || attributes::primitive(sess, instance.def.def_id())

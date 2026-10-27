@@ -16,7 +16,6 @@ mod module;
 mod place;
 mod rvalue;
 
-pub(crate) use function::optional_overflow;
 pub use kernel::{KernelParameter, KernelPlan};
 pub(crate) use layout::Shape;
-pub use module::ModuleBuilder;
+pub use module::{Certificate, ModuleBuilder};

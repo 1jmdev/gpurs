@@ -1,8 +1,8 @@
 //! Kernel artifact format shared by the gpurs compiler and runtime.
 //!
-//! Every kernel receives one argument block. The fixed header holds the launch status word,
-//! the status words of failure sources the launch depends on, and the result buffer; the
-//! kernel parameters follow in declaration order.
+//! Every kernel receives one argument block. The fixed header holds the launch status word and
+//! the result buffer; the kernel parameters follow in declaration order. An entry point without
+//! residual device checks receives the block from the result word on.
 
 mod primitive;
 
@@ -13,10 +13,8 @@ use serde::{Deserialize, Serialize};
 pub const ARTIFACT_SYMBOL: &str = "__gpurs_artifact";
 
 pub const STATUS_OFFSET: u64 = 0;
-pub const INPUTS_OFFSET: u64 = 8;
-pub const INPUT_CAPACITY: usize = 16;
-pub const RESULT_OFFSET: u64 = INPUTS_OFFSET + 8 * INPUT_CAPACITY as u64;
-pub const PARAMETERS_OFFSET: u64 = RESULT_OFFSET + 8;
+pub const RESULT_OFFSET: u64 = 8;
+pub const PARAMETERS_OFFSET: u64 = 16;
 
 #[derive(Serialize, Deserialize, Debug, Default)]
 pub struct Artifact {
@@ -30,7 +28,6 @@ pub struct Artifact {
 #[derive(Serialize, Deserialize, Debug, Default)]
 pub struct Module {
     pub cubin: Vec<u8>,
-    pub infallible: Vec<u8>,
     pub kernels: Vec<Kernel>,
 }
 
@@ -38,33 +35,51 @@ pub struct Module {
 pub struct Kernel {
     /// `module::path::function<generic, arguments>` as computed by the host launcher.
     pub key: String,
-    pub symbol: String,
     pub name: String,
     pub parameters: Vec<Parameter>,
     pub extent: Extent,
     pub result: Option<Value>,
-    pub conditions: Vec<Condition>,
-    /// Entry point without the runtime checks the compiler proved cannot fail when `bounds`
-    /// hold for a launch.
-    pub fast: Option<Variant>,
-    pub infallible: Option<Variant>,
+    /// Race-freedom and initialization requirements; evaluated before every launch.
+    pub requirements: Vec<Clause>,
+    /// Residual proof obligations of the certified entry point; evaluated before every launch
+    /// of it. A violated precondition panics before submission.
+    pub preconditions: Vec<Clause>,
+    /// Entry point without memory-safety checks, valid whenever the preconditions hold.
+    pub certified: Option<Entry>,
+    /// Entry point carrying every runtime check and the failure protocol.
+    pub instrumented: Option<Entry>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct Variant {
+pub struct Entry {
     pub symbol: String,
-    /// Entry point of the same variant for a launch with one block and thread dimension, whose
-    /// linear index needs neither the y nor the z axis.
+    /// The same entry point for a launch with one block and thread dimension, whose linear
+    /// index needs neither the y nor the z axis.
     pub linear: Option<String>,
-    pub bounds: Vec<Bound>,
+    /// Whether the entry point reports device failures through the status word.
+    pub status: bool,
 }
 
-/// Holds when any of `values` is below `limit` for the launch geometry, lengths, and scalars
-/// of a launch. Each value bounds the checked quantity on its own.
+/// Holds when any of `options` holds; `reason` and `rendering` describe it for diagnostics.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct Bound {
-    pub values: Vec<Polynomial>,
-    pub limit: Polynomial,
+pub struct Clause {
+    pub options: Vec<Predicate>,
+    pub reason: String,
+    pub rendering: String,
+}
+
+/// A comparison of a polynomial in launch variables against zero.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct Predicate {
+    pub polynomial: Polynomial,
+    pub relation: Relation,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Relation {
+    NonNegative,
+    Zero,
+    NonZero,
 }
 
 /// Sum of coefficient-weighted products of launch variables.
@@ -77,8 +92,10 @@ pub enum Variable {
     GridDimension(usize),
     Length(usize),
     Scalar(usize),
-    /// Floor of the polynomial divided by the constant.
-    Quotient(Polynomial, u64),
+    /// Floor quotient; division by zero yields the dividend, as on the device.
+    Quotient(Polynomial, Polynomial),
+    /// Remainder; division by zero yields zero, as on the device.
+    Remainder(Polynomial, Polynomial),
 }
 
 impl Polynomial {
@@ -91,8 +108,23 @@ impl Polynomial {
                     .iter()
                     .try_fold(*coefficient, |product, variable| {
                         let value = match variable {
-                            Variable::Quotient(polynomial, divisor) => {
-                                polynomial.evaluate(leaf)?.div_euclid(*divisor as i128)
+                            Variable::Quotient(dividend, divisor) => {
+                                let (dividend, divisor) =
+                                    (dividend.evaluate(leaf)?, divisor.evaluate(leaf)?);
+                                if divisor == 0 {
+                                    dividend
+                                } else {
+                                    dividend.checked_div_euclid(divisor)?
+                                }
+                            }
+                            Variable::Remainder(dividend, divisor) => {
+                                let (dividend, divisor) =
+                                    (dividend.evaluate(leaf)?, divisor.evaluate(leaf)?);
+                                if divisor == 0 {
+                                    0
+                                } else {
+                                    dividend.checked_rem_euclid(divisor)?
+                                }
                             }
                             variable => leaf(variable),
                         };
@@ -103,13 +135,23 @@ impl Polynomial {
     }
 }
 
-impl Bound {
-    pub fn holds(&self, leaf: &impl Fn(&Variable) -> i128) -> bool {
-        self.limit.evaluate(leaf).is_some_and(|limit| {
-            self.values
-                .iter()
-                .any(|value| value.evaluate(leaf).is_some_and(|value| value < limit))
+impl Predicate {
+    /// `None` when the polynomial cannot be evaluated without overflow.
+    pub fn holds(&self, leaf: &impl Fn(&Variable) -> i128) -> Option<bool> {
+        let value = self.polynomial.evaluate(leaf)?;
+        Some(match self.relation {
+            Relation::NonNegative => value >= 0,
+            Relation::Zero => value == 0,
+            Relation::NonZero => value != 0,
         })
+    }
+}
+
+impl Clause {
+    pub fn holds(&self, leaf: &impl Fn(&Variable) -> i128) -> bool {
+        self.options
+            .iter()
+            .any(|option| option.holds(leaf) == Some(true))
     }
 }
 
@@ -144,33 +186,6 @@ pub enum Extent {
     Explicit,
 }
 
-/// Launch precondition established by the compiler and checked before submission.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct Condition {
-    pub left: Expression,
-    pub relation: Relation,
-    pub right: Expression,
-    pub reason: String,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub enum Expression {
-    Constant(u64),
-    BlockDimension(usize),
-    GridDimension(usize),
-    BlockThreads,
-    Length(usize),
-    Scalar(usize),
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Relation {
-    Equal,
-    LessEqual,
-    /// The left value divides the right value.
-    Divides,
-}
-
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct TransferType {
     pub name: String,
@@ -188,7 +203,7 @@ pub enum Failure {
     DivisionByZero = 3,
     Panic = 4,
     Unreachable = 5,
-    Upstream = 6,
+    Divergence = 6,
 }
 
 impl Failure {
@@ -199,7 +214,7 @@ impl Failure {
             3 => "division by zero",
             4 => "panic in GPU code",
             5 => "entered unreachable code",
-            6 => "an input buffer was produced by a failed launch",
+            6 => "a warp collective was reached by an incomplete warp after a failure",
             _ => "unknown failure",
         }
     }

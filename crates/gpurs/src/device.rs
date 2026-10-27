@@ -18,6 +18,8 @@ use crate::{
 
 const STATUS_CHUNK: usize = 1024;
 
+pub(crate) type KernelKey = (&'static str, &'static str, &'static str);
+
 /// Handle to one GPU. Cloning shares the device.
 #[derive(Clone)]
 pub struct Gpu {
@@ -30,8 +32,8 @@ pub(crate) struct Device {
     pub release: Rc<driver::Stream>,
     pub artifact: Artifact,
     modules: Vec<OnceCell<Module>>,
-    infallible: Vec<OnceCell<Module>>,
-    kernels: RefCell<HashMap<(&'static str, &'static str, &'static str), Rc<LoadedKernel>>>,
+    pub instrumented: Cell<bool>,
+    kernels: RefCell<HashMap<KernelKey, Rc<LoadedKernel>>>,
     statuses: RefCell<Vec<DevicePointer>>,
     status_count: RefCell<usize>,
     pub context: Context,
@@ -41,6 +43,9 @@ pub(crate) struct Device {
 pub(crate) struct Entry {
     pub general: Function,
     pub linear: Option<Function>,
+    pub status: bool,
+    /// Byte offset of the argument block the entry point receives.
+    pub offset: usize,
 }
 
 impl Entry {
@@ -53,12 +58,10 @@ impl Entry {
 }
 
 pub(crate) struct LoadedKernel {
-    pub checking: Entry,
-    pub fast: Option<Entry>,
-    pub infallible: Option<Entry>,
+    pub certified: Option<Entry>,
+    pub instrumented: Option<Entry>,
     pub offsets: Vec<u64>,
     pub size: usize,
-    pub infallible_offset: usize,
     pub validated: RefCell<Option<launch::ValidatedLaunch>>,
     pub metadata: Kernel,
     pub block_size: OnceCell<u32>,
@@ -90,7 +93,7 @@ impl Gpu {
             download: Rc::new(driver::Stream::new()),
             release: Rc::new(driver::Stream::new()),
             modules: artifact.modules.iter().map(|_| OnceCell::new()).collect(),
-            infallible: artifact.modules.iter().map(|_| OnceCell::new()).collect(),
+            instrumented: Cell::new(false),
             artifact,
             kernels: RefCell::default(),
             statuses: RefCell::default(),
@@ -100,6 +103,16 @@ impl Gpu {
         Gpu {
             device: Rc::new(device),
         }
+    }
+
+    /// Launches the instrumented entry point of every kernel instead of the certified one. The
+    /// instrumented entry point carries every runtime check; it exists for kernels whose
+    /// obligations were not all discharged and, in debug builds, for every kernel.
+    pub fn select_instrumented(&self, enabled: bool) {
+        self.device.instrumented.set(enabled);
+        self.device.kernels.borrow().values().for_each(|kernel| {
+            kernel.validated.take();
+        });
     }
 
     pub fn stream(&self) -> Stream {
@@ -120,7 +133,7 @@ impl Gpu {
             driver::copy_to_device_async(pointer, source, &self.device.transfer);
         }
         let access = Access::recovering(&allocation, 0..bytes);
-        tracking::complete(&self.device.transfer, &[access], None);
+        tracking::complete(&self.device.transfer, &[access], &[]);
         Buffer::new(allocation, data.len())
     }
 
@@ -137,7 +150,7 @@ impl Gpu {
         // SAFETY: the allocation holds `bytes` bytes.
         unsafe { driver::fill_async(pointer, 0, bytes, &self.device.transfer) };
         let access = Access::recovering(&allocation, 0..bytes);
-        tracking::complete(&self.device.transfer, &[access], None);
+        tracking::complete(&self.device.transfer, &[access], &[]);
         Buffer::new(allocation, len)
     }
 
@@ -197,29 +210,21 @@ impl Device {
         } else {
             gpurs_artifact::PARAMETERS_OFFSET
         };
-        let load = |module: &Module, variant: &gpurs_artifact::Variant| Entry {
-            general: module.function(&variant.symbol),
-            linear: variant
-                .linear
-                .as_ref()
-                .map(|symbol| module.function(symbol)),
+        let load = |entry: &gpurs_artifact::Entry| Entry {
+            general: module.function(&entry.symbol),
+            linear: entry.linear.as_ref().map(|symbol| module.function(symbol)),
+            status: entry.status,
+            offset: if entry.status {
+                0
+            } else {
+                (start / align * align) as usize
+            },
         };
         let kernel = Rc::new(LoadedKernel {
-            checking: Entry {
-                general: module.function(&metadata.symbol),
-                linear: None,
-            },
-            fast: metadata.fast.as_ref().map(|fast| load(module, fast)),
-            infallible: metadata.infallible.as_ref().map(|variant| {
-                load(
-                    self.infallible[index]
-                        .get_or_init(|| Module::load(&self.artifact.modules[index].infallible)),
-                    variant,
-                )
-            }),
+            certified: metadata.certified.as_ref().map(load),
+            instrumented: metadata.instrumented.as_ref().map(load),
             offsets,
             size: size as usize,
-            infallible_offset: (start / align * align) as usize,
             validated: RefCell::default(),
             metadata: metadata.clone(),
             block_size: OnceCell::new(),

@@ -1,13 +1,13 @@
-//! Which runtime checks the generated code carries, independent of program semantics.
+//! Which runtime checks the generated code carries, and how strictly unproven checks are treated.
 //!
-//! The device view always compiles with `-Coverflow-checks=on`, because [`crate::verify`] uses the
-//! overflow assertions to prove that index expressions are exact. Whether such a check is *emitted*
+//! The device view always compiles with `-Coverflow-checks=on`, so every plain arithmetic operator
+//! is visible to [`crate::verify`] as a checked operation. Whether the overflow check is *emitted*
 //! follows the profile of the calling crate, as it does for host code: a release build wraps, a
 //! debug build checks. Division and remainder by zero are always checked.
 
 use std::env;
 
-use crate::{paths, stable::*};
+use crate::stable::*;
 
 /// Whether unchecked arithmetic is instrumented. `GPURS_OVERFLOW_CHECKS` overrides the profile.
 pub fn overflow_checks() -> bool {
@@ -23,12 +23,50 @@ pub fn unchecked_overflow(message: &AssertMessage) -> bool {
         )
 }
 
-/// Whether `function` only reports a violated `unsafe` precondition, which is a debugging aid of
-/// the standard library that a release build of the calling crate does not carry.
-pub fn precondition_check(sess: Sess<'_>, function: Instance) -> bool {
-    if overflow_checks() {
-        return false;
+/// The value of a `RuntimeChecks` operand. Library `unsafe` preconditions are checked only in
+/// a debug build of the calling crate, as on the host.
+pub fn runtime_check(sess: Sess<'_>, checks: &RuntimeChecks) -> bool {
+    match checks {
+        RuntimeChecks::OverflowChecks => sess.overflow_checks(),
+        RuntimeChecks::UbChecks => overflow_checks(),
+        RuntimeChecks::ContractChecks => false,
     }
-    let path = paths::path(sess, function.def.def_id());
-    path.starts_with("core::ub_checks::") || path.ends_with("::precondition_check")
+}
+
+/// The value of the `ub_checks`, `contract_checks`, or `overflow_checks` intrinsic.
+pub fn intrinsic_check(sess: Sess<'_>, name: &str) -> bool {
+    runtime_check(
+        sess,
+        &match name {
+            "ub_checks" => RuntimeChecks::UbChecks,
+            "contract_checks" => RuntimeChecks::ContractChecks,
+            _ => RuntimeChecks::OverflowChecks,
+        },
+    )
+}
+
+/// How the compiler treats a kernel whose memory-safety or panic obligations are not all
+/// discharged. `GPURS_STRICTNESS` selects `warn` (the default), `error`, or `omit`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Strictness {
+    /// One warning per residual obligation; the kernel keeps only its instrumented entry point.
+    Warn,
+    /// Residual obligations are compile errors.
+    Error,
+    /// The kernel silently keeps only its instrumented entry point.
+    Omit,
+}
+
+pub fn strictness() -> Strictness {
+    match env::var("GPURS_STRICTNESS").as_deref() {
+        Ok("error") => Strictness::Error,
+        Ok("omit") => Strictness::Omit,
+        _ => Strictness::Warn,
+    }
+}
+
+/// Whether every kernel also gets an instrumented entry point: in debug builds, or when
+/// `GPURS_INSTRUMENTED=1`.
+pub fn instrumented() -> bool {
+    overflow_checks() || env::var("GPURS_INSTRUMENTED").is_ok_and(|value| value == "1")
 }

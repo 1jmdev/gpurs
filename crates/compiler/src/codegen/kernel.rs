@@ -1,13 +1,13 @@
 use gpurs_artifact::{
-    Bound, Condition, Extent, Failure, INPUT_CAPACITY, INPUTS_OFFSET, Kernel, PARAMETERS_OFFSET,
-    Parameter, RESULT_OFFSET, Value, Variant, parameter_offsets,
+    Clause, Entry, Extent, Kernel, PARAMETERS_OFFSET, Parameter, RESULT_OFFSET, STATUS_OFFSET,
+    Value, parameter_offsets,
 };
 
 use super::{
     function::FunctionBuilder,
-    ir::{self, Access, Binary, Conversion, Flags, Ordering, Predicate, Type},
+    ir::{self, Access, Binary, Conversion, Flags, Type},
     layout::Shape,
-    module::ModuleBuilder,
+    module::{Certificate, ModuleBuilder},
     place::Place,
 };
 use crate::{stable, stable::*};
@@ -25,55 +25,50 @@ pub struct KernelPlan {
     pub symbol: String,
     pub parameters: Vec<KernelParameter>,
     pub extent: Extent,
-    pub conditions: Vec<Condition>,
-    /// Assertions of the kernel body, by block, that cannot fail when their bound holds.
-    pub proofs: Vec<(usize, Bound)>,
-    /// Shared-memory accesses, by block, whose index bound was proven for this launch.
-    pub shared_proofs: Vec<usize>,
+    pub requirements: Vec<Clause>,
+    pub preconditions: Vec<Clause>,
+    /// The checks the certified entry point omits; `None` when it does not exist.
+    pub certificate: Option<Certificate>,
+    /// Whether the certified entry point records arithmetic failures in the status word.
+    pub status: bool,
+    /// Whether the instrumented entry point exists.
+    pub instrumented: bool,
     /// Whether the kernel reads the linear thread index.
     pub uses_index: bool,
-    /// Every runtime check is one of `proofs`, so the kernel cannot fail when they hold.
-    pub infallible: bool,
+    /// The kernel's entry in the `*.preconditions` report.
+    pub summary: String,
 }
 
 impl<'sess> ModuleBuilder<'sess> {
     pub fn kernel(&mut self, plan: KernelPlan) -> Kernel {
-        let fast = (!plan.proofs.is_empty()).then(|| {
-            let symbol = format!("{}_fast", plan.symbol);
-            let skipped = plan.proofs.iter().map(|(block, _)| *block).collect();
-            let shared = plan.shared_proofs.iter().copied().collect();
-            let root = self.variant(plan.instance, skipped, shared, false);
-            self.entry(&plan, &symbol, root, false);
+        let certified = plan.certificate.clone().map(|certificate| {
+            let root = self.function(plan.instance, Some(certificate.clone()), false);
+            self.entry(&plan, &plan.symbol, root, false, plan.status);
             let linear = plan.uses_index.then(|| {
-                let linear = format!("{symbol}_linear");
-                let skipped = plan.proofs.iter().map(|(block, _)| *block).collect();
-                let shared = plan.shared_proofs.iter().copied().collect();
-                let root = self.variant(plan.instance, skipped, shared, true);
-                self.entry(&plan, &linear, root, true);
-                linear
+                let symbol = format!("{}_linear", plan.symbol);
+                let root = self.function(plan.instance, Some(certificate), true);
+                self.entry(&plan, &symbol, root, true, plan.status);
+                symbol
             });
-            Variant {
-                symbol,
+            Entry {
+                symbol: plan.symbol.clone(),
                 linear,
-                bounds: plan.proofs.iter().map(|(_, bound)| bound.clone()).collect(),
+                status: plan.status,
             }
         });
-        // The unchecked module holds only infallible kernels, which need one entry point.
-        if self.checked || fast.is_none() {
-            let root = self.function(plan.instance);
-            self.entry(&plan, &plan.symbol, root, false);
-        }
-        let signature = self.signature(plan.instance);
-        let infallible = plan.infallible.then(|| {
-            fast.clone().unwrap_or_else(|| Variant {
-                symbol: plan.symbol.clone(),
+        let instrumented = plan.instrumented.then(|| {
+            let symbol = format!("{}_instrumented", plan.symbol);
+            let root = self.function(plan.instance, None, false);
+            self.entry(&plan, &symbol, root, false, true);
+            Entry {
+                symbol,
                 linear: None,
-                bounds: Vec::new(),
-            })
+                status: true,
+            }
         });
+        let signature = self.signature(plan.instance);
         Kernel {
             key: plan.key,
-            symbol: plan.symbol,
             name: plan.instance.name(),
             parameters: plan
                 .parameters
@@ -85,14 +80,16 @@ impl<'sess> ModuleBuilder<'sess> {
                 size: signature.result.1.size().bytes() as u64,
                 align: signature.result.1.align(),
             }),
-            conditions: plan.conditions,
-            fast,
-            infallible,
+            requirements: plan.requirements,
+            preconditions: plan.preconditions,
+            certified,
+            instrumented,
         }
     }
 
-    /// Emits the entry point `symbol`, which runs the launch protocol around a call to `root`.
-    fn entry(&mut self, plan: &KernelPlan, symbol: &str, root: String, linear: bool) {
+    /// Emits the entry point `symbol`, which unpacks the argument block and calls `root`.
+    /// With `status`, every thread publishes the status word pointer for failure reports.
+    fn entry(&mut self, plan: &KernelPlan, symbol: &str, root: String, linear: bool, status: bool) {
         let parameters: Vec<_> = plan
             .parameters
             .iter()
@@ -110,7 +107,7 @@ impl<'sess> ModuleBuilder<'sess> {
             size: signature.result.1.size().bytes() as u64,
             align: signature.result.1.align(),
         });
-        let argument_offset = if self.checked {
+        let argument_offset = if status {
             0
         } else {
             let start = if result.is_some() {
@@ -134,62 +131,14 @@ impl<'sess> ModuleBuilder<'sess> {
             "tid.x", "tid.y", "tid.z", "ctaid.x", "ctaid.y", "ctaid.z", "ntid.x", "ntid.y",
             "ntid.z", "nctaid.x", "nctaid.y", "nctaid.z",
         ];
-        let failed = function.ir.block("failed");
-        if function.module.checked {
-            let thread =
-                ["tid.x", "tid.y", "tid.z"].map(|register| function.special_register(register));
-            let first = function.ir.binary(
-                Binary::Or,
-                Flags::empty(),
-                thread[0].clone(),
-                thread[1].clone(),
-            );
-            let first = function
+        if status {
+            // Every thread stores the same pointer, so each reads a valid one.
+            let pointer = function.offset(arguments.clone(), STATUS_OFFSET);
+            let pointer = function
                 .ir
-                .binary(Binary::Or, Flags::empty(), first, thread[2].clone());
-            let first = function.ir.compare(Predicate::Eq, first, ir::Value::i32(0));
-            let status_pointer = Type::I32.pointer();
-            let status =
-                function
-                    .ir
-                    .load(status_pointer.clone(), arguments.clone(), 8, Access::Plain);
-            let (status_block, ready) = (function.ir.block("status"), function.ir.block("ready"));
-            function.ir.branch_if(first, status_block, ready);
-            function.ir.position(status_block);
+                .load(Type::I32.pointer(), pointer, 8, Access::Plain);
             let slot = function.module.status.clone();
-            function.ir.store(status, slot, 8, Access::Plain);
-            // The first thread checks the failure sources once for its block. No barrier follows:
-            // a barrier in the body counts arrivals, so a sibling that stopped early cannot
-            // deadlock the block, and the launch status already marks the output invalid.
-            let inputs = function.ir.block("inputs");
-            for index in 0..INPUT_CAPACITY {
-                let pointer = function.offset(arguments.clone(), INPUTS_OFFSET + index as u64 * 8);
-                let pointer = function
-                    .ir
-                    .load(status_pointer.clone(), pointer, 8, Access::Plain);
-                let present = function.ir.compare(
-                    Predicate::Ne,
-                    pointer.clone(),
-                    ir::Value::null(status_pointer.clone()),
-                );
-                let (input, next) = (
-                    function.ir.block(format!("input{index}")),
-                    function.ir.block(format!("next{index}")),
-                );
-                function.ir.branch_if(present, input, inputs);
-                function.ir.position(input);
-                let value =
-                    function
-                        .ir
-                        .load(Type::I32, pointer, 4, Access::Atomic(Ordering::Monotonic));
-                let failure = function.ir.compare(Predicate::Ne, value, ir::Value::i32(0));
-                function.ir.branch_if(failure, failed, next);
-                function.ir.position(next);
-            }
-            function.ir.branch(inputs);
-            function.ir.position(inputs);
-            function.ir.branch(ready);
-            function.ir.position(ready);
+            function.ir.store(pointer, slot, 8, Access::Plain);
         }
         let operands: Vec<_> = plan
             .parameters
@@ -222,8 +171,6 @@ impl<'sess> ModuleBuilder<'sess> {
             function.store(&Place::new(pointer, destination.shape.clone()), &value);
         }
         function.ir.ret(None);
-        function.ir.position(failed);
-        function.fail(Failure::Upstream);
         function.ir.annotations.push(("kernel", 1));
         let FunctionBuilder { module, ir, .. } = function;
         module.ir.define(ir);

@@ -62,6 +62,9 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                 }
                 return true;
             }
+            "ub_checks" | "contract_checks" | "overflow_checks" => Value::Scalar(ir::Value::bool(
+                crate::policy::intrinsic_check(self.sess, name),
+            )),
             "black_box" | "likely" | "unlikely" | "read_via_copy" => {
                 if name == "read_via_copy" {
                     self.load(&Place::new(
@@ -340,7 +343,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
         arguments: &[Operand],
         destination: &Place,
     ) {
-        if self.module.checked && primitive.convergence == Convergence::Warp {
+        if self.certificate.is_none() && primitive.convergence == Convergence::Warp {
             let mask = self
                 .ir
                 .assembly("activemask.b32 $0;", "=r", Type::I32, Vec::new());
@@ -349,7 +352,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
             let failed = self.ir.fresh_block("warp");
             self.ir.branch_if(complete, ready, failed);
             self.ir.position(failed);
-            self.fail(Failure::Upstream);
+            self.fail(Failure::Divergence);
             self.ir.position(ready);
         }
         let value = match primitive.lowering {
@@ -462,11 +465,12 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
         )
     }
 
-    /// Block barrier that stops every thread once a thread of the block has failed. Verified
-    /// kernels reach each barrier with every thread, and a failed thread has exited, so fewer
-    /// arrivals than threads mean a failure.
+    /// Block barrier. In the instrumented copy it also stops every thread once a thread of the
+    /// block has failed: verified kernels reach each barrier with every thread, and a failed
+    /// thread has exited, so fewer arrivals than threads mean a failure. Certified copies never
+    /// stop a thread, so their barriers are plain.
     pub(super) fn barrier(&mut self) {
-        if !self.module.checked {
+        if self.certificate.is_some() {
             self.ir.call("llvm.nvvm.barrier0", Type::Void, Vec::new());
             return;
         }

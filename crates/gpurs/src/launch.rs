@@ -1,7 +1,7 @@
 //! Kernel submission used by `#[gpu]` launchers.
 
 use std::{
-    any, array,
+    any,
     cell::RefCell,
     mem::{self, MaybeUninit},
     rc::{Rc, Weak},
@@ -9,14 +9,14 @@ use std::{
 };
 
 use gpurs_artifact::{
-    self as artifact, Access as Effect, Condition, Expression, Extent, INPUT_CAPACITY,
-    INPUTS_OFFSET, Parameter, RESULT_OFFSET, Relation, STATUS_OFFSET, TransferType, Variable,
+    Access as Effect, Clause, Extent, Parameter, RESULT_OFFSET, STATUS_OFFSET, TransferType,
+    Variable,
 };
 use gpurs_driver as driver;
 
 use crate::{
     buffer::{Buffer, DeviceSlice, DeviceSliceMut, DeviceValue, Span},
-    device::{Device, LoadedKernel},
+    device::{Device, KernelKey, LoadedKernel},
     stream::{Launch, LaunchConfig},
     tracking::{self, Access, Allocation},
 };
@@ -35,21 +35,13 @@ pub(crate) struct ValidatedLaunch {
     config: LaunchConfig,
     lengths: Vec<u64>,
     threads: usize,
-    infallible: bool,
-    fast: bool,
 }
+
+type CachedKernel = (KernelKey, Weak<Device>, Rc<LoadedKernel>);
 
 #[derive(Default)]
 pub struct KernelCache {
-    loaded: RefCell<
-        Option<(
-            &'static str,
-            &'static str,
-            &'static str,
-            Weak<Device>,
-            Rc<LoadedKernel>,
-        )>,
-    >,
+    loaded: RefCell<Option<CachedKernel>>,
 }
 
 impl KernelCache {
@@ -71,7 +63,7 @@ pub fn kernel<'a, S: Launch, G>(
     let device = &stream.stream().device;
     let generics = any::type_name::<G>();
     let mut loaded = cache.loaded.borrow_mut();
-    let kernel = if let Some((previous_module, previous_tail, previous, owner, kernel)) = &*loaded
+    let kernel = if let Some(((previous_module, previous_tail, previous), owner, kernel)) = &*loaded
         && std::ptr::eq(*previous_module, module)
         && std::ptr::eq(*previous_tail, tail)
         && *previous == generics
@@ -81,9 +73,7 @@ pub fn kernel<'a, S: Launch, G>(
     } else {
         let kernel = device.kernel(module, tail, generics);
         *loaded = Some((
-            module,
-            tail,
-            generics,
+            (module, tail, generics),
             Rc::downgrade(device),
             kernel.clone(),
         ));
@@ -195,13 +185,6 @@ impl<S: Launch> KernelLaunch<'_, S> {
         self.arguments[offset..offset + 8].copy_from_slice(&bytes);
     }
 
-    fn word(&self, offset: usize) -> u64 {
-        // SAFETY: integer scalar parameters and header words are fully initialized.
-        u64::from_ne_bytes(array::from_fn(|byte| unsafe {
-            self.arguments[offset + byte].assume_init()
-        }))
-    }
-
     #[track_caller]
     fn submit<R>(mut self) -> Option<Buffer<R>> {
         let stream = self.stream.stream();
@@ -209,6 +192,19 @@ impl<S: Launch> KernelLaunch<'_, S> {
         let kernel = self.kernel.clone();
         let metadata = &kernel.metadata;
         let explicit = self.stream.config();
+        let certified = !device.instrumented.get() && kernel.certified.is_some();
+        let entry = if certified {
+            kernel.certified.as_ref()
+        } else {
+            kernel.instrumented.as_ref()
+        }
+        .unwrap_or_else(|| {
+            panic!(
+                "kernel `{}` has no instrumented entry point; build in the debug profile or \
+                 with GPURS_INSTRUMENTED=1",
+                metadata.name
+            )
+        });
         let config = explicit.unwrap_or_else(|| match metadata.extent {
             Extent::Single => LaunchConfig {
                 grid: [1, 1, 1],
@@ -216,13 +212,10 @@ impl<S: Launch> KernelLaunch<'_, S> {
                 shared_bytes: 0,
             },
             Extent::Length(parameter) => {
-                let block = *self.kernel.block_size.get_or_init(|| {
-                    self.kernel
-                        .checking
-                        .general
-                        .preferred_block_size()
-                        .clamp(32, 1024)
-                });
+                let block = *self
+                    .kernel
+                    .block_size
+                    .get_or_init(|| entry.general.preferred_block_size().clamp(32, 1024));
                 let threads = self.lengths[parameter] as usize;
                 LaunchConfig {
                     grid: [threads.div_ceil(block as usize), 1, 1],
@@ -240,12 +233,8 @@ impl<S: Launch> KernelLaunch<'_, S> {
             .borrow()
             .as_ref()
             .filter(|validated| validated.config == config && validated.lengths == self.lengths)
-            .map(|validated| (validated.threads, validated.infallible, validated.fast));
-        let (threads, infallible, fast) = validated.unwrap_or_else(|| {
-            metadata
-                .conditions
-                .iter()
-                .for_each(|condition| self.check(condition, &config));
+            .map(|validated| validated.threads);
+        let threads = validated.unwrap_or_else(|| {
             let threads = config
                 .grid
                 .iter()
@@ -256,19 +245,21 @@ impl<S: Launch> KernelLaunch<'_, S> {
                 Variable::BlockDimension(axis) => config.block[axis] as i128,
                 Variable::GridDimension(axis) => config.grid[axis] as i128,
                 Variable::Length(parameter) => self.lengths[parameter] as i128,
-                Variable::Scalar(parameter) => {
-                    self.word(kernel.offsets[parameter] as usize) as i128
+                Variable::Scalar(parameter) => self.scalar(parameter) as i128,
+                Variable::Quotient(..) | Variable::Remainder(..) => {
+                    unreachable!("quotients are evaluated by the polynomial")
                 }
-                Variable::Quotient(..) => unreachable!("quotients are evaluated by the polynomial"),
             };
-            let infallible = metadata
-                .infallible
-                .as_ref()
-                .is_some_and(|variant| variant.bounds.iter().all(|bound| bound.holds(&leaf)));
-            let fast = metadata
-                .fast
-                .as_ref()
-                .is_some_and(|variant| variant.bounds.iter().all(|bound| bound.holds(&leaf)));
+            let preconditions = certified.then_some(&metadata.preconditions);
+            for clause in metadata
+                .requirements
+                .iter()
+                .chain(preconditions.into_iter().flatten())
+            {
+                if !clause.holds(&leaf) {
+                    self.violated(clause, &leaf);
+                }
+            }
             if !metadata
                 .parameters
                 .iter()
@@ -278,11 +269,9 @@ impl<S: Launch> KernelLaunch<'_, S> {
                     config,
                     lengths: self.lengths.clone(),
                     threads,
-                    infallible,
-                    fast,
                 });
             }
-            (threads, infallible, fast)
+            threads
         });
         let result = metadata.result.map(|value| {
             assert_eq!(
@@ -307,60 +296,37 @@ impl<S: Launch> KernelLaunch<'_, S> {
                 0..buffer.allocation.bytes,
             ));
         }
-        let sources = tracking::order(&stream.raw, &accesses);
-        if sources.len() > INPUT_CAPACITY {
-            panic!(
-                "launch of `{}` depends on {} failure sources; at most {INPUT_CAPACITY} are supported",
-                metadata.name,
-                sources.len()
-            );
-        }
-        let result_pointer = result
-            .as_ref()
-            .map_or(0, |buffer| buffer.allocation.pointer);
+        let mut sources = tracking::order(&stream.raw, &accesses);
         if threads == 0 {
             return result;
         }
         let dimensions = |values: [usize; 3]| values.map(|value| value as u32);
-        let infallible = sources.is_empty() && infallible;
-        let entry = match (&kernel.infallible, &kernel.fast) {
-            (Some(entry), _) if infallible => entry,
-            (_, Some(entry)) if fast => entry,
-            _ => &kernel.checking,
-        };
         let linear = config.grid[1] == 1
             && config.grid[2] == 1
             && config.block[1] == 1
             && config.block[2] == 1;
         let function = entry.select(linear);
-        let status = (!infallible).then(|| device.status(&metadata.name));
+        let status = entry.status.then(|| device.status(&metadata.name));
         if let Some(status) = &status {
-            self.arguments[..artifact::PARAMETERS_OFFSET as usize].fill(MaybeUninit::new(0));
             self.write_word(STATUS_OFFSET as usize, status.pointer);
-            for (index, source) in sources.iter().enumerate() {
-                self.write_word(INPUTS_OFFSET as usize + 8 * index, source.pointer);
-            }
+            sources.push(status.clone());
         }
-        if result.is_some() {
-            self.write_word(RESULT_OFFSET as usize, result_pointer);
+        if let Some(buffer) = &result {
+            self.write_word(RESULT_OFFSET as usize, buffer.allocation.pointer);
         }
         // SAFETY: the argument block follows the kernel's verified parameter layout, and the
         // recorded accesses keep every referenced allocation alive until the launch completes.
-        // The fast entry point is launched only when its proven bounds hold.
+        // The certified entry point is launched only after every precondition held.
         unsafe {
             function.launch(
                 dimensions(config.grid),
                 dimensions(config.block),
                 config.shared_bytes as u32,
                 &stream.raw,
-                &mut self.arguments[if infallible {
-                    kernel.infallible_offset
-                } else {
-                    0
-                }..],
+                &mut self.arguments[entry.offset..],
             );
         }
-        tracking::complete(&stream.raw, &accesses, status.clone());
+        tracking::complete(&stream.raw, &accesses, &sources);
         if let Some(status) = status {
             stream.launched.borrow_mut().push(status);
         }
@@ -371,28 +337,33 @@ impl<S: Launch> KernelLaunch<'_, S> {
         result
     }
 
+    /// The integer scalar parameter at `parameter`, zero-extended from its size.
+    fn scalar(&self, parameter: usize) -> u64 {
+        let offset = self.kernel.offsets[parameter] as usize;
+        let Parameter::Value(value) = self.kernel.metadata.parameters[parameter] else {
+            unreachable!("scalar launch variables are value parameters")
+        };
+        (0..value.size.min(8) as usize).fold(0, |word, byte| {
+            // SAFETY: integer scalar parameters are fully initialized.
+            word | (unsafe { self.arguments[offset + byte].assume_init() } as u64) << (8 * byte)
+        })
+    }
+
     #[track_caller]
-    fn check(&self, condition: &Condition, config: &LaunchConfig) {
-        let evaluate = |expression: &Expression| match *expression {
-            Expression::Constant(value) => value,
-            Expression::BlockDimension(axis) => config.block[axis] as u64,
-            Expression::GridDimension(axis) => config.grid[axis] as u64,
-            Expression::BlockThreads => config.block.iter().product::<usize>() as u64,
-            Expression::Length(parameter) => self.lengths[parameter],
-            Expression::Scalar(parameter) => self.word(self.kernel.offsets[parameter] as usize),
-        };
-        let (left, right) = (evaluate(&condition.left), evaluate(&condition.right));
-        let holds = match condition.relation {
-            Relation::Equal => left == right,
-            Relation::LessEqual => left <= right,
-            Relation::Divides => left != 0 && right % left == 0,
-        };
-        if !holds {
-            panic!(
-                "launch of `{}` violates a verified precondition: {} ({left} vs {right})",
-                self.kernel.metadata.name, condition.reason
-            );
-        }
+    fn violated(&self, clause: &Clause, leaf: &impl Fn(&Variable) -> i128) -> ! {
+        let values = clause
+            .options
+            .iter()
+            .map(|option| match option.polynomial.evaluate(leaf) {
+                Some(value) => value.to_string(),
+                None => "overflow".to_owned(),
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        panic!(
+            "launch of `{}` violates the precondition `{}`: {} (evaluated difference: {values})",
+            self.kernel.metadata.name, clause.rendering, clause.reason
+        );
     }
 }
 
