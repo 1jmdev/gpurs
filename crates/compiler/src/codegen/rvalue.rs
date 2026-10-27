@@ -185,16 +185,14 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
         let ty = layout::immediate_type(scalar);
         let signed = layout::is_signed(scalar);
         let (a, b) = (left.scalar(), right.scalar());
-        if checked && let Some((kind, binary)) = overflowing(operation) {
+        if checked && let Some(kind) = overflowing(operation) {
             let sign = if signed { "s" } else { "u" };
             let pair = self.ir.call(
                 format!("llvm.{sign}{kind}.with.overflow.{ty}"),
                 Type::Struct(vec![ty.clone(), Type::I1]),
                 vec![a.clone(), b.clone()],
             );
-            // The plain operation keeps the result visible to loop analysis and strength
-            // reduction, which do not look through the overflow intrinsic.
-            let value = self.ir.binary(binary, Flags::empty(), a, b);
+            let value = self.ir.extract(pair.clone(), 0);
             let overflow = self.ir.extract(pair, 1);
             return Operand {
                 value: Value::Pair(value, overflow),
@@ -641,12 +639,12 @@ pub fn variant_position(shape: &Shape, variant: VariantIdx) -> Option<usize> {
         .position(|candidate| *candidate == variant)
 }
 
-/// The LLVM operation of a checked `BinOp` and its plain form.
-fn overflowing(operation: BinOp) -> Option<(&'static str, Binary)> {
+/// The LLVM operation of a checked `BinOp`.
+fn overflowing(operation: BinOp) -> Option<&'static str> {
     match operation {
-        BinOp::Add => Some(("add", Binary::Add)),
-        BinOp::Sub => Some(("sub", Binary::Sub)),
-        BinOp::Mul => Some(("mul", Binary::Mul)),
+        BinOp::Add => Some("add"),
+        BinOp::Sub => Some("sub"),
+        BinOp::Mul => Some("mul"),
         _ => None,
     }
 }

@@ -92,7 +92,7 @@ pub fn compile(architecture: &str) {
     println!("cargo::rustc-link-arg={}", object.display());
     println!("cargo::rerun-if-changed={}", manifest_directory.display());
     println!("cargo::rerun-if-changed={COMPILER_LIBRARY}");
-    for name in ["CUDA_PATH", "CUDA_HOME", "GPURS_KEEP_IR"] {
+    for name in ["CUDA_PATH", "CUDA_HOME"] {
         println!("cargo::rerun-if-env-changed={name}");
     }
 }

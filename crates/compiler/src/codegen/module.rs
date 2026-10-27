@@ -9,28 +9,10 @@ use super::{
 };
 use crate::stable::*;
 
-/// Special registers with their hardware bounds, as half-open `!range`s of the `i32` value.
-pub const REGISTERS: [(&str, i64, i64); 13] = [
-    ("tid.x", 0, 1024),
-    ("tid.y", 0, 1024),
-    ("tid.z", 0, 64),
-    ("ctaid.x", 0, i32::MAX as i64),
-    ("ctaid.y", 0, 65535),
-    ("ctaid.z", 0, 65535),
-    ("ntid.x", 1, 1025),
-    ("ntid.y", 1, 1025),
-    ("ntid.z", 1, 65),
-    ("nctaid.x", 1, i32::MIN as i64),
-    ("nctaid.y", 1, 65536),
-    ("nctaid.z", 1, 65536),
-    ("laneid", 0, 32),
-];
-
 /// One NVVM IR module holding every device function reachable from the requested kernels.
 pub struct ModuleBuilder<'sess> {
     pub sess: Sess<'sess>,
     pub checked: bool,
-    pub dimensions: FxHashMap<Instance, [Option<u64>; 6]>,
     pub ir: ir::Module,
     /// The block-shared slot holding the launch's failure status pointer.
     pub status: ir::Value,
@@ -61,7 +43,6 @@ impl<'sess> ModuleBuilder<'sess> {
         ModuleBuilder {
             sess,
             checked: true,
-            dimensions: FxHashMap::default(),
             ir,
             status,
             functions: FxHashMap::default(),

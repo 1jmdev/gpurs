@@ -141,8 +141,6 @@ pub enum Instruction {
         callee: Callee,
         result: Type,
         arguments: Vec<Value>,
-        /// Half-open `!range` of the `i32` result.
-        range: Option<(i64, i64)>,
     },
     Phi(Type, Vec<(Value, Block)>),
     Extract(Value, u32),

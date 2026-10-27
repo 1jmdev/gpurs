@@ -3,12 +3,17 @@ use std::env;
 use gpurs_artifact::{Convergence, Memory};
 use rustc_data_structures::fx::FxHashSet;
 
-use crate::{attributes, diagnostic, paths, stable::*};
+use crate::{attributes, codegen::optional_overflow, diagnostic, paths, stable::*};
 
-pub fn verify<'sess>(sess: Sess<'sess>, root: Instance) -> FxHashSet<Instance> {
+/// Every function reachable from `root`, and the blocks whose terminators can fail at runtime.
+pub fn verify<'sess>(
+    sess: Sess<'sess>,
+    root: Instance,
+) -> (FxHashSet<Instance>, Vec<(Instance, usize)>) {
     let mut checked = FxHashSet::default();
-    visit(sess, root, &mut Vec::new(), &mut checked);
-    checked
+    let mut failures = Vec::new();
+    visit(sess, root, &mut Vec::new(), &mut checked, &mut failures);
+    (checked, failures)
 }
 
 fn visit(
@@ -16,6 +21,7 @@ fn visit(
     instance: Instance,
     active: &mut Vec<Instance>,
     checked: &mut FxHashSet<Instance>,
+    failures: &mut Vec<(Instance, usize)>,
 ) {
     if active.contains(&instance) {
         diagnostic::error(
@@ -99,8 +105,17 @@ fn visit(
                     );
                 }
                 if allowed(sess, callee, terminator.source_info.span) {
-                    visit(sess, callee, active, checked);
+                    visit(sess, callee, active, checked, failures);
                 }
+            }
+            TerminatorKind::Assert { msg, .. }
+                if sess.overflow_checks() || !optional_overflow(msg) =>
+            {
+                failures.push((instance, block));
+            }
+            // Drop glue is not visited, so it is assumed to fail.
+            TerminatorKind::Call { target: None, .. } | TerminatorKind::Drop { .. } => {
+                failures.push((instance, block));
             }
             TerminatorKind::InlineAsm { .. } => {
                 sess.error(

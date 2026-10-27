@@ -2,7 +2,7 @@ use gpurs_artifact::Failure;
 use rustc_data_structures::fx::FxHashSet;
 
 use super::{
-    ir::{self, Predicate, Type},
+    ir::{self, Type},
     layout::{self, PassMode, Shape},
     module::ModuleBuilder,
     place::{Operand, Place, Value},
@@ -238,42 +238,6 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
         match terminator {
             TerminatorKind::Goto { target } => self.branch(*target),
             TerminatorKind::SwitchInt { discr, targets } => {
-                let branches: Vec<_> = targets.branches().collect();
-                if let [(value, mut target)] = branches[..] {
-                    // Fuse `a && b` and `a || b` into one branch, as nvcc does, when `b` is
-                    // computed by a block that cannot fail or touch memory.
-                    let mut matches = self.matches(discr, value);
-                    let mut otherwise = self.forward(targets.otherwise());
-                    target = self.forward(target);
-                    for _ in 0..4 {
-                        let Some(((discr, value, case, default), disjunction)) = self
-                            .speculatable(otherwise)
-                            .filter(|(.., case, _)| *case == target)
-                            .map(|fused| (fused, true))
-                            .or_else(|| {
-                                self.speculatable(target)
-                                    .filter(|(.., default)| *default == otherwise)
-                                    .map(|fused| (fused, false))
-                            })
-                        else {
-                            break;
-                        };
-                        let block = if disjunction { otherwise } else { target };
-                        for statement in self.body.blocks[block].statements.clone() {
-                            self.statement(&statement.kind);
-                        }
-                        let next = self.matches(&discr, value);
-                        matches = if disjunction {
-                            otherwise = default;
-                            self.ir.select(matches, ir::Value::bool(true), next)
-                        } else {
-                            target = case;
-                            self.ir.select(matches, next, ir::Value::bool(false))
-                        };
-                    }
-                    let (target, otherwise) = (self.target(target), self.target(otherwise));
-                    return self.ir.branch_if(matches, target, otherwise);
-                }
                 let discriminant = self.operand(discr);
                 let ValueRepr::Scalar(scalar) = discriminant.shape.repr().clone() else {
                     unreachable!(
@@ -282,11 +246,9 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
                     )
                 };
                 let ty = layout::immediate_type(scalar);
-                let cases = branches
-                    .iter()
-                    .map(|(value, target)| {
-                        (ir::Value::int(ty.clone(), *value), self.target(*target))
-                    })
+                let cases = targets
+                    .branches()
+                    .map(|(value, target)| (ir::Value::int(ty.clone(), value), self.target(target)))
                     .collect();
                 let otherwise = self.target(targets.otherwise());
                 self.ir.switch(discriminant.scalar(), otherwise, cases);
@@ -376,103 +338,6 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
 
     pub fn branch(&mut self, target: usize) {
         self.ir.branch(self.target(target));
-    }
-
-    fn matches(&mut self, discr: &MirOperand, value: u128) -> ir::Value {
-        let discriminant = self.operand(discr);
-        let ValueRepr::Scalar(scalar) = discriminant.shape.repr().clone() else {
-            unreachable!(
-                "switch on a non-scalar `{:?}`",
-                discriminant.shape.ty.kind()
-            )
-        };
-        let value = ir::Value::int(layout::immediate_type(scalar), value);
-        self.ir.compare(Predicate::Eq, discriminant.scalar(), value)
-    }
-
-    /// The two-way switch ending `block` when the block only computes temporaries used nowhere
-    /// else, so evaluating it early cannot fail, touch memory, or change an observable value.
-    fn speculatable(&self, block: usize) -> Option<(MirOperand, u128, usize, usize)> {
-        let data = &self.body.blocks[block];
-        let TerminatorKind::SwitchInt { discr, targets } = &data.terminator.kind else {
-            return None;
-        };
-        let branches: Vec<_> = targets.branches().collect();
-        let [(value, case)] = branches[..] else {
-            return None;
-        };
-        let pure = |operand: &MirOperand| match operand {
-            MirOperand::Copy(place) | MirOperand::Move(place) => place
-                .projection
-                .iter()
-                .all(|element| matches!(element, ProjectionElem::Field(..))),
-            MirOperand::Constant(_) => true,
-            MirOperand::RuntimeChecks(_) => false,
-        };
-        let mut assigned = Vec::new();
-        let argument_count = self.body.arg_locals().len();
-        for statement in &data.statements {
-            match &statement.kind {
-                StatementKind::StorageLive(_)
-                | StatementKind::StorageDead(_)
-                | StatementKind::Nop => {}
-                StatementKind::Assign(place, rvalue) => {
-                    let simple = match rvalue {
-                        Rvalue::Use(operand, ..)
-                        | Rvalue::UnaryOp(_, operand)
-                        | Rvalue::Cast(_, operand, _) => pure(operand),
-                        Rvalue::BinaryOp(operation, left, right) => {
-                            !matches!(operation, BinOp::Div | BinOp::Rem)
-                                && pure(left)
-                                && pure(right)
-                        }
-                        _ => false,
-                    };
-                    if !simple || !place.projection.is_empty() || place.local <= argument_count {
-                        return None;
-                    }
-                    assigned.push(place.local);
-                }
-                _ => return None,
-            }
-        }
-        if assigned.len() > 16 {
-            return None;
-        }
-        for (other, data) in self.body.blocks.iter().enumerate() {
-            if other != block && mentions(data, &assigned) {
-                return None;
-            }
-        }
-        Some((
-            discr.clone(),
-            value,
-            self.forward(case),
-            self.forward(targets.otherwise()),
-        ))
-    }
-
-    /// The first block reached from `block` through blocks that only end storage and jump.
-    fn forward(&self, mut block: usize) -> usize {
-        for _ in 0..8 {
-            let data = &self.body.blocks[block];
-            match &data.terminator.kind {
-                TerminatorKind::Goto { target }
-                    if data.statements.iter().all(|statement| {
-                        matches!(
-                            statement.kind,
-                            StatementKind::StorageLive(_)
-                                | StatementKind::StorageDead(_)
-                                | StatementKind::Nop
-                        )
-                    }) =>
-                {
-                    block = *target
-                }
-                _ => break,
-            }
-        }
-        block
     }
 
     pub fn operand(&mut self, operand: &MirOperand) -> Operand {
@@ -568,52 +433,4 @@ fn reachable_blocks(body: &Body) -> Reachable {
         }
     }
     Reachable { bits }
-}
-
-/// Whether any statement or terminator in `data` mentions one of `locals`.
-fn mentions(data: &BasicBlock, locals: &[usize]) -> bool {
-    let place = |candidate: &MirPlace| locals.contains(&candidate.local);
-    let operand = |candidate: &MirOperand| match candidate {
-        MirOperand::Copy(location) | MirOperand::Move(location) => place(location),
-        MirOperand::Constant(_) | MirOperand::RuntimeChecks(_) => false,
-    };
-    let value = |rvalue: &Rvalue| match rvalue {
-        Rvalue::Use(candidate, _)
-        | Rvalue::UnaryOp(_, candidate)
-        | Rvalue::Cast(_, candidate, _) => operand(candidate),
-        Rvalue::BinaryOp(_, left, right) | Rvalue::CheckedBinaryOp(_, left, right) => {
-            operand(left) || operand(right)
-        }
-        Rvalue::Aggregate(_, operands) => operands.iter().any(operand),
-        _ => false,
-    };
-    if data
-        .statements
-        .iter()
-        .any(|statement| match &statement.kind {
-            StatementKind::Assign(destination, rvalue) => place(destination) || value(rvalue),
-            StatementKind::SetDiscriminant { place: target, .. } => place(target),
-            StatementKind::StorageLive(local) | StatementKind::StorageDead(local) => {
-                locals.contains(local)
-            }
-            StatementKind::FakeRead(_, target) | StatementKind::PlaceMention(target) => {
-                place(target)
-            }
-            _ => false,
-        })
-    {
-        return true;
-    }
-    match &data.terminator.kind {
-        TerminatorKind::SwitchInt { discr, .. } => operand(discr),
-        TerminatorKind::Call {
-            func,
-            args,
-            destination,
-            ..
-        } => operand(func) || args.iter().any(operand) || place(destination),
-        TerminatorKind::Assert { cond, .. } => operand(cond),
-        TerminatorKind::Drop { place: target, .. } => place(target),
-        _ => false,
-    }
 }

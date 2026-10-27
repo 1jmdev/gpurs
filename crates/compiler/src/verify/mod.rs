@@ -3,10 +3,10 @@ mod policy;
 mod proof;
 mod symbolic;
 
-use gpurs_artifact::{Access, Bound, Condition, Extent, Parameter, Value};
+use gpurs_artifact::{Access, Parameter, Value};
 
 use crate::{
-    codegen::{KernelParameter, ModuleBuilder},
+    codegen::{KernelParameter, KernelPlan, ModuleBuilder},
     stable,
     stable::*,
     transfer,
@@ -16,13 +16,10 @@ pub fn kernel(
     sess: Sess<'_>,
     instance: Instance,
     configured: bool,
-) -> Option<(
-    Vec<KernelParameter>,
-    Extent,
-    Vec<Condition>,
-    Vec<(usize, Bound)>,
-)> {
-    let functions = policy::verify(sess, instance);
+    key: String,
+    symbol: String,
+) -> Option<KernelPlan> {
+    let (functions, failures) = policy::verify(sess, instance);
     let module = ModuleBuilder::new(sess);
     let signature = module.signature(instance);
     let mut parameters = Vec::new();
@@ -79,5 +76,17 @@ pub fn kernel(
         configured,
         returns_value,
     );
-    Some((parameters, extent, conditions, proofs))
+    let infallible = failures.iter().all(|(function, block)| {
+        *function == instance && proofs.iter().any(|(proven, _)| proven == block)
+    });
+    Some(KernelPlan {
+        instance,
+        key,
+        symbol,
+        parameters,
+        extent,
+        conditions,
+        proofs,
+        infallible,
+    })
 }

@@ -5,7 +5,7 @@ use super::{
     ir::{
         self, Access, Binary, Conversion, Flags, Modification, Ordering, Predicate, Transfer, Type,
     },
-    layout, module,
+    layout,
     place::{Operand, Place, Value},
 };
 use crate::{attributes, paths, stable::*};
@@ -444,36 +444,16 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
     }
 
     pub(super) fn special_register(&mut self, register: &str) -> ir::Value {
-        let index = module::REGISTERS
-            .iter()
-            .position(|(name, ..)| *name == register)
-            .unwrap();
-        let (_, mut low, mut high) = module::REGISTERS[index];
-        if index < 12
-            && let Some(value) = self
-                .module
-                .dimensions
-                .get(&self.instance)
-                .and_then(|dimensions| dimensions[index % 6])
-        {
-            (low, high) = if index < 6 {
-                (0, value as i64)
-            } else {
-                (value as i64, value as i64 + 1)
-            };
-        }
-        self.ir.call_ranged(
+        self.ir.call(
             format!("llvm.nvvm.read.ptx.sreg.{register}"),
             Type::I32,
             Vec::new(),
-            Some((low, high)),
         )
     }
 
     /// Block barrier that stops every thread once a thread of the block has failed. Verified
     /// kernels reach each barrier with every thread, and a failed thread has exited, so fewer
-    /// arrivals than threads mean a failure. The predicated exit adds no control-flow edge,
-    /// which keeps loops around barriers open to rotation and strength reduction.
+    /// arrivals than threads mean a failure.
     pub(super) fn barrier(&mut self) {
         if !self.module.checked {
             self.ir.call("llvm.nvvm.barrier0", Type::Void, Vec::new());
@@ -489,9 +469,14 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
         let z = self.special_register("ntid.z");
         let threads = self.ir.binary(Binary::Mul, Flags::NUW, x, y);
         let threads = self.ir.binary(Binary::Mul, Flags::NUW, threads, z);
-        let failed = self.ir.compare(Predicate::Ult, arrived, threads);
-        self.ir
-            .assembly("@$0 exit;", "b,~{memory}", Type::Void, vec![failed]);
+        let incomplete = self.ir.compare(Predicate::Ult, arrived, threads);
+        let failed = self.ir.fresh_block("barrier");
+        let ready = self.ir.fresh_block("barrier");
+        self.ir.branch_if(incomplete, failed, ready);
+        self.ir.position(failed);
+        self.ir.assembly("exit;", "", Type::Void, Vec::new());
+        self.ir.unreachable();
+        self.ir.position(ready);
     }
 
     fn math(&mut self, name: &str, arguments: &[Operand]) -> Option<Value> {

@@ -6,7 +6,7 @@ use rustc_interface::{interface::Compiler, util};
 
 use crate::{
     attributes,
-    codegen::{KernelPlan, ModuleBuilder},
+    codegen::ModuleBuilder,
     discovery::HostView,
     nvvm, paths,
     stable::{
@@ -92,19 +92,16 @@ impl DeviceView {
                     continue;
                 }
             };
-            if let Some((parameters, extent, conditions, proofs)) =
-                verify::kernel(sess, instance, launch.configured)
-            {
-                let plan = KernelPlan {
-                    instance,
-                    key: launch.key.clone(),
-                    symbol: format!("gpurs_kernel_{}", kernels.len()),
-                    parameters,
-                    extent,
-                    conditions,
-                    proofs,
-                };
-                proven.kernel(plan.clone());
+            if let Some(plan) = verify::kernel(
+                sess,
+                instance,
+                launch.configured,
+                launch.key.clone(),
+                format!("gpurs_kernel_{}", kernels.len()),
+            ) {
+                if plan.infallible {
+                    proven.kernel(plan.clone());
+                }
                 kernels.push(module.kernel(plan));
             }
         }
@@ -123,43 +120,18 @@ impl DeviceView {
             let ir = module.finish();
             sess.abort_if_errors();
             let toolkit = nvvm::toolkit()?;
-            let proven_ir = proven.finish();
-            let proven = nvvm::ptx(&toolkit, &proven_ir, &architecture)?;
-            for kernel in &mut kernels {
-                kernel.infallible = if nvvm::infallible(&proven, &kernel.symbol) {
-                    Some(gpurs_artifact::Variant {
-                        symbol: kernel.symbol.clone(),
-                        bounds: Vec::new(),
-                    })
-                } else {
-                    kernel
-                        .fast
-                        .as_ref()
-                        .filter(|variant| nvvm::infallible(&proven, &variant.symbol))
-                        .cloned()
-                };
-            }
             let scratch = directory.join(&self.crate_name);
             fs::create_dir_all(&scratch).map_err(|error| error.to_string())?;
-            if env::var_os("GPURS_KEEP_IR").is_some() {
-                fs::write(scratch.join("kernels.ll"), &ir).map_err(|error| error.to_string())?;
-                fs::write(scratch.join("proven.ll"), &proven_ir)
-                    .map_err(|error| error.to_string())?;
-                fs::write(scratch.join("proven.ptx"), &proven)
-                    .map_err(|error| error.to_string())?;
-            }
             let ptx = nvvm::ptx(&toolkit, &ir, &architecture)?;
             let cubin = nvvm::cubin(&toolkit, &ptx, &architecture, &scratch)?;
             let infallible = if kernels.iter().any(|kernel| kernel.infallible.is_some()) {
+                let proven = nvvm::ptx(&toolkit, &proven.finish(), &architecture)?;
                 nvvm::cubin(&toolkit, &proven, &architecture, &scratch)?
             } else {
                 Vec::new()
             };
-            if env::var_os("GPURS_KEEP_IR").is_none() {
-                fs::remove_file(scratch.join("kernels.ptx")).map_err(|error| error.to_string())?;
-                fs::remove_file(scratch.join("kernels.cubin"))
-                    .map_err(|error| error.to_string())?;
-            }
+            fs::remove_file(scratch.join("kernels.ptx")).map_err(|error| error.to_string())?;
+            fs::remove_file(scratch.join("kernels.cubin")).map_err(|error| error.to_string())?;
             artifact.modules.push(Module {
                 cubin,
                 infallible,

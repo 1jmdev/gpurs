@@ -1,6 +1,6 @@
 use gpurs_artifact::{
-    Bound, Condition, Expression, Extent, Failure, INPUT_CAPACITY, INPUTS_OFFSET, Kernel,
-    PARAMETERS_OFFSET, Parameter, RESULT_OFFSET, Relation, Value, Variant, parameter_offsets,
+    Bound, Condition, Extent, Failure, INPUT_CAPACITY, INPUTS_OFFSET, Kernel, PARAMETERS_OFFSET,
+    Parameter, RESULT_OFFSET, Value, Variant, parameter_offsets,
 };
 
 use super::{
@@ -28,40 +28,12 @@ pub struct KernelPlan {
     pub conditions: Vec<Condition>,
     /// Assertions of the kernel body, by block, that cannot fail when their bound holds.
     pub proofs: Vec<(usize, Bound)>,
+    /// Every runtime check is one of `proofs`, so the kernel cannot fail when they hold.
+    pub infallible: bool,
 }
 
 impl<'sess> ModuleBuilder<'sess> {
     pub fn kernel(&mut self, plan: KernelPlan) -> Kernel {
-        let dimensions = std::array::from_fn(|index| {
-            let dimension = if index < 3 {
-                Expression::BlockDimension(index)
-            } else {
-                Expression::GridDimension(index - 3)
-            };
-            plan.conditions
-                .iter()
-                .find_map(|condition| match condition {
-                    Condition {
-                        left,
-                        relation: Relation::Equal,
-                        right: Expression::Constant(value),
-                        ..
-                    } if *left == dimension => Some(*value),
-                    _ => None,
-                })
-        });
-        self.dimensions
-            .entry(plan.instance)
-            .and_modify(|previous| {
-                for (previous, current) in previous.iter_mut().zip(dimensions) {
-                    if *previous != current {
-                        *previous = None;
-                    }
-                }
-            })
-            .or_insert(dimensions);
-        let root = self.function(plan.instance);
-        self.entry(&plan, &plan.symbol, root);
         let fast = (!plan.proofs.is_empty()).then(|| {
             let symbol = format!("{}_fast", plan.symbol);
             let skipped = plan.proofs.iter().map(|(block, _)| *block).collect();
@@ -72,7 +44,18 @@ impl<'sess> ModuleBuilder<'sess> {
                 bounds: plan.proofs.iter().map(|(_, bound)| bound.clone()).collect(),
             }
         });
+        // The unchecked module holds only infallible kernels, which need one entry point.
+        if self.checked || fast.is_none() {
+            let root = self.function(plan.instance);
+            self.entry(&plan, &plan.symbol, root);
+        }
         let signature = self.signature(plan.instance);
+        let infallible = plan.infallible.then(|| {
+            fast.clone().unwrap_or_else(|| Variant {
+                symbol: plan.symbol.clone(),
+                bounds: Vec::new(),
+            })
+        });
         Kernel {
             key: plan.key,
             symbol: plan.symbol,
@@ -89,7 +72,7 @@ impl<'sess> ModuleBuilder<'sess> {
             }),
             conditions: plan.conditions,
             fast,
-            infallible: None,
+            infallible,
         }
     }
 
@@ -139,34 +122,6 @@ impl<'sess> ModuleBuilder<'sess> {
         let registers = raw
             .clone()
             .map(|value| function.ir.cast(Conversion::ZExt, value, Type::I64));
-        let pinned = |dimension: fn(usize) -> Expression, axis| {
-            plan.conditions.iter().find_map(|condition| {
-                (condition.left == dimension(axis) && condition.relation == Relation::Equal)
-                    .then_some(&condition.right)
-                    .and_then(|right| match right {
-                        Expression::Constant(value) => Some(*value),
-                        _ => None,
-                    })
-            })
-        };
-        for axis in 0..3 {
-            for (dimension, index, count) in [
-                (
-                    Expression::BlockDimension as fn(usize) -> Expression,
-                    axis,
-                    axis + 6,
-                ),
-                (Expression::GridDimension, axis + 3, axis + 9),
-            ] {
-                if let Some(value) = pinned(dimension, axis) {
-                    for (register, predicate) in [(index, Predicate::Ult), (count, Predicate::Eq)] {
-                        let value = ir::Value::i32(value as i32);
-                        let holds = function.ir.compare(predicate, raw[register].clone(), value);
-                        function.ir.call("llvm.assume", Type::Void, vec![holds]);
-                    }
-                }
-            }
-        }
         let failed = function.ir.block("failed");
         if function.module.checked {
             let first = function.ir.binary(
@@ -253,13 +208,6 @@ impl<'sess> ModuleBuilder<'sess> {
         function.ir.position(failed);
         function.fail(Failure::Upstream);
         function.ir.annotations.push(("kernel", 1));
-        let block: Option<Vec<_>> = (0..3)
-            .map(|axis| pinned(Expression::BlockDimension, axis))
-            .collect();
-        for (axis, value) in block.into_iter().flatten().enumerate() {
-            let key = ["reqntidx", "reqntidy", "reqntidz"][axis];
-            function.ir.annotations.push((key, value as u32));
-        }
         let FunctionBuilder { module, ir, .. } = function;
         module.ir.define(ir);
     }

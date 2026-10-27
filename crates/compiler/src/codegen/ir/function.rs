@@ -225,22 +225,10 @@ impl Function {
         result: Type,
         arguments: Vec<Value>,
     ) -> Value {
-        self.call_ranged(symbol, result, arguments, None)
-    }
-
-    /// A call whose `i32` result lies in the half-open `range`.
-    pub fn call_ranged(
-        &mut self,
-        symbol: impl Into<String>,
-        result: Type,
-        arguments: Vec<Value>,
-        range: Option<(i64, i64)>,
-    ) -> Value {
         let call = Instruction::Call {
             callee: Callee::Symbol(symbol.into()),
             result: result.clone(),
             arguments,
-            range,
         };
         self.push(call, result)
     }
@@ -256,7 +244,6 @@ impl Function {
             callee: Callee::Assembly(text.to_owned(), constraints.to_owned()),
             result: result.clone(),
             arguments,
-            range: None,
         };
         self.push(call, result)
     }

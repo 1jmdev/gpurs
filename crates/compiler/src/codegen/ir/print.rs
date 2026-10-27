@@ -202,7 +202,6 @@ impl Function {
                 callee,
                 result,
                 arguments,
-                range,
             } => {
                 match callee {
                     Callee::Symbol(name) => write!(f, "call {result} @{name}")?,
@@ -215,11 +214,7 @@ impl Function {
                     .iter()
                     .map(|value| Typed(value).to_string())
                     .collect();
-                write!(f, "({})", arguments.join(", "))?;
-                match range {
-                    Some((low, high)) => write!(f, ", !range !{{i32 {low}, i32 {high}}}"),
-                    None => Ok(()),
-                }
+                write!(f, "({})", arguments.join(", "))
             }
             Instruction::Phi(ty, incoming) => {
                 let edges: Vec<_> = incoming
