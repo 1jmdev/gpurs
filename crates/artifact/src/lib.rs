@@ -4,6 +4,9 @@
 //! the status words of failure sources the launch depends on, and the result buffer; the
 //! kernel parameters follow in declaration order.
 
+mod primitive;
+
+pub use primitive::{Convergence, Lowering, Memory, Operand, Primitive, Proof};
 use serde::{Deserialize, Serialize};
 
 /// Symbol under which `gpurs-build` links the serialized artifact into each binary.

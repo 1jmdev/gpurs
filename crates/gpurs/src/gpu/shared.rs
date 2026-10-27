@@ -1,6 +1,6 @@
 use std::ops::{Index, IndexMut};
 
-use super::intrinsics;
+use gpurs_macros::primitive;
 
 /// Block-shared storage. Each call site of [`shared_array`] owns distinct storage per block.
 pub struct SharedArray<T, const N: usize> {
@@ -8,9 +8,14 @@ pub struct SharedArray<T, const N: usize> {
 }
 
 /// Declares block-shared storage; the compiler verifies initialization and race freedom.
-pub fn shared_array<T, const N: usize>() -> SharedArray<T, N> {
-    intrinsics::host()
-}
+#[primitive(
+    lowering = SharedArray,
+    architecture = 0,
+    convergence = None,
+    memory = SharedAllocation,
+    proof = SharedRegion
+)]
+pub fn shared_array<T, const N: usize>() -> SharedArray<T, N>;
 
 impl<T, const N: usize> SharedArray<T, N> {
     pub const fn len(&self) -> usize {

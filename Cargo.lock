@@ -65,6 +65,7 @@ version = "0.1.0"
 dependencies = [
  "postcard",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -101,8 +102,10 @@ dependencies = [
 name = "gpurs-macros"
 version = "0.1.0"
 dependencies = [
+ "gpurs-artifact",
  "proc-macro2",
  "quote",
+ "serde_json",
  "syn",
 ]
 

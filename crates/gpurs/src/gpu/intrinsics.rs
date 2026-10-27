@@ -1,33 +1,18 @@
-//! Leaf operations the gpurs compiler lowers to NVVM intrinsics.
+//! Leaf operations without a public wrapper of the same shape.
 
-macro_rules! intrinsics {
-    ($($name:ident($($argument:ident: $type:ty),*) -> $result:ty;)*) => {
-        $(
-            pub fn $name($($argument: $type),*) -> $result {
-                let _ = ($($argument,)*);
-                host()
-            }
-        )*
-    };
-}
+use gpurs_macros::primitive;
 
-intrinsics! {
-    thread_id_x() -> u32;
-    thread_id_y() -> u32;
-    thread_id_z() -> u32;
-    block_id_x() -> u32;
-    block_id_y() -> u32;
-    block_id_z() -> u32;
-    block_dim_x() -> u32;
-    block_dim_y() -> u32;
-    block_dim_z() -> u32;
-    grid_dim_x() -> u32;
-    grid_dim_y() -> u32;
-    grid_dim_z() -> u32;
-    lane_id() -> u32;
-    barrier() -> ();
-    shuffle_xor(value: u32, mask: u32) -> u32;
-}
+#[primitive(
+    lowering = Call {
+        symbol: "llvm.nvvm.shfl.sync.bfly.i32",
+        operands: [Constant("i32 -1"), Argument(0), Argument(1), Constant("i32 31")],
+    },
+    architecture = 30,
+    convergence = Warp,
+    memory = None,
+    proof = Varying
+)]
+pub fn shuffle_xor(value: u32, mask: u32) -> u32;
 
 #[track_caller]
 pub fn host() -> ! {

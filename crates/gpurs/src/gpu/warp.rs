@@ -2,16 +2,30 @@
 
 use std::ops::Add;
 
+use gpurs_macros::primitive;
+
 use super::intrinsics;
 
 pub const WIDTH: usize = 32;
 
-pub fn lane_id() -> usize {
-    intrinsics::lane_id() as usize
-}
+#[primitive(
+    lowering = Register("laneid"),
+    architecture = 0,
+    convergence = None,
+    memory = None,
+    proof = Lane
+)]
+pub fn lane_id() -> usize;
 
 /// Values that can be exchanged between warp lanes.
 pub trait Shuffle: Copy {
+    #[primitive(
+        lowering = Body,
+        architecture = 30,
+        convergence = Warp,
+        memory = None,
+        proof = Varying
+    )]
     fn shuffle_xor(self, mask: u32) -> Self;
 }
 
@@ -60,17 +74,38 @@ impl Shuffle for usize {
 }
 
 /// Exchanges `value` with the lane whose id differs by the bits of `mask`.
+#[primitive(
+    lowering = Body,
+    architecture = 30,
+    convergence = Warp,
+    memory = None,
+    proof = Varying
+)]
 pub fn shuffle_xor<T: Shuffle>(value: T, mask: usize) -> T {
     value.shuffle_xor(mask as u32)
 }
 
 /// Sum of `value` across all lanes of the warp, returned to every lane.
+#[primitive(
+    lowering = Body,
+    architecture = 30,
+    convergence = Warp,
+    memory = None,
+    proof = Varying
+)]
 pub fn reduce_sum<T: Shuffle + Add<Output = T>>(value: T) -> T {
     [16, 8, 4, 2, 1]
         .into_iter()
         .fold(value, |total, mask| total + total.shuffle_xor(mask))
 }
 
+#[primitive(
+    lowering = Body,
+    architecture = 30,
+    convergence = Warp,
+    memory = None,
+    proof = Varying
+)]
 pub fn reduce_max(mut value: f32, lanes: usize) -> f32 {
     let mut distance = lanes / 2;
     while distance != 0 {
@@ -80,6 +115,13 @@ pub fn reduce_max(mut value: f32, lanes: usize) -> f32 {
     value
 }
 
+#[primitive(
+    lowering = Body,
+    architecture = 30,
+    convergence = Warp,
+    memory = None,
+    proof = Varying
+)]
 pub fn reduce_sum_group(mut value: f32, lanes: usize) -> f32 {
     let mut distance = lanes / 2;
     while distance != 0 {

@@ -7,6 +7,7 @@
 
 mod attribute;
 mod launcher;
+mod primitive;
 mod references;
 
 use proc_macro::TokenStream;
@@ -25,4 +26,14 @@ pub fn gpu(attribute: TokenStream, item: TokenStream) -> TokenStream {
             .to_compile_error(),
     }
     .into()
+}
+
+/// Declares a GPU primitive: its signature is the item, and the attribute defines lowering,
+/// minimum architecture, convergence, memory effect, and proof meaning.
+#[doc(hidden)]
+#[proc_macro_attribute]
+pub fn primitive(attribute: TokenStream, item: TokenStream) -> TokenStream {
+    primitive::expand(attribute.into(), item.into())
+        .unwrap_or_else(Error::into_compile_error)
+        .into()
 }

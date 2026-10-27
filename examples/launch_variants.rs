@@ -85,7 +85,7 @@ fn main() {
         "Strided sum is correct: {}",
         sums.iter()
             .enumerate()
-            .all(|(index, sum)| *sum == (0..4).map(|step| (index + step * 300) as f32).sum())
+            .all(|(index, sum)| *sum == (0..4).map(|step| (index + step * 300) as f32).sum::<f32>())
     );
 
     let mut output = gpu.zeros::<f32>(100);

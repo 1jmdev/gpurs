@@ -12,6 +12,14 @@ use rustc_driver::Callbacks;
 
 use crate::{device::DeviceView, discovery::HostView};
 
+/// Keeps `#[gpurs::primitive]` definitions in the metadata of the `gpurs` crate.
+const PRIMITIVE_ARGUMENTS: [&str; 4] = [
+    "--cfg",
+    "gpurs_device",
+    "-Zcrate-attr=feature(register_tool)",
+    "-Zcrate-attr=register_tool(gpurs_tool)",
+];
+
 struct Passthrough;
 
 impl Callbacks for Passthrough {}
@@ -34,6 +42,10 @@ pub unsafe extern "C" fn gpurs_compiler_main(
     // `arguments[0]` is the wrapper and `arguments[1]` the rustc that Cargo would have run.
     let rustc = &arguments[1..];
     let Some(crate_name) = target_crate(rustc) else {
+        if value(rustc, "--crate-name") == Some("gpurs") {
+            let arguments = [rustc, &PRIMITIVE_ARGUMENTS.map(str::to_owned)].concat();
+            return session(&arguments, &mut Passthrough);
+        }
         return session(rustc, &mut Passthrough);
     };
     let mut host = HostView::default();
@@ -93,11 +105,8 @@ fn device_arguments(arguments: &[String]) -> Vec<String> {
         }
     }
     let scratch = env::temp_dir().join("gpurs-device-view");
+    device.extend(PRIMITIVE_ARGUMENTS.map(str::to_owned));
     device.extend([
-        "--cfg".to_owned(),
-        "gpurs_device".to_owned(),
-        "-Zcrate-attr=feature(register_tool)".to_owned(),
-        "-Zcrate-attr=register_tool(gpurs_tool)".to_owned(),
         "-Zmir-opt-level=2".to_owned(),
         "-Zinline-mir=no".to_owned(),
         "-Copt-level=3".to_owned(),

@@ -1,3 +1,4 @@
+use gpurs_artifact::Primitive;
 use rustc_ast::attr::AttributeExt;
 use rustc_hir::def_id::DefId;
 use rustc_middle::ty::TyCtxt;
@@ -27,4 +28,17 @@ pub fn is_device(tcx: TyCtxt<'_>, def_id: DefId) -> bool {
 
 pub fn is_fast_math(tcx: TyCtxt<'_>, def_id: DefId) -> bool {
     marker(tcx, tcx.typeck_root_def_id(def_id), "fast_math").is_some()
+}
+
+/// The `#[gpurs::primitive]` definition of `def_id`, or of the trait item it implements.
+pub fn primitive(tcx: TyCtxt<'_>, def_id: DefId) -> Option<Primitive> {
+    if def_id.is_local() || tcx.crate_name(def_id.krate).as_str() != "gpurs" {
+        return None;
+    }
+    marker(
+        tcx,
+        tcx.trait_item_of(def_id).unwrap_or(def_id),
+        "primitive",
+    )
+    .map(|text| Primitive::decode(&text))
 }

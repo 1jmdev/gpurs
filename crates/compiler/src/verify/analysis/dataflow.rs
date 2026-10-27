@@ -1,7 +1,8 @@
 use std::collections::VecDeque;
 
 use gpurs_artifact::{
-    Access as ParameterAccess, Bound, Condition, Expression, Extent, Parameter, Relation,
+    Access as ParameterAccess, Bound, Condition, Convergence, Expression, Extent, Memory,
+    Parameter, Primitive, Proof, Relation,
 };
 use rustc_data_structures::fx::FxHashSet;
 use rustc_middle::{
@@ -43,8 +44,8 @@ pub(in crate::verify) fn verify<'tcx>(
         proofs: Vec::new(),
         escaped: FxHashSet::default(),
         uses_index: functions.iter().any(|function| {
-            paths::path(tcx, function.def_id()).starts_with("gpurs::gpu::thread::")
-                && !paths::is(tcx, function.def_id(), "gpurs::gpu::thread::sync_block")
+            attributes::primitive(tcx, function.def_id())
+                .is_some_and(|primitive| primitive.geometry())
         }),
         geometry: false,
         collect: false,
@@ -304,85 +305,8 @@ impl<'tcx> Analysis<'_, 'tcx> {
             self.span,
         );
         let path = paths::path(self.tcx, instance.def_id());
-        if path == "gpurs::gpu::thread::index" {
-            self.uses_index = true;
-            return Value::expression(Polynomial::atom(Atom::Index), 2);
-        }
-        for (name, atom, variance) in [
-            ("thread_id", Atom::Thread as fn(usize) -> Atom, 2),
-            ("block_id", Atom::Block, 0),
-            ("block_dim", Atom::BlockDimension, 0),
-            ("grid_dim", Atom::GridDimension, 0),
-        ] {
-            if path == format!("gpurs::gpu::thread::{name}") {
-                self.uses_index = true;
-                self.geometry = true;
-                return Value {
-                    fields: (0..3)
-                        .map(|axis| Value::expression(Polynomial::atom(atom(axis)), variance))
-                        .collect(),
-                    variance,
-                    ..Value::default()
-                };
-            }
-        }
-        if path == "gpurs::gpu::warp::lane_id" {
-            self.uses_index = true;
-            self.geometry = true;
-            if self.collect {
-                self.condition(
-                    Expression::Constant(32),
-                    Relation::Divides,
-                    Expression::BlockDimension(0),
-                    "warp lane proofs require thread-x rows aligned to complete warps",
-                );
-            }
-            return Value::expression(
-                Polynomial::atom(Atom::Remainder(
-                    Box::new(Polynomial::atom(Atom::Thread(0))),
-                    32,
-                )),
-                2,
-            );
-        }
-        if path == "gpurs::gpu::thread::sync_block" || path == "gpurs::gpu::intrinsics::barrier" {
-            self.geometry = true;
-            if self.collect {
-                self.barriers.insert(self.block);
-                self.collectives.push((self.block, 0, self.span));
-            }
-            return Value::default();
-        }
-        if path.starts_with("gpurs::gpu::warp::") {
-            self.geometry = true;
-            if self.collect {
-                self.collectives.push((self.block, 1, self.span));
-                self.condition(
-                    Expression::Constant(32),
-                    Relation::Divides,
-                    Expression::BlockThreads,
-                    "warp operations require complete warps",
-                );
-            }
-            return Value {
-                variance: 2,
-                ..Value::default()
-            };
-        }
-        if path == "gpurs::gpu::shared::shared_array" {
-            self.geometry = true;
-            let length = instance
-                .args
-                .const_at(1)
-                .try_to_target_usize(self.tcx)
-                .unwrap();
-            return Value {
-                origin: Some(Origin {
-                    region: Region::Shared(self.block, length),
-                    index: Some(Polynomial::constant(0)),
-                }),
-                ..Value::default()
-            };
+        if let Some(primitive) = attributes::primitive(self.tcx, instance.def_id()) {
+            return self.primitive(primitive, instance);
         }
         if path.starts_with("core::slice::")
             && path.ends_with("::len")
@@ -432,6 +356,81 @@ impl<'tcx> Analysis<'_, 'tcx> {
                     .unwrap_or(0)
             },
             ..Value::default()
+        }
+    }
+
+    fn primitive(&mut self, primitive: Primitive, instance: Instance<'tcx>) -> Value {
+        self.uses_index |= primitive.geometry();
+        self.geometry |= primitive.proof != Proof::Index;
+        if self.collect {
+            match primitive.convergence {
+                Convergence::None => {}
+                Convergence::Warp => {
+                    self.collectives.push((self.block, 1, self.span));
+                    self.condition(
+                        Expression::Constant(32),
+                        Relation::Divides,
+                        Expression::BlockThreads,
+                        "warp operations require complete warps",
+                    );
+                }
+                Convergence::Block => {
+                    self.collectives.push((self.block, 0, self.span));
+                    if primitive.memory == Memory::BlockFence {
+                        self.barriers.insert(self.block);
+                    }
+                }
+            }
+        }
+        let axes = |atom: fn(usize) -> Atom, variance| Value {
+            fields: (0..3)
+                .map(|axis| Value::expression(Polynomial::atom(atom(axis)), variance))
+                .collect(),
+            variance,
+            ..Value::default()
+        };
+        match primitive.proof {
+            Proof::ThreadAxes => axes(Atom::Thread, 2),
+            Proof::BlockAxes => axes(Atom::Block, 0),
+            Proof::BlockDimensionAxes => axes(Atom::BlockDimension, 0),
+            Proof::GridDimensionAxes => axes(Atom::GridDimension, 0),
+            Proof::Index => Value::expression(Polynomial::atom(Atom::Index), 2),
+            Proof::Lane => {
+                if self.collect {
+                    self.condition(
+                        Expression::Constant(32),
+                        Relation::Divides,
+                        Expression::BlockDimension(0),
+                        "warp lane proofs require thread-x rows aligned to complete warps",
+                    );
+                }
+                Value::expression(
+                    Polynomial::atom(Atom::Remainder(
+                        Box::new(Polynomial::atom(Atom::Thread(0))),
+                        32,
+                    )),
+                    2,
+                )
+            }
+            Proof::SharedRegion => Value {
+                origin: Some(Origin {
+                    region: Region::Shared(
+                        self.block,
+                        instance
+                            .args
+                            .const_at(1)
+                            .try_to_target_usize(self.tcx)
+                            .unwrap(),
+                    ),
+                    index: Some(Polynomial::constant(0)),
+                }),
+                ..Value::default()
+            },
+            Proof::Varying => Value {
+                variance: 2,
+                ..Value::default()
+            },
+            Proof::Uniform => Value::default(),
         }
     }
 

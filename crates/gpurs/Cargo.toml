@@ -10,3 +10,6 @@ repository.workspace = true
 gpurs-artifact.workspace = true
 gpurs-driver.workspace = true
 gpurs-macros.workspace = true
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(gpurs_device)"] }

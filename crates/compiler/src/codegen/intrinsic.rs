@@ -1,5 +1,5 @@
-use gpurs_artifact::Failure;
-use rustc_abi::{BackendRepr, Primitive};
+use gpurs_artifact::{Convergence, Failure, Lowering, Operand as CallOperand, Primitive};
+use rustc_abi::BackendRepr;
 use rustc_const_eval::util;
 use rustc_middle::{
     mir::BinOp,
@@ -11,7 +11,7 @@ use super::{
     layout, module,
     place::{Operand, Place, Value},
 };
-use crate::paths;
+use crate::{attributes, paths};
 
 impl<'tcx> FunctionBuilder<'_, 'tcx> {
     pub fn intrinsic(
@@ -20,142 +20,10 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
         arguments: &[Operand<'tcx>],
         destination: &Place<'tcx>,
     ) -> bool {
-        let path = paths::path(self.tcx, instance.def_id());
-        if let Some((_, prefix)) = [
-            ("gpurs::gpu::thread::thread_id", "tid"),
-            ("gpurs::gpu::thread::block_id", "ctaid"),
-            ("gpurs::gpu::thread::block_dim", "ntid"),
-            ("gpurs::gpu::thread::grid_dim", "nctaid"),
-        ]
-        .into_iter()
-        .find(|(name, _)| path == *name)
+        if let Some(primitive) = attributes::primitive(self.tcx, instance.def_id())
+            && primitive.leaf()
         {
-            for (axis, name) in ["x", "y", "z"].into_iter().enumerate() {
-                let register = self.special_register(&format!("{prefix}.{name}"));
-                let value = self.instruction(format!("zext i32 {register} to i64"));
-                let field = self.field(destination, axis.into());
-                self.store(
-                    &field,
-                    &Operand {
-                        value: Value::Scalar(value),
-                        layout: field.layout,
-                    },
-                );
-            }
-            return true;
-        }
-        if path == "gpurs::gpu::thread::index" {
-            let mut registers = Vec::new();
-            for name in [
-                "tid.x", "tid.y", "tid.z", "ctaid.x", "ctaid.y", "ctaid.z", "ntid.x", "ntid.y",
-                "ntid.z", "nctaid.x", "nctaid.y", "nctaid.z",
-            ] {
-                let register = self.special_register(name);
-                registers.push(self.instruction(format!("zext i32 {register} to i64")));
-            }
-            let block =
-                self.instruction(format!("mul nuw i64 {}, {}", registers[5], registers[10]));
-            let block = self.instruction(format!("add nuw i64 {block}, {}", registers[4]));
-            let block = self.instruction(format!("mul nuw i64 {block}, {}", registers[9]));
-            let block = self.instruction(format!("add nuw i64 {block}, {}", registers[3]));
-            let thread =
-                self.instruction(format!("mul nuw i64 {}, {}", registers[2], registers[7]));
-            let thread = self.instruction(format!("add nuw i64 {thread}, {}", registers[1]));
-            let thread = self.instruction(format!("mul nuw i64 {thread}, {}", registers[6]));
-            let thread = self.instruction(format!("add nuw i64 {thread}, {}", registers[0]));
-            let count = self.instruction(format!("mul nuw i64 {}, {}", registers[6], registers[7]));
-            let count = self.instruction(format!("mul nuw i64 {count}, {}", registers[8]));
-            let offset = self.instruction(format!("mul nuw i64 {block}, {count}"));
-            let value = self.instruction(format!("add nuw i64 {offset}, {thread}"));
-            self.store(
-                destination,
-                &Operand {
-                    value: Value::Scalar(value),
-                    layout: destination.layout,
-                },
-            );
-            return true;
-        }
-        if let Some(name) = path.strip_prefix("gpurs::gpu::intrinsics::") {
-            let value = match name {
-                "barrier" => {
-                    self.barrier();
-                    return true;
-                }
-                "shuffle_xor" => {
-                    if self.module.checked {
-                        let mask = self.instruction(
-                            "call i32 asm sideeffect \"activemask.b32 $0;\", \"=r\"()",
-                        );
-                        let complete = self.instruction(format!("icmp eq i32 {mask}, -1"));
-                        let ready = self.fresh_label("warp");
-                        let failed = self.fresh_label("warp");
-                        self.emit(format!("br i1 {complete}, label %{ready}, label %{failed}"));
-                        self.start_block(&failed);
-                        self.fail(Failure::Upstream);
-                        self.start_block(&ready);
-                    }
-                    self.module
-                        .declare("declare i32 @llvm.nvvm.shfl.sync.bfly.i32(i32, i32, i32, i32)");
-                    self.instruction(format!(
-                        "call i32 @llvm.nvvm.shfl.sync.bfly.i32(i32 -1, i32 {}, i32 {}, i32 31)",
-                        arguments[0].scalar(),
-                        arguments[1].scalar()
-                    ))
-                }
-                name => {
-                    let register = match name {
-                        "thread_id_x" => "tid.x",
-                        "thread_id_y" => "tid.y",
-                        "thread_id_z" => "tid.z",
-                        "block_id_x" => "ctaid.x",
-                        "block_id_y" => "ctaid.y",
-                        "block_id_z" => "ctaid.z",
-                        "block_dim_x" => "ntid.x",
-                        "block_dim_y" => "ntid.y",
-                        "block_dim_z" => "ntid.z",
-                        "grid_dim_x" => "nctaid.x",
-                        "grid_dim_y" => "nctaid.y",
-                        "grid_dim_z" => "nctaid.z",
-                        "lane_id" => "laneid",
-                        _ => return false,
-                    };
-                    self.special_register(register)
-                }
-            };
-            self.store(
-                destination,
-                &Operand {
-                    value: Value::Scalar(value),
-                    layout: destination.layout,
-                },
-            );
-            return true;
-        }
-        if path == "gpurs::gpu::shared::shared_array" {
-            let element = instance.args.type_at(0);
-            let length = instance
-                .args
-                .const_at(1)
-                .try_to_target_usize(self.tcx)
-                .unwrap();
-            let layout = self.layout_of(Ty::new_array(self.tcx, element, length));
-            let name = self.module.unique("@gpurs.shared");
-            let size = layout.size.bytes().max(1);
-            self.module.global(&format!(
-                "{name} = internal addrspace(3) global [{size} x i8] undef, align {}",
-                layout.align.abi.bytes()
-            ));
-            let pointer = self.instruction(format!(
-                "addrspacecast [{size} x i8] addrspace(3)* {name} to i8*"
-            ));
-            self.store(
-                destination,
-                &Operand {
-                    value: Value::Scalar(pointer),
-                    layout: destination.layout,
-                },
-            );
+            self.primitive(primitive, instance, arguments, destination);
             return true;
         }
         if let Some(name) = paths::math(self.tcx, instance.def_id())
@@ -454,6 +322,114 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
         true
     }
 
+    fn primitive(
+        &mut self,
+        primitive: Primitive,
+        instance: Instance<'tcx>,
+        arguments: &[Operand<'tcx>],
+        destination: &Place<'tcx>,
+    ) {
+        if self.module.checked && primitive.convergence == Convergence::Warp {
+            let mask = self.instruction("call i32 asm sideeffect \"activemask.b32 $0;\", \"=r\"()");
+            let complete = self.instruction(format!("icmp eq i32 {mask}, -1"));
+            let ready = self.fresh_label("warp");
+            let failed = self.fresh_label("warp");
+            self.emit(format!("br i1 {complete}, label %{ready}, label %{failed}"));
+            self.start_block(&failed);
+            self.fail(Failure::Upstream);
+            self.start_block(&ready);
+        }
+        let value = match primitive.lowering {
+            Lowering::Dimensions(prefix) => {
+                for (axis, name) in ["x", "y", "z"].into_iter().enumerate() {
+                    let value = self.extended_register(&format!("{prefix}.{name}"));
+                    let field = self.field(destination, axis.into());
+                    self.store(
+                        &field,
+                        &Operand {
+                            value: Value::Scalar(value),
+                            layout: field.layout,
+                        },
+                    );
+                }
+                return;
+            }
+            Lowering::Register(register) => self.extended_register(&register),
+            Lowering::Index => {
+                let [tx, ty, tz, bx, by, bz, nx, ny, nz, gx, gy, _] = [
+                    "tid.x", "tid.y", "tid.z", "ctaid.x", "ctaid.y", "ctaid.z", "ntid.x", "ntid.y",
+                    "ntid.z", "nctaid.x", "nctaid.y", "nctaid.z",
+                ]
+                .map(|name| self.extended_register(name));
+                let block = self.instruction(format!("mul nuw i64 {bz}, {gy}"));
+                let block = self.instruction(format!("add nuw i64 {block}, {by}"));
+                let block = self.instruction(format!("mul nuw i64 {block}, {gx}"));
+                let block = self.instruction(format!("add nuw i64 {block}, {bx}"));
+                let thread = self.instruction(format!("mul nuw i64 {tz}, {ny}"));
+                let thread = self.instruction(format!("add nuw i64 {thread}, {ty}"));
+                let thread = self.instruction(format!("mul nuw i64 {thread}, {nx}"));
+                let thread = self.instruction(format!("add nuw i64 {thread}, {tx}"));
+                let count = self.instruction(format!("mul nuw i64 {nx}, {ny}"));
+                let count = self.instruction(format!("mul nuw i64 {count}, {nz}"));
+                let offset = self.instruction(format!("mul nuw i64 {block}, {count}"));
+                self.instruction(format!("add nuw i64 {offset}, {thread}"))
+            }
+            Lowering::Barrier => return self.barrier(),
+            Lowering::Call { symbol, operands } => {
+                let operands: Vec<_> = operands
+                    .iter()
+                    .map(|operand| match operand {
+                        CallOperand::Argument(index) => format!(
+                            "{} {}",
+                            scalar_type(arguments[*index].layout.backend_repr),
+                            arguments[*index].scalar()
+                        ),
+                        CallOperand::Constant(text) => text.clone(),
+                    })
+                    .collect();
+                let types: Vec<_> = operands
+                    .iter()
+                    .map(|operand| operand.split_once(' ').unwrap().0)
+                    .collect();
+                let result = scalar_type(destination.layout.backend_repr);
+                self.module
+                    .declare(format!("declare {result} @{symbol}({})", types.join(", ")));
+                self.instruction(format!("call {result} @{symbol}({})", operands.join(", ")))
+            }
+            Lowering::SharedArray => {
+                let element = instance.args.type_at(0);
+                let length = instance
+                    .args
+                    .const_at(1)
+                    .try_to_target_usize(self.tcx)
+                    .unwrap();
+                let layout = self.layout_of(Ty::new_array(self.tcx, element, length));
+                let name = self.module.unique("@gpurs.shared");
+                let size = layout.size.bytes().max(1);
+                self.module.global(&format!(
+                    "{name} = internal addrspace(3) global [{size} x i8] undef, align {}",
+                    layout.align.abi.bytes()
+                ));
+                self.instruction(format!(
+                    "addrspacecast [{size} x i8] addrspace(3)* {name} to i8*"
+                ))
+            }
+            Lowering::Body => unreachable!(),
+        };
+        self.store(
+            destination,
+            &Operand {
+                value: Value::Scalar(value),
+                layout: destination.layout,
+            },
+        );
+    }
+
+    fn extended_register(&mut self, register: &str) -> String {
+        let value = self.special_register(register);
+        self.instruction(format!("zext i32 {value} to i64"))
+    }
+
     pub(super) fn special_register(&mut self, register: &str) -> String {
         let range = module::REGISTERS
             .iter()
@@ -596,7 +572,7 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
         let BackendRepr::Scalar(scalar) = layout.backend_repr else {
             unreachable!()
         };
-        let pointer_value = matches!(scalar.primitive(), Primitive::Pointer(_));
+        let pointer_value = matches!(scalar.primitive(), rustc_abi::Primitive::Pointer(_));
         let ty = if pointer_value {
             "i64"
         } else {
@@ -701,4 +677,11 @@ fn ordering(value: u64) -> &'static str {
         4 => "seq_cst",
         _ => unreachable!("atomic ordering {value}"),
     }
+}
+
+fn scalar_type(representation: BackendRepr) -> &'static str {
+    let BackendRepr::Scalar(scalar) = representation else {
+        unreachable!()
+    };
+    layout::immediate_type(scalar)
 }

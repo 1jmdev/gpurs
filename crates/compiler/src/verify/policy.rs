@@ -1,3 +1,6 @@
+use std::env;
+
+use gpurs_artifact::{Convergence, Memory};
 use rustc_data_structures::fx::FxHashSet;
 use rustc_middle::{
     mir::{TerminatorKind, traversal},
@@ -74,18 +77,29 @@ fn visit<'tcx>(
                     args.no_bound_vars().unwrap(),
                     terminator.source_info.span,
                 );
-                let path = paths::path(tcx, callee.def_id());
+                let primitive = attributes::primitive(tcx, callee.def_id());
                 if active.len() > 1
                     && attributes::is_device(tcx, instance.def_id())
-                    && (path == "gpurs::gpu::thread::sync_block"
-                        || path == "gpurs::gpu::shared::shared_array"
-                        || (path.starts_with("gpurs::gpu::warp::") && !path.ends_with("::lane_id")))
+                    && primitive.as_ref().is_some_and(|primitive| {
+                        primitive.convergence != Convergence::None
+                            || primitive.memory == Memory::SharedAllocation
+                    })
                 {
                     diagnostic::error(
                         tcx,
                         terminator.source_info.span,
                         "cannot verify shared memory or collective participation inside this device helper",
                         "keep shared-memory declarations and collective operations in the kernel body so their synchronization phases can be verified",
+                    );
+                }
+                if let Some(primitive) = primitive
+                    && architecture() < primitive.architecture
+                {
+                    diagnostic::error(
+                        tcx,
+                        terminator.source_info.span,
+                        format!("`{callee}` requires sm_{}", primitive.architecture),
+                        "raise the target GPU architecture",
                     );
                 }
                 if allowed(tcx, callee, terminator.source_info.span) {
@@ -172,10 +186,15 @@ fn allowed(tcx: TyCtxt<'_>, instance: Instance<'_>, span: Span) -> bool {
 fn leaf(tcx: TyCtxt<'_>, instance: Instance<'_>) -> bool {
     tcx.intrinsic(instance.def_id()).is_some()
         || paths::math(tcx, instance.def_id()).is_some()
-        || paths::path(tcx, instance.def_id()).starts_with("gpurs::gpu::intrinsics::")
-        || paths::is(tcx, instance.def_id(), "gpurs::gpu::shared::shared_array")
+        || attributes::primitive(tcx, instance.def_id()).is_some_and(|primitive| primitive.leaf())
         || matches!(
             instance.def,
             ty::InstanceKind::Shim(ty::ShimKind::DropGlue(_, None))
         )
+}
+
+fn architecture() -> u32 {
+    env::var("GPURS_ARCHITECTURE").unwrap()[3..]
+        .parse()
+        .unwrap()
 }

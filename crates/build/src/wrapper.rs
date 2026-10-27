@@ -24,7 +24,11 @@ pub(crate) fn run_wrapper() -> i32 {
         && !arguments
             .iter()
             .any(|argument| argument.to_string_lossy().starts_with("--print"));
-    if !target {
+    if !target
+        && !arguments
+            .windows(2)
+            .any(|pair| pair[0] == "--crate-name" && pair[1] == "gpurs")
+    {
         return Command::new(&arguments[1])
             .args(&arguments[2..])
             .status()
