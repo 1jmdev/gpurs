@@ -1,18 +1,12 @@
 use std::{collections::BTreeSet, fmt::Write, mem};
 
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
-use rustc_middle::{
-    mir::{BasicBlock, interpret::AllocId},
-    ty::{
-        EarlyBinder, Instance, TyCtxt, TypingEnv,
-        layout::{LayoutOf, TyAndLayout},
-    },
-};
 
 use super::{
     function::FunctionBuilder,
-    layout::{self, Cx, PassMode},
+    layout::{self, PassMode, Shape},
 };
+use crate::stable::*;
 
 const HEADER: &str = r#"target datalayout = "e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-i128:128:128-f32:32:32-f64:64:64-v16:16:16-v32:32:32-v64:64:64-v128:128:128-n16:32:64"
 target triple = "nvptx64-nvidia-cuda"
@@ -45,15 +39,14 @@ pub const REGISTERS: [(&str, i64, i64); 13] = [
 ];
 
 /// One NVVM IR module holding every device function reachable from the requested kernels.
-pub struct ModuleBuilder<'tcx> {
-    pub tcx: TyCtxt<'tcx>,
-    pub cx: Cx<'tcx>,
+pub struct ModuleBuilder<'sess> {
+    pub sess: Sess<'sess>,
     pub checked: bool,
-    pub dimensions: FxHashMap<Instance<'tcx>, [Option<u64>; 6]>,
-    functions: FxHashMap<Instance<'tcx>, String>,
-    queue: Vec<Instance<'tcx>>,
+    pub dimensions: FxHashMap<Instance, [Option<u64>; 6]>,
+    functions: FxHashMap<Instance, String>,
+    queue: Vec<Instance>,
     /// Copies of kernel bodies that skip the assertions in the proven blocks.
-    variants: Vec<(Instance<'tcx>, String, FxHashSet<BasicBlock>)>,
+    variants: Vec<(Instance, String, FxHashSet<usize>)>,
     pub(super) definitions: String,
     declarations: BTreeSet<String>,
     globals: String,
@@ -63,16 +56,15 @@ pub struct ModuleBuilder<'tcx> {
 }
 
 /// Device calling convention of one function instance.
-pub struct Signature<'tcx> {
-    pub arguments: Vec<(PassMode, TyAndLayout<'tcx>)>,
-    pub result: (PassMode, TyAndLayout<'tcx>),
+pub struct Signature {
+    pub arguments: Vec<(PassMode, Shape)>,
+    pub result: (PassMode, Shape),
 }
 
-impl<'tcx> ModuleBuilder<'tcx> {
-    pub fn new(tcx: TyCtxt<'tcx>) -> Self {
+impl<'sess> ModuleBuilder<'sess> {
+    pub fn new(sess: Sess<'sess>) -> Self {
         ModuleBuilder {
-            tcx,
-            cx: Cx(tcx),
+            sess,
             checked: true,
             dimensions: FxHashMap::default(),
             functions: FxHashMap::default(),
@@ -88,7 +80,7 @@ impl<'tcx> ModuleBuilder<'tcx> {
     }
 
     /// Name of the device function for `instance`, queueing it for lowering on first use.
-    pub fn function(&mut self, instance: Instance<'tcx>) -> String {
+    pub fn function(&mut self, instance: Instance) -> String {
         if let Some(name) = self.functions.get(&instance) {
             return name.clone();
         }
@@ -99,7 +91,7 @@ impl<'tcx> ModuleBuilder<'tcx> {
     }
 
     /// Name of a copy of `instance` that omits the assertions ending the `skipped` blocks.
-    pub fn variant(&mut self, instance: Instance<'tcx>, skipped: FxHashSet<BasicBlock>) -> String {
+    pub fn variant(&mut self, instance: Instance, skipped: FxHashSet<usize>) -> String {
         let name = format!("@gpurs.v{}", self.variants.len());
         self.variants.push((instance, name.clone(), skipped));
         name
@@ -119,23 +111,21 @@ impl<'tcx> ModuleBuilder<'tcx> {
         format!("{prefix}{}", self.counter)
     }
 
-    pub fn signature(&self, instance: Instance<'tcx>) -> Signature<'tcx> {
-        let body = self.tcx.instance_mir(instance.def);
-        let layout = |ty| {
-            let ty = instance.instantiate_mir_and_normalize_erasing_regions(
-                self.tcx,
-                TypingEnv::fully_monomorphized(),
-                EarlyBinder::bind(self.tcx, ty),
-            );
-            let layout = self.cx.layout_of(ty);
-            (layout::pass_mode(layout), layout)
+    pub fn signature(&self, instance: Instance) -> Signature {
+        let body = instance
+            .body()
+            .unwrap_or_else(|| panic!("no body for `{}`", instance.name()));
+        let shape = |ty| {
+            let shape = Shape::of(self.sess, ty);
+            (layout::pass_mode(&shape), shape)
         };
         Signature {
             arguments: body
-                .args_iter()
-                .map(|local| layout(body.local_decls[local].ty))
+                .arg_locals()
+                .iter()
+                .map(|local| shape(local.ty))
                 .collect(),
-            result: layout(body.return_ty()),
+            result: shape(body.ret_local().ty),
         }
     }
 
@@ -203,7 +193,7 @@ impl<'tcx> ModuleBuilder<'tcx> {
     }
 }
 
-impl Signature<'_> {
+impl Signature {
     /// Parameter list of the definition, with `%a{index}` names.
     pub fn parameters(&self) -> String {
         let mut parameters = Vec::new();

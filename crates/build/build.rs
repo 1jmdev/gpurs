@@ -17,6 +17,7 @@ fn main() {
         .arg("--target-dir")
         .arg(&target)
         .env("RUSTC", env::var("RUSTC").unwrap())
+        .env("RUSTC_BOOTSTRAP", "1")
         .status()
         .expect("cargo runs");
     assert!(

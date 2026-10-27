@@ -1,50 +1,38 @@
 use std::cmp::Ordering;
 
-use rustc_abi::{
-    BackendRepr, FIRST_VARIANT, Integer, Primitive, Scalar, Size, TagEncoding, VariantIdx,
-    Variants, WrappingRange,
-};
-use rustc_middle::{
-    mir::{AggregateKind, BinOp, CastKind, Rvalue, UnOp},
-    ty,
-    ty::{adjustment::PointerCoercion, layout::TyAndLayout},
-};
-
 use super::{
     function::{self, FunctionBuilder},
-    layout,
+    layout::{self, Shape},
     place::{Operand, Place, Value},
 };
+use crate::{stable, stable::*};
 
 /// Floating-point flags for `#[gpu(fast_math)]`; NaN and infinity stay well defined.
 pub const FAST_FLAGS: &str = "reassoc nsz arcp contract afn ";
 
-impl<'tcx> FunctionBuilder<'_, 'tcx> {
-    pub fn rvalue(&mut self, destination: &Place<'tcx>, rvalue: &Rvalue<'tcx>) {
+impl<'sess> FunctionBuilder<'_, 'sess> {
+    pub fn rvalue(&mut self, destination: &Place, rvalue: &Rvalue) {
         let operand = match rvalue {
-            Rvalue::Use(operand, _) | Rvalue::WrapUnsafeBinder(operand, _) => self.operand(operand),
+            Rvalue::Use(operand, _) => self.operand(operand),
             Rvalue::CopyForDeref(place) => {
-                let place = self.place(*place);
+                let place = self.place(place.clone());
                 self.load(&place)
             }
-            Rvalue::Ref(_, _, place) | Rvalue::RawPtr(_, place) => {
-                let place = self.place(*place);
+            Rvalue::Ref(_, _, place) | Rvalue::AddressOf(_, place) => {
+                let place = self.place(place.clone());
                 Operand {
                     value: self.address(&place),
-                    layout: destination.layout,
+                    shape: destination.shape.clone(),
                 }
             }
             Rvalue::Reborrow(_, _, place) => {
-                let place = self.place(*place);
+                let place = self.place(place.clone());
                 let value = self.load(&place);
-                self.transmute(&value, destination.layout)
+                self.transmute(&value, destination.shape.clone())
             }
             Rvalue::Repeat(operand, count) => {
                 let operand = self.operand(operand);
-                let count = self
-                    .monomorphize(*count)
-                    .try_to_target_usize(self.tcx)
-                    .unwrap_or(0);
+                let count = count.eval_target_usize().unwrap_or(0);
                 return self.repeat(destination, &operand, count);
             }
             Rvalue::Aggregate(kind, operands) => {
@@ -62,33 +50,47 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
                     .collect();
                 return self.aggregate(destination, kind, &operands);
             }
-            Rvalue::BinaryOp(operation, operands) => {
-                let left = self.operand(&operands.0);
-                let right = self.operand(&operands.1);
-                self.binary(*operation, &left, &right, destination.layout)
+            Rvalue::BinaryOp(operation, left, right) => {
+                let left = self.operand(left);
+                let right = self.operand(right);
+                self.binary(*operation, &left, &right, destination.shape.clone(), false)
+            }
+            Rvalue::CheckedBinaryOp(operation, left, right) => {
+                let left = self.operand(left);
+                let right = self.operand(right);
+                self.binary(*operation, &left, &right, destination.shape.clone(), true)
             }
             Rvalue::UnaryOp(operation, operand) => {
                 let operand = self.operand(operand);
-                self.unary(*operation, &operand, destination.layout)
+                self.unary(*operation, &operand, destination.shape.clone())
             }
             Rvalue::Cast(kind, operand, _) => {
                 let operand = self.operand(operand);
-                self.cast(*kind, &operand, destination.layout)
+                self.cast(*kind, &operand, destination.shape.clone())
             }
             Rvalue::Discriminant(place) => {
-                let place = self.place(*place);
-                self.discriminant(&place, destination.layout)
+                let place = self.place(place.clone());
+                self.discriminant(&place, destination.shape.clone())
             }
             Rvalue::ThreadLocalRef(_) => {
                 self.unsupported("thread-local storage");
                 return;
             }
+            Rvalue::Len(place) => {
+                let place = self.place(place.clone());
+                let length = self.length(&place);
+                let shape = self.shape_of(Ty::usize_ty());
+                Operand {
+                    value: Value::Scalar(length),
+                    shape,
+                }
+            }
         };
         self.store(destination, &operand);
     }
 
-    fn repeat(&mut self, destination: &Place<'tcx>, operand: &Operand<'tcx>, count: u64) {
-        if operand.layout.is_zst() || count == 0 {
+    fn repeat(&mut self, destination: &Place, operand: &Operand, count: u64) {
+        if operand.shape.is_zst() || count == 0 {
             return;
         }
         let (head, body, end) = (
@@ -111,12 +113,7 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
         self.start_block(&end);
     }
 
-    fn aggregate(
-        &mut self,
-        destination: &Place<'tcx>,
-        kind: &AggregateKind<'tcx>,
-        operands: &[Operand<'tcx>],
-    ) {
+    fn aggregate(&mut self, destination: &Place, kind: &AggregateKind, operands: &[Operand]) {
         if let AggregateKind::RawPtr(..) = kind {
             let value = match &operands[1].value {
                 Value::Zst => Value::Scalar(operands[0].scalar().to_owned()),
@@ -131,42 +128,59 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
                 destination,
                 &Operand {
                     value,
-                    layout: destination.layout,
+                    shape: destination.shape.clone(),
                 },
             );
         }
-        let (variant, active) = match *kind {
-            AggregateKind::Adt(_, variant, _, _, active) => (variant, active),
+        let (variant, active) = match kind {
+            AggregateKind::Adt(_, variant, _, _, active) => (Some(*variant), *active),
             AggregateKind::Coroutine(..) | AggregateKind::CoroutineClosure(..) => {
                 return self.unsupported("coroutines");
             }
-            _ => (FIRST_VARIANT, None),
+            _ => (destination.shape.variants.first().copied(), None),
         };
-        let target = self.downcast(destination, variant);
+        let target = match variant {
+            Some(variant) => self.downcast(destination, variant),
+            None => destination.clone(),
+        };
         for (index, operand) in operands.iter().enumerate() {
             let place = match kind {
                 AggregateKind::Array(_) => self.index(&target, &index.to_string()),
-                _ => self.field(&target, active.unwrap_or(index.into())),
+                _ => {
+                    let field = active.unwrap_or(index);
+                    self.field_place(&target, field)
+                }
             };
             self.store(&place, operand);
         }
-        self.set_discriminant(destination, variant);
+        if let Some(variant) = variant {
+            self.set_discriminant(destination, variant);
+        }
+    }
+
+    /// The place of field `field` of the active variant of `place`.
+    pub fn field_place(&mut self, place: &Place, field: usize) -> Place {
+        let ty = self
+            .sess
+            .field_type(place.shape.ty, place.shape.variant.unwrap_or(0), field);
+        self.field(place, field, ty)
     }
 
     pub fn binary(
         &mut self,
         operation: BinOp,
-        left: &Operand<'tcx>,
-        right: &Operand<'tcx>,
-        result: TyAndLayout<'tcx>,
-    ) -> Operand<'tcx> {
-        let BackendRepr::Scalar(scalar) = left.layout.backend_repr else {
+        left: &Operand,
+        right: &Operand,
+        result: Shape,
+        checked: bool,
+    ) -> Operand {
+        let ValueRepr::Scalar(scalar) = left.shape.repr().clone() else {
             self.unsupported("comparison of wide pointers");
             return Operand::zst(result);
         };
         let ty = layout::immediate_type(scalar);
         let (a, b) = (left.scalar().to_owned(), right.scalar().to_owned());
-        if let Some(wrapping) = operation.overflowing_to_wrapping() {
+        if checked && let Some(wrapping) = overflowing_to_wrapping(operation) {
             let kind = match wrapping {
                 BinOp::Add => "add",
                 BinOp::Sub => "sub",
@@ -183,7 +197,7 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
             let overflow = self.instruction(format!("extractvalue {{{ty}, i1}} {pair}, 1"));
             return Operand {
                 value: Value::Pair(value, overflow),
-                layout: result,
+                shape: result,
             };
         }
         let value = if layout::is_float(scalar) {
@@ -205,7 +219,9 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
                 BinOp::Le => format!("fcmp ole {ty} {a}, {b}"),
                 BinOp::Gt => format!("fcmp ogt {ty} {a}, {b}"),
                 BinOp::Ge => format!("fcmp oge {ty} {a}, {b}"),
-                BinOp::Cmp => return self.compare(&a, &b, ty, "fcmp olt", "fcmp oeq", result),
+                BinOp::Cmp => {
+                    return self.compare(&a, &b, ty, "fcmp olt", "fcmp oeq", result);
+                }
                 operation => {
                     self.unsupported(&format!("floating-point `{operation:?}`"));
                     return Operand::zst(result);
@@ -252,24 +268,28 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
                     return self.compare(&a, &b, ty, &format!("icmp {less}"), "icmp eq", result);
                 }
                 BinOp::Offset => {
-                    let pointee = left.layout.ty.builtin_deref(true).expect("pointer offset");
-                    let size = self.layout_of(pointee).size.bytes();
+                    let pointee = left
+                        .shape
+                        .ty
+                        .kind()
+                        .builtin_deref(true)
+                        .expect("pointer offset");
+                    let size = self.shape_of(pointee.ty).size().bytes();
                     let bytes = self.instruction(format!("mul i64 {b}, {size}"));
                     format!("getelementptr inbounds i8, i8* {a}, i64 {bytes}")
                 }
-                _ => unreachable!("overflowing operations are handled above"),
             };
             self.instruction(instruction)
         };
         Operand {
             value: Value::Scalar(value),
-            layout: result,
+            shape: result,
         }
     }
 
     /// Shift amount cast to the shifted type; masked unless the shift is unchecked.
-    fn shift_amount(&mut self, right: &Operand<'tcx>, scalar: Scalar, operation: BinOp) -> String {
-        let BackendRepr::Scalar(amount_scalar) = right.layout.backend_repr else {
+    fn shift_amount(&mut self, right: &Operand, scalar: Scalar, operation: BinOp) -> String {
+        let ValueRepr::Scalar(amount_scalar) = right.shape.repr().clone() else {
             unreachable!()
         };
         let amount = self.integer_cast(right.scalar(), amount_scalar, scalar, false);
@@ -289,29 +309,24 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
         ty: &str,
         less: &str,
         equal: &str,
-        result: TyAndLayout<'tcx>,
-    ) -> Operand<'tcx> {
+        result: Shape,
+    ) -> Operand {
         let is_less = self.instruction(format!("{less} {ty} {a}, {b}"));
         let is_equal = self.instruction(format!("{equal} {ty} {a}, {b}"));
         let not_less = self.instruction(format!("select i1 {is_equal}, i8 0, i8 1"));
         let value = self.instruction(format!("select i1 {is_less}, i8 -1, i8 {not_less}"));
         Operand {
             value: Value::Scalar(value),
-            layout: result,
+            shape: result,
         }
     }
 
-    fn unary(
-        &mut self,
-        operation: UnOp,
-        operand: &Operand<'tcx>,
-        result: TyAndLayout<'tcx>,
-    ) -> Operand<'tcx> {
+    fn unary(&mut self, operation: UnOp, operand: &Operand, result: Shape) -> Operand {
         let value = match (operation, &operand.value) {
             (UnOp::PtrMetadata, Value::Pair(_, meta)) => meta.clone(),
             (UnOp::PtrMetadata, _) => return Operand::zst(result),
             (_, Value::Scalar(value)) => {
-                let BackendRepr::Scalar(scalar) = operand.layout.backend_repr else {
+                let ValueRepr::Scalar(scalar) = operand.shape.repr().clone() else {
                     unreachable!()
                 };
                 let ty = layout::immediate_type(scalar);
@@ -329,7 +344,7 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
         };
         Operand {
             value: Value::Scalar(value),
-            layout: result,
+            shape: result,
         }
     }
 
@@ -352,19 +367,14 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
         self.instruction(format!("{instruction} {from_type} {value} to {to_type}"))
     }
 
-    fn cast(
-        &mut self,
-        kind: CastKind,
-        operand: &Operand<'tcx>,
-        result: TyAndLayout<'tcx>,
-    ) -> Operand<'tcx> {
-        let scalars = match (operand.layout.backend_repr, result.backend_repr) {
-            (BackendRepr::Scalar(from), BackendRepr::Scalar(to)) => Some((from, to)),
+    fn cast(&mut self, kind: CastKind, operand: &Operand, result: Shape) -> Operand {
+        let scalars = match (operand.shape.repr(), result.repr()) {
+            (ValueRepr::Scalar(from), ValueRepr::Scalar(to)) => Some((*from, *to)),
             _ => None,
         };
         let scalar_value = |value| Operand {
             value: Value::Scalar(value),
-            layout: result,
+            shape: result.clone(),
         };
         match kind {
             CastKind::IntToInt => {
@@ -408,38 +418,39 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
                 let (from, to) = scalars.expect("float to integer cast");
                 scalar_value(self.saturating_float_to_int(operand.scalar(), from, to))
             }
-            CastKind::PtrToPtr | CastKind::FnPtrToPtr => {
-                match (&operand.value, result.backend_repr) {
-                    (Value::Pair(pointer, _), BackendRepr::Scalar(_)) => {
-                        scalar_value(pointer.clone())
-                    }
-                    (value, _) => Operand {
-                        value: value.clone(),
-                        layout: result,
-                    },
-                }
-            }
-            CastKind::PointerExposeProvenance => {
+            CastKind::PtrToPtr | CastKind::FnPtrToPtr => match (&operand.value, result.repr()) {
+                (Value::Pair(pointer, _), ValueRepr::Scalar(_)) => scalar_value(pointer.clone()),
+                (value, _) => Operand {
+                    value: value.clone(),
+                    shape: result.clone(),
+                },
+            },
+            CastKind::PointerExposeAddress => {
                 scalar_value(self.instruction(format!("ptrtoint i8* {} to i64", operand.scalar())))
             }
             CastKind::PointerWithExposedProvenance => {
                 scalar_value(self.instruction(format!("inttoptr i64 {} to i8*", operand.scalar())))
             }
-            CastKind::PointerCoercion(PointerCoercion::Unsize, _) => {
-                let source = operand.layout.ty.builtin_deref(true).map(|ty| {
-                    self.tcx
-                        .struct_tail_for_codegen(ty, ty::TypingEnv::fully_monomorphized())
-                        .kind()
-                });
+            CastKind::PointerCoercion(PointerCoercion::Unsize) => {
+                let source = operand
+                    .shape
+                    .ty
+                    .kind()
+                    .builtin_deref(true)
+                    .map(|ty| self.sess.struct_tail(ty.ty).kind());
                 match source {
-                    Some(ty::Array(_, length)) => {
-                        let length = length.try_to_target_usize(self.tcx).unwrap_or(0);
+                    Some(TyKind::RigidTy(RigidTy::Array(_, length))) => {
+                        let length = length.eval_target_usize().unwrap_or(0);
                         let value = Value::Pair(operand.scalar().to_owned(), length.to_string());
                         Operand {
                             value,
-                            layout: result,
+                            shape: result.clone(),
                         }
                     }
+                    Some(TyKind::RigidTy(RigidTy::Slice(_) | RigidTy::Str)) => Operand {
+                        value: operand.value.clone(),
+                        shape: result.clone(),
+                    },
                     _ => {
                         self.unsupported("unsizing to trait objects (dynamic dispatch)");
                         Operand::zst(result)
@@ -448,10 +459,9 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
             }
             CastKind::PointerCoercion(
                 PointerCoercion::MutToConstPointer | PointerCoercion::ArrayToPointer,
-                _,
             ) => Operand {
                 value: operand.value.clone(),
-                layout: result,
+                shape: result.clone(),
             },
             CastKind::PointerCoercion(..) => {
                 self.unsupported("function pointers");
@@ -500,55 +510,57 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
         ))
     }
 
-    pub fn set_discriminant(&mut self, place: &Place<'tcx>, variant: VariantIdx) {
-        let layout = place.layout;
-        if layout
-            .for_variant(&self.module.cx, variant)
-            .is_uninhabited()
-        {
+    pub fn set_discriminant(&mut self, place: &Place, variant: VariantIdx) {
+        let shape = place.shape.clone();
+        if matches!(shape.layout.variants, VariantsShape::Empty) {
             return;
         }
-        match layout.variants {
-            Variants::Empty | Variants::Single { .. } => {}
-            Variants::Multiple {
+        match &shape.layout.variants {
+            VariantsShape::Empty | VariantsShape::Single { .. } => {}
+            VariantsShape::Multiple {
+                tag,
                 tag_field,
                 tag_encoding: TagEncoding::Direct,
                 ..
             } => {
-                let tag = self.field(place, tag_field);
-                let value = layout
-                    .ty
-                    .discriminant_for_variant(self.tcx, variant)
-                    .map_or(0, |d| d.val);
-                self.store_tag(&tag, tag.layout.size.truncate(value));
+                let field = *tag_field;
+                let scalar = *tag;
+                let tag = self.tag_place(place, field, scalar);
+                let value = discriminant_value(&shape, variant)
+                    .unwrap_or_else(|| variant_position(&shape, variant).unwrap_or(0) as u128);
+                let size = tag.shape.size();
+                self.store_tag(&tag, truncate(value, size));
             }
-            Variants::Multiple {
+            VariantsShape::Multiple {
+                tag,
                 tag_field,
                 tag_encoding:
                     TagEncoding::Niche {
                         untagged_variant,
-                        ref niche_variants,
+                        niche_variants,
                         niche_start,
                     },
                 ..
             } => {
-                if variant != untagged_variant {
-                    let tag = self.field(place, tag_field);
-                    let value = (variant.as_u32() - niche_variants.start.as_u32()) as u128;
-                    self.store_tag(
-                        &tag,
-                        tag.layout.size.truncate(value.wrapping_add(niche_start)),
-                    );
+                if variant != *untagged_variant {
+                    let field = *tag_field;
+                    let scalar = *tag;
+                    let tag = self.tag_place(place, field, scalar);
+                    let start = variant_position(&shape, *niche_variants.start()).unwrap_or(0);
+                    let index = variant_position(&shape, variant).unwrap_or(start);
+                    let value = (index.saturating_sub(start)) as u128;
+                    let size = tag.shape.size();
+                    self.store_tag(&tag, truncate(value.wrapping_add(*niche_start), size));
                 }
             }
         }
     }
 
-    fn store_tag(&mut self, tag: &Place<'tcx>, value: u128) {
-        let BackendRepr::Scalar(scalar) = tag.layout.backend_repr else {
+    fn store_tag(&mut self, tag: &Place, value: u128) {
+        let ValueRepr::Scalar(scalar) = tag.shape.repr().clone() else {
             unreachable!()
         };
-        let text = match scalar.primitive() {
+        let text = match layout::primitive(scalar) {
             Primitive::Pointer(_) if value == 0 => "null".to_owned(),
             Primitive::Pointer(_) => format!("inttoptr (i64 {value} to i8*)"),
             _ => {
@@ -557,53 +569,54 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
         };
         let operand = Operand {
             value: Value::Scalar(text),
-            layout: tag.layout,
+            shape: tag.shape.clone(),
         };
         self.store(tag, &operand);
     }
 
-    fn discriminant(&mut self, place: &Place<'tcx>, result: TyAndLayout<'tcx>) -> Operand<'tcx> {
-        let layout = place.layout;
-        let BackendRepr::Scalar(target) = result.backend_repr else {
+    fn discriminant(&mut self, place: &Place, result: Shape) -> Operand {
+        let shape = place.shape.clone();
+        let ValueRepr::Scalar(target) = result.repr().clone() else {
             unreachable!()
         };
         let target_type = layout::immediate_type(target);
         let constant =
             |value: u128| function::integer_text(value, target_type, layout::bits(target));
-        let (tag_scalar, tag_field, encoding) = match &layout.variants {
-            Variants::Empty => {
+        let (tag_scalar, tag_field, encoding) = match &shape.layout.variants {
+            VariantsShape::Empty => {
                 return Operand {
                     value: Value::Scalar("undef".into()),
-                    layout: result,
+                    shape: result,
                 };
             }
-            Variants::Single { index } => {
-                let value = layout
-                    .ty
-                    .discriminant_for_variant(self.tcx, *index)
-                    .map_or(index.as_u32() as u128, |d| d.val);
+            VariantsShape::Single { index } => {
+                let value = discriminant_value(&shape, *index)
+                    .unwrap_or_else(|| variant_position(&shape, *index).unwrap_or(0) as u128);
                 return Operand {
-                    value: Value::Scalar(constant(result.size.truncate(value))),
-                    layout: result,
+                    value: Value::Scalar(constant(truncate(value, result.size()))),
+                    shape: result,
                 };
             }
-            Variants::Multiple {
+            VariantsShape::Multiple {
                 tag,
                 tag_field,
                 tag_encoding,
                 ..
-            } => (*tag, *tag_field, *tag_encoding),
+            } => (*tag, *tag_field, tag_encoding.clone()),
         };
-        let tag_place = self.field(place, tag_field);
+        let tag_place = self.tag_place(place, tag_field, tag_scalar);
         let tag = self.load(&tag_place).scalar().to_owned();
-        let tag = match tag_scalar.primitive() {
+        let tag = match layout::primitive(tag_scalar) {
             Primitive::Pointer(_) => self.instruction(format!("ptrtoint i8* {tag} to i64")),
             _ => tag,
         };
-        let tag_scalar = match tag_scalar.primitive() {
+        let tag_scalar = match layout::primitive(tag_scalar) {
             Primitive::Pointer(_) => Scalar::Initialized {
-                value: Primitive::Int(Integer::I64, false),
-                valid_range: WrappingRange::full(Size::from_bytes(8)),
+                value: Primitive::Int {
+                    length: IntegerLength::I64,
+                    signed: false,
+                },
+                valid_range: full_range(MachineSize::from_bits(64)),
             },
             _ => tag_scalar,
         };
@@ -617,17 +630,19 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
                 niche_variants,
                 niche_start,
             } => {
-                let relative_max =
-                    (niche_variants.last.as_u32() - niche_variants.start.as_u32()) as u128;
+                let start_index = variant_position(&shape, *niche_variants.start()).unwrap_or(0);
+                let last_index = variant_position(&shape, *niche_variants.end()).unwrap_or(0);
+                let relative_max = (last_index - start_index) as u128;
                 let start = function::integer_text(niche_start, tag_type, layout::bits(tag_scalar));
                 let relative = self.instruction(format!("sub {tag_type} {tag}, {start}"));
                 let limit =
                     function::integer_text(relative_max, tag_type, layout::bits(tag_scalar));
                 let is_niche = self.instruction(format!("icmp ule {tag_type} {relative}, {limit}"));
                 let relative = self.integer_cast(&relative, tag_scalar, target, false);
-                let first = constant(niche_variants.start.as_u32() as u128);
+                let first = constant(start_index as u128);
                 let tagged = self.instruction(format!("add {target_type} {relative}, {first}"));
-                let untagged = constant(untagged_variant.as_u32() as u128);
+                let untagged =
+                    constant(variant_position(&shape, untagged_variant).unwrap_or(0) as u128);
                 self.instruction(format!(
                     "select i1 {is_niche}, {target_type} {tagged}, {target_type} {untagged}"
                 ))
@@ -635,8 +650,48 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
         };
         Operand {
             value: Value::Scalar(value),
-            layout: result,
+            shape: result,
         }
+    }
+}
+
+/// The discriminant value rustc assigns to `variant`, if the `Adt` encoding says otherwise.
+pub fn discriminant_value(shape: &Shape, variant: VariantIdx) -> Option<u128> {
+    let RigidTy::Adt(definition, _) = stable::rigid(shape.ty) else {
+        return None;
+    };
+    Some(definition.discriminant_for_variant(variant).val)
+}
+
+pub fn variant_position(shape: &Shape, variant: VariantIdx) -> Option<usize> {
+    shape
+        .variants
+        .iter()
+        .position(|candidate| *candidate == variant)
+}
+
+pub fn truncate(value: u128, size: MachineSize) -> u128 {
+    let bits = size.bits();
+    if bits >= 128 {
+        value
+    } else {
+        value & ((1u128 << bits) - 1)
+    }
+}
+
+fn full_range(size: MachineSize) -> WrappingRange {
+    WrappingRange {
+        start: 0,
+        end: size.unsigned_int_max().unwrap_or(u128::MAX),
+    }
+}
+
+fn overflowing_to_wrapping(operation: BinOp) -> Option<BinOp> {
+    match operation {
+        BinOp::Add => Some(BinOp::Add),
+        BinOp::Sub => Some(BinOp::Sub),
+        BinOp::Mul => Some(BinOp::Mul),
+        _ => None,
     }
 }
 

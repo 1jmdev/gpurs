@@ -1,13 +1,10 @@
 use gpurs_artifact::{Bound, Condition};
 use rustc_data_structures::fx::FxHashSet;
-use rustc_middle::{
-    mir::Body,
-    ty::{Instance, TyCtxt},
-};
-use rustc_span::Span;
 
 use crate::{
     codegen::KernelParameter,
+    stable,
+    stable::*,
     verify::symbolic::{Fact, Polynomial},
 };
 
@@ -50,11 +47,11 @@ pub(super) struct Access {
     pub span: Span,
 }
 
-pub(super) struct Analysis<'a, 'tcx> {
-    pub tcx: TyCtxt<'tcx>,
-    pub instance: Instance<'tcx>,
-    pub body: &'tcx Body<'tcx>,
-    pub parameters: &'a [KernelParameter<'tcx>],
+pub(super) struct Analysis<'a, 'sess> {
+    pub sess: Sess<'sess>,
+    pub instance: Instance,
+    pub body: Body,
+    pub parameters: &'a [KernelParameter],
     pub accesses: Vec<Access>,
     pub barriers: FxHashSet<usize>,
     pub collectives: Vec<(usize, u8, Span)>,
@@ -121,5 +118,34 @@ impl Value {
             self.fields.clear();
         }
         self.variance = self.variance.max(other.variance);
+    }
+}
+
+impl Analysis<'_, '_> {
+    /// The type of a place, following its projections.
+    pub(super) fn place_type(&self, place: &Place) -> Ty {
+        let mut ty = self
+            .body
+            .local_decl(place.local)
+            .unwrap_or_else(|| panic!("no declaration for local {}", place.local))
+            .ty;
+        for element in &place.projection {
+            ty = match element {
+                ProjectionElem::Deref => {
+                    ty.kind()
+                        .builtin_deref(true)
+                        .unwrap_or_else(|| panic!("dereference of non-pointer"))
+                        .ty
+                }
+                ProjectionElem::Field(_, field) => *field,
+                ProjectionElem::Downcast(..) => ty,
+                ProjectionElem::OpaqueCast(cast) => *cast,
+                _ => match stable::rigid(ty) {
+                    RigidTy::Array(element, _) | RigidTy::Slice(element) => element,
+                    _ => ty,
+                },
+            };
+        }
+        ty
     }
 }

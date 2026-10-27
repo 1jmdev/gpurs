@@ -5,18 +5,11 @@
 
 use gpurs_artifact::{self as artifact, Bound, Variable};
 use rustc_data_structures::fx::FxHashSet;
-use rustc_middle::{
-    mir::{
-        self, AssertKind, BasicBlock, BinOp, BorrowKind, Location, ProjectionElem, Rvalue,
-        StatementKind, TerminatorKind,
-        visit::{PlaceContext, Visitor},
-    },
-    ty::{self, Ty, TypingEnv},
-};
 
 use super::state::{Analysis, State, Value};
 use crate::{
-    paths,
+    paths, stable,
+    stable::*,
     verify::symbolic::{Atom, Fact, Polynomial},
 };
 
@@ -92,28 +85,24 @@ fn launch(polynomial: &Polynomial) -> Option<artifact::Polynomial> {
         .map(artifact::Polynomial)
 }
 
-impl<'tcx> Analysis<'_, 'tcx> {
+impl Analysis<'_, '_> {
     /// Upper bound of an unsigned arithmetic result whose exact expression is unknown.
     pub(super) fn arithmetic_maximum(
         &self,
         operation: BinOp,
         left: &Value,
         right: &Value,
-        ty: Ty<'tcx>,
+        ty: Ty,
     ) -> Option<Polynomial> {
-        if !matches!(self.monomorphize(ty).kind(), ty::Uint(_)) {
+        if !matches!(stable::rigid(ty), RigidTy::Uint(_)) {
             return None;
         }
         let constant = right.expression.as_ref().and_then(Polynomial::value);
         match operation {
             // Wrapping sums and products never exceed the mathematical result.
-            BinOp::Add | BinOp::AddUnchecked | BinOp::AddWithOverflow => {
-                Some(maximum(left)?.add(&maximum(right)?, 1))
-            }
-            BinOp::Mul | BinOp::MulUnchecked | BinOp::MulWithOverflow => {
-                Some(maximum(left)?.multiply(&maximum(right)?))
-            }
-            BinOp::SubUnchecked | BinOp::SubWithOverflow => maximum(left),
+            BinOp::Add | BinOp::AddUnchecked => Some(maximum(left)?.add(&maximum(right)?, 1)),
+            BinOp::Mul | BinOp::MulUnchecked => Some(maximum(left)?.multiply(&maximum(right)?)),
+            BinOp::SubUnchecked => maximum(left),
             BinOp::Div => match constant {
                 Some(divisor) if divisor > 0 => Some(Polynomial::atom(Atom::Quotient(
                     Box::new(maximum(left)?),
@@ -137,24 +126,25 @@ impl<'tcx> Analysis<'_, 'tcx> {
     }
 
     /// `Range<unsigned>` iterator types, whose `next` yields values below `end`.
-    pub(super) fn is_range(&self, ty: Ty<'tcx>) -> bool {
+    pub(super) fn is_range(&self, ty: Ty) -> bool {
         matches!(
-            self.monomorphize(ty).kind(),
-            ty::Adt(definition, arguments)
-                if paths::is(self.tcx, definition.did(), "core::ops::range::Range")
-                    && matches!(arguments.type_at(0).kind(), ty::Uint(_))
+            stable::rigid(ty),
+            RigidTy::Adt(definition, arguments)
+                if paths::is(self.sess, definition.def_id(), "core::ops::range::Range")
+                    && arguments.0.first().and_then(|argument| argument.ty())
+                        .is_some_and(|element| matches!(stable::rigid(*element), RigidTy::Uint(_)))
         )
     }
 
     /// Whether the switch ending `block` is an overflow assertion on field 1 of `local`.
-    pub(super) fn asserted(&self, block: usize, local: mir::Local) -> bool {
+    pub(super) fn asserted(&self, block: usize, local: Local) -> bool {
         matches!(
-            &self.body.basic_blocks[BasicBlock::from_usize(block)].terminator().kind,
+            &self.body.blocks[block].terminator.kind,
             TerminatorKind::Assert {
-                cond: mir::Operand::Copy(place) | mir::Operand::Move(place),
+                cond: Operand::Copy(place) | Operand::Move(place),
                 ..
             } if place.local == local
-                && matches!(place.projection.as_ref(), [ProjectionElem::Field(field, _)] if field.as_usize() == 1)
+                && matches!(place.projection.as_slice(), [ProjectionElem::Field(1, _)])
         )
     }
 
@@ -181,24 +171,24 @@ impl<'tcx> Analysis<'_, 'tcx> {
 
     /// Records the launch bound under which the assertion ending `block` cannot fail.
     pub(super) fn prove(&mut self, block: usize, state: &State) {
-        let TerminatorKind::Assert { msg, .. } = &self.body.basic_blocks
-            [BasicBlock::from_usize(block)]
-        .terminator()
-        .kind
+        let TerminatorKind::Assert { msg, .. } = self.body.blocks[block].terminator.kind.clone()
         else {
             return;
         };
-        let (values, limit) = match &**msg {
-            AssertKind::BoundsCheck { len, index } => {
+        let (values, limit) = match &msg {
+            AssertMessage::BoundsCheck { len, index } => {
                 let Some(limit) = self.operand(len, state).expression else {
                     return;
                 };
                 let index = self.operand(index, state);
                 (self.maxima(&index, state), limit)
             }
-            AssertKind::Overflow(operation @ (BinOp::Add | BinOp::Mul), left, right) => {
-                let ty = self.monomorphize(left.ty(self.body, self.tcx));
-                let ty::Uint(kind) = ty.kind() else {
+            AssertMessage::Overflow(operation @ (BinOp::Add | BinOp::Mul), left, right) => {
+                let locals = self.body.locals().to_vec();
+                let Ok(ty) = left.ty(&locals) else {
+                    return;
+                };
+                let RigidTy::Uint(kind) = stable::rigid(ty) else {
                     return;
                 };
                 let (left, right) = (self.operand(left, state), self.operand(right, state));
@@ -214,7 +204,7 @@ impl<'tcx> Analysis<'_, 'tcx> {
                     .collect();
                 (
                     values,
-                    Polynomial::constant(1 << kind.bit_width().unwrap_or(64)),
+                    Polynomial::constant(1 << uint_bits(kind).unwrap_or(64)),
                 )
             }
             _ => return,
@@ -229,80 +219,156 @@ impl<'tcx> Analysis<'_, 'tcx> {
     pub(super) fn escapes(&self) -> FxHashSet<usize> {
         let mut stepped = FxHashSet::default();
         let mut escaped = FxHashSet::default();
-        for (block, data) in self.body.basic_blocks.iter_enumerated() {
+        for (block, data) in self.body.blocks.iter().enumerate() {
             for (index, statement) in data.statements.iter().enumerate() {
-                let StatementKind::Assign(assign) = &statement.kind else {
+                let StatementKind::Assign(destination, rvalue) = &statement.kind else {
                     continue;
                 };
-                let (destination, borrowed) = match &assign.1 {
-                    Rvalue::Ref(_, kind, place) => {
-                        let ty = self.monomorphize(place.ty(self.body, self.tcx).ty);
-                        if *kind == BorrowKind::Shared
-                            && ty.is_freeze(self.tcx, TypingEnv::fully_monomorphized())
-                        {
+                let borrowed = match rvalue {
+                    Rvalue::Ref(_, BorrowKind::Shared, place) => {
+                        let ty = self.place_type(place);
+                        if self.sess.is_freeze(ty) {
                             continue;
                         }
-                        (assign.0, place)
+                        place
                     }
-                    Rvalue::RawPtr(_, place) | Rvalue::Reborrow(_, _, place) => (assign.0, place),
+                    Rvalue::AddressOf(_, place) | Rvalue::Reborrow(_, _, place) => place,
                     _ => continue,
                 };
                 if borrowed.projection.is_empty()
                     && destination.projection.is_empty()
                     && self.steps(data, destination.local)
                 {
-                    stepped.insert(Location {
-                        block,
-                        statement_index: index,
-                    });
+                    stepped.insert((block, index));
                 } else {
-                    escaped.insert(borrowed.local.as_usize());
+                    escaped.insert(borrowed.local);
                 }
             }
         }
-        let mut uses = Uses {
-            stepped: &stepped,
-            ranges: FxHashSet::default(),
-            other: FxHashSet::default(),
-        };
-        uses.visit_body(self.body);
-        escaped.extend(uses.ranges.intersection(&uses.other));
+        let mut ranges = FxHashSet::default();
+        let mut other = FxHashSet::default();
+        for (block, data) in self.body.blocks.iter().enumerate() {
+            for (index, statement) in data.statements.iter().enumerate() {
+                let location = (block, index);
+                match &statement.kind {
+                    StatementKind::Assign(_destination, rvalue) => {
+                        if stepped.contains(&location) {
+                            if let Rvalue::Ref(_, _, place)
+                            | Rvalue::AddressOf(_, place)
+                            | Rvalue::Reborrow(_, _, place) = rvalue
+                            {
+                                ranges.insert(place.local);
+                            }
+                        } else {
+                            walk_rvalue(rvalue, &mut |place, _| {
+                                other.insert(place.local);
+                            });
+                        }
+                    }
+                    StatementKind::FakeRead(_, place) | StatementKind::PlaceMention(place) => {
+                        other.insert(place.local);
+                    }
+                    StatementKind::StorageLive(_) | StatementKind::StorageDead(_) => {}
+                    _ => {}
+                }
+            }
+            walk_terminator(&data.terminator.kind, &mut |place| {
+                other.insert(place.local);
+            });
+        }
+        escaped.extend(ranges.intersection(&other));
         escaped
     }
 
-    fn steps(&self, data: &mir::BasicBlockData<'tcx>, reference: mir::Local) -> bool {
-        let TerminatorKind::Call { func, args, .. } = &data.terminator().kind else {
+    fn steps(&self, data: &BasicBlock, reference: Local) -> bool {
+        let TerminatorKind::Call { func, args, .. } = &data.terminator.kind else {
             return false;
         };
-        let Some((function, arguments)) = func.const_fn_def() else {
+        let locals = self.body.locals().to_vec();
+        let Ok(ty) = func.ty(&locals) else {
+            return false;
+        };
+        let kind = ty.kind();
+        let Some((function, arguments)) = kind.fn_def() else {
             return false;
         };
         paths::is(
-            self.tcx,
-            function,
+            self.sess,
+            function.def_id(),
             "core::iter::traits::iterator::Iterator::next",
-        ) && self.is_range(arguments.type_at(0))
-            && matches!(&args[..], [argument] if matches!(argument.node, mir::Operand::Move(place) if place.local == reference && place.projection.is_empty()))
+        ) && arguments
+            .0
+            .first()
+            .and_then(|argument| argument.ty())
+            .is_some_and(|element| self.is_range(*element))
+            && matches!(&args[..], [Operand::Move(place)]
+                if place.local == reference && place.projection.is_empty())
     }
 }
 
-/// Ranges borrowed for `next` and locals used in any way other than assignment or `next`.
-struct Uses<'a> {
-    stepped: &'a FxHashSet<Location>,
-    ranges: FxHashSet<usize>,
-    other: FxHashSet<usize>,
-}
-
-impl<'tcx> Visitor<'tcx> for Uses<'_> {
-    fn visit_place(&mut self, place: &mir::Place<'tcx>, context: PlaceContext, location: Location) {
-        let local = place.local.as_usize();
-        if self.stepped.contains(&location) && context.is_borrow() {
-            self.ranges.insert(local);
-        } else if context.is_use()
-            && !(place.projection.is_empty() && context.is_place_assignment())
-        {
-            self.other.insert(local);
+fn walk_rvalue(rvalue: &Rvalue, visit: &mut impl FnMut(&Place, bool)) {
+    match rvalue {
+        Rvalue::Use(operand, _) | Rvalue::UnaryOp(_, operand) | Rvalue::Cast(_, operand, _) => {
+            walk_operand(operand, visit)
         }
-        self.super_place(place, context, location);
+        Rvalue::BinaryOp(_, left, right) | Rvalue::CheckedBinaryOp(_, left, right) => {
+            walk_operand(left, visit);
+            walk_operand(right, visit);
+        }
+        Rvalue::Aggregate(_, operands) => operands
+            .iter()
+            .for_each(|operand| walk_operand(operand, visit)),
+        Rvalue::Ref(_, _, place)
+        | Rvalue::AddressOf(_, place)
+        | Rvalue::Reborrow(_, _, place)
+        | Rvalue::Discriminant(place)
+        | Rvalue::Len(place) => visit(place, true),
+        Rvalue::Repeat(operand, _) => walk_operand(operand, visit),
+        _ => {}
     }
+}
+
+fn walk_operand(operand: &Operand, visit: &mut impl FnMut(&Place, bool)) {
+    match operand {
+        Operand::Copy(place) | Operand::Move(place) => visit(place, true),
+        Operand::Constant(_) | Operand::RuntimeChecks(_) => {}
+    }
+}
+
+fn walk_terminator(terminator: &TerminatorKind, visit: &mut impl FnMut(&Place)) {
+    match terminator {
+        TerminatorKind::SwitchInt { discr, .. } => walk_terminal_operand(discr, visit),
+        TerminatorKind::Call {
+            func,
+            args,
+            destination,
+            ..
+        } => {
+            walk_terminal_operand(func, visit);
+            args.iter()
+                .for_each(|arg| walk_terminal_operand(arg, visit));
+            visit(destination);
+        }
+        TerminatorKind::Assert { cond, .. } => walk_terminal_operand(cond, visit),
+        TerminatorKind::Drop { place, .. } => visit(place),
+        _ => {}
+    }
+}
+
+fn walk_terminal_operand(operand: &Operand, visit: &mut impl FnMut(&Place)) {
+    match operand {
+        Operand::Copy(place) | Operand::Move(place) => visit(place),
+        Operand::Constant(_) | Operand::RuntimeChecks(_) => {}
+    }
+}
+
+pub(super) fn uint_bits(kind: UintTy) -> Option<u32> {
+    Some(match kind {
+        UintTy::U8 => 8,
+        UintTy::U16 => 16,
+        UintTy::U32 => 32,
+        UintTy::U64 => 64,
+        UintTy::U128 => 128,
+        UintTy::Usize => 64,
+    })
 }

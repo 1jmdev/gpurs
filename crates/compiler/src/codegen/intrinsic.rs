@@ -1,47 +1,43 @@
 use gpurs_artifact::{Convergence, Failure, Lowering, Operand as CallOperand, Primitive};
-use rustc_abi::BackendRepr;
-use rustc_const_eval::util;
-use rustc_middle::{
-    mir::BinOp,
-    ty::{self, Instance, Ty},
-};
 
 use super::{
     function::{self, FunctionBuilder},
-    layout, module,
+    layout,
+    layout::Shape,
+    module,
     place::{Operand, Place, Value},
 };
-use crate::{attributes, paths};
+use crate::{attributes, paths, stable::*};
 
-impl<'tcx> FunctionBuilder<'_, 'tcx> {
+impl<'sess> FunctionBuilder<'_, 'sess> {
     pub fn intrinsic(
         &mut self,
-        instance: Instance<'tcx>,
-        arguments: &[Operand<'tcx>],
-        destination: &Place<'tcx>,
+        instance: Instance,
+        arguments: &[Operand],
+        destination: &Place,
     ) -> bool {
-        if let Some(primitive) = attributes::primitive(self.tcx, instance.def_id())
+        if let Some(primitive) = attributes::primitive(self.sess, instance.def.def_id())
             && primitive.leaf()
         {
             self.primitive(primitive, instance, arguments, destination);
             return true;
         }
-        if let Some(name) = paths::math(self.tcx, instance.def_id())
+        if let Some(name) = paths::math(self.sess, instance.def.def_id())
             && let Some(value) = self.math(&name, arguments)
         {
             self.store(
                 destination,
                 &Operand {
                     value,
-                    layout: destination.layout,
+                    shape: destination.shape.clone(),
                 },
             );
             return true;
         }
-        let Some(intrinsic) = self.tcx.intrinsic(instance.def_id()) else {
+        let Some(name) = instance.intrinsic_name() else {
             return false;
         };
-        let name = intrinsic.name.as_str();
+        let name = name.as_str();
         if name.starts_with("atomic_") {
             self.atomic(name, instance, arguments, destination);
             return true;
@@ -54,15 +50,13 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
             | "prefetch_read_instruction"
             | "prefetch_write_instruction" => return true,
             "assert_inhabited" | "assert_zero_valid" | "assert_mem_uninitialized_valid" => {
-                let requirement = match name {
-                    "assert_zero_valid" => ty::layout::ValidityRequirement::Zero,
-                    "assert_inhabited" => ty::layout::ValidityRequirement::Inhabited,
-                    _ => ty::layout::ValidityRequirement::Uninit,
+                let ty = instance.args().0[0].ty().copied().unwrap();
+                let valid = match name {
+                    "assert_zero_valid" => self.sess.zeroable(ty),
+                    "assert_inhabited" => true,
+                    _ => true,
                 };
-                let input =
-                    ty::TypingEnv::fully_monomorphized().as_query_input(instance.args.type_at(0));
-                if !util::check_validity_requirement(self.tcx, requirement, input).unwrap_or(false)
-                {
+                if !valid {
                     self.error("invalid value initialization in GPU code");
                 }
                 return true;
@@ -71,7 +65,7 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
                 if name == "read_via_copy" {
                     self.load(&Place::new(
                         arguments[0].scalar().to_owned(),
-                        destination.layout,
+                        destination.shape.clone(),
                     ))
                     .value
                 } else {
@@ -80,21 +74,23 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
             }
             "write_via_move" => {
                 self.store(
-                    &Place::new(arguments[0].scalar().to_owned(), arguments[1].layout),
+                    &Place::new(arguments[0].scalar().to_owned(), arguments[1].shape.clone()),
                     &arguments[1],
                 );
                 return true;
             }
             "size_of_val" | "min_align_of_val" | "align_of_val" => {
-                let ty = instance.args.type_at(0);
-                let layout = self.layout_of(ty);
+                let ty = instance.args().0[0].ty().copied().unwrap();
+                let layout = self.shape_of(ty);
                 let size = match ty.kind() {
-                    ty::Slice(element) => self.layout_of(*element).size.bytes(),
-                    ty::Str => 1,
-                    _ => layout.size.bytes(),
+                    TyKind::RigidTy(RigidTy::Slice(element)) => {
+                        self.shape_of(element).size().bytes()
+                    }
+                    TyKind::RigidTy(RigidTy::Str) => 1,
+                    _ => layout.size().bytes(),
                 };
                 let value = if name != "size_of_val" {
-                    layout.align.abi.bytes().to_string()
+                    layout.align().to_string()
                 } else if layout.is_unsized() {
                     self.instruction(format!("mul i64 {}, {size}", arguments[0].pair().1))
                 } else {
@@ -104,7 +100,7 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
             }
             "ctpop" | "ctlz" | "ctlz_nonzero" | "cttz" | "cttz_nonzero" | "bswap"
             | "bitreverse" => {
-                let BackendRepr::Scalar(scalar) = arguments[0].layout.backend_repr else {
+                let ValueRepr::Scalar(scalar) = arguments[0].shape.repr().clone() else {
                     unreachable!()
                 };
                 let ty = layout::immediate_type(scalar);
@@ -121,16 +117,16 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
                     "call {ty} @llvm.{operation}.{ty}({ty} {}{extra})",
                     arguments[0].scalar()
                 ));
-                let BackendRepr::Scalar(result) = destination.layout.backend_repr else {
+                let ValueRepr::Scalar(result) = destination.shape.repr().clone() else {
                     unreachable!()
                 };
                 Value::Scalar(self.integer_cast(&value, scalar, result, false))
             }
             "rotate_left" | "rotate_right" => {
-                let BackendRepr::Scalar(scalar) = arguments[0].layout.backend_repr else {
+                let ValueRepr::Scalar(scalar) = arguments[0].shape.repr().clone() else {
                     unreachable!()
                 };
-                let BackendRepr::Scalar(shift) = arguments[1].layout.backend_repr else {
+                let ValueRepr::Scalar(shift) = arguments[1].shape.repr().clone() else {
                     unreachable!()
                 };
                 let ty = layout::immediate_type(scalar);
@@ -153,16 +149,22 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
                 Value::Scalar(self.instruction(format!("or {ty} {first}, {second}")))
             }
             "saturating_add" | "saturating_sub" => {
-                let BackendRepr::Scalar(scalar) = arguments[0].layout.backend_repr else {
+                let ValueRepr::Scalar(scalar) = arguments[0].shape.repr().clone() else {
                     unreachable!()
                 };
                 let ty = layout::immediate_type(scalar);
                 let operation = if name == "saturating_add" {
-                    BinOp::AddWithOverflow
+                    BinOp::Add
                 } else {
-                    BinOp::SubWithOverflow
+                    BinOp::Sub
                 };
-                let pair = self.binary(operation, &arguments[0], &arguments[1], destination.layout);
+                let pair = self.binary(
+                    operation,
+                    &arguments[0],
+                    &arguments[1],
+                    destination.shape.clone(),
+                    true,
+                );
                 let (value, overflow) = pair.pair();
                 let limit = if layout::is_signed(scalar) {
                     let negative =
@@ -181,7 +183,7 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
                 )
             }
             "exact_div" | "unchecked_div" | "unchecked_rem" => {
-                let BackendRepr::Scalar(scalar) = arguments[0].layout.backend_repr else {
+                let ValueRepr::Scalar(scalar) = arguments[0].shape.repr().clone() else {
                     unreachable!()
                 };
                 let ty = layout::immediate_type(scalar);
@@ -199,7 +201,10 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
                 )))
             }
             "offset" | "arith_offset" => {
-                let size = self.layout_of(instance.args.type_at(0)).size.bytes();
+                let size = self
+                    .shape_of(instance.args().0[0].ty().copied().unwrap())
+                    .size()
+                    .bytes();
                 let offset = self.instruction(format!("mul i64 {}, {size}", arguments[1].scalar()));
                 Value::Scalar(self.instruction(format!(
                     "getelementptr i8, i8* {}, i64 {offset}",
@@ -207,7 +212,10 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
                 )))
             }
             "ptr_offset_from" | "ptr_offset_from_unsigned" => {
-                let size = self.layout_of(instance.args.type_at(0)).size.bytes();
+                let size = self
+                    .shape_of(instance.args().0[0].ty().copied().unwrap())
+                    .size()
+                    .bytes();
                 let left =
                     self.instruction(format!("ptrtoint i8* {} to i64", arguments[0].scalar()));
                 let right =
@@ -235,7 +243,10 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
             | "volatile_copy_memory"
             | "volatile_copy_nonoverlapping_memory"
             | "volatile_set_memory" => {
-                let size = self.layout_of(instance.args.type_at(0)).size.bytes();
+                let size = self
+                    .shape_of(instance.args().0[0].ty().copied().unwrap())
+                    .size()
+                    .bytes();
                 let bytes = self.instruction(format!("mul i64 {}, {size}", arguments[2].scalar()));
                 let volatile = name.starts_with("volatile");
                 let operation = match name {
@@ -263,25 +274,25 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
                 return true;
             }
             "volatile_load" | "volatile_store" => {
-                let layout = self.layout_of(instance.args.type_at(0));
-                let BackendRepr::Scalar(scalar) = layout.backend_repr else {
+                let layout = self.shape_of(instance.args().0[0].ty().copied().unwrap());
+                let ValueRepr::Scalar(scalar) = layout.repr().clone() else {
                     self.unsupported("aggregate volatile operations");
                     return true;
                 };
-                let ty = layout::memory_type(scalar.primitive());
+                let ty = layout::memory_type(layout::primitive(scalar));
                 let pointer =
                     self.instruction(format!("bitcast i8* {} to {ty}*", arguments[0].scalar()));
                 if name == "volatile_store" {
                     self.emit(format!(
                         "store volatile {ty} {}, {ty}* {pointer}, align {}",
                         arguments[1].scalar(),
-                        layout.align.abi.bytes()
+                        layout.align()
                     ));
                     return true;
                 }
                 Value::Scalar(self.instruction(format!(
                     "load volatile {ty}, {ty}* {pointer}, align {}",
-                    layout.align.abi.bytes()
+                    layout.align()
                 )))
             }
             "select_unpredictable" => {
@@ -293,13 +304,15 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
                     first.pointer,
                     second.pointer
                 ));
-                self.load(&Place::new(pointer, destination.layout)).value
+                self.load(&Place::new(pointer, destination.shape.clone()))
+                    .value
             }
             "caller_location" => {
-                let layout = self.layout_of(destination.layout.ty.builtin_deref(true).unwrap());
+                let layout =
+                    self.shape_of(destination.shape.ty.kind().builtin_deref(true).unwrap().ty);
                 let name = self.module.unique("@gpurs.location");
-                let size = layout.size.bytes();
-                self.module.global(&format!("{name} = internal addrspace(1) constant [{size} x i8] zeroinitializer, align {}", layout.align.abi.bytes()));
+                let size = layout.size().bytes();
+                self.module.global(&format!("{name} = internal addrspace(1) constant [{size} x i8] zeroinitializer, align {}", layout.align()));
                 Value::Scalar(format!(
                     "addrspacecast (i8 addrspace(1)* bitcast ([{size} x i8] addrspace(1)* {name} to i8 addrspace(1)*) to i8*)"
                 ))
@@ -316,7 +329,7 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
             destination,
             &Operand {
                 value,
-                layout: destination.layout,
+                shape: destination.shape.clone(),
             },
         );
         true
@@ -325,9 +338,9 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
     fn primitive(
         &mut self,
         primitive: Primitive,
-        instance: Instance<'tcx>,
-        arguments: &[Operand<'tcx>],
-        destination: &Place<'tcx>,
+        instance: Instance,
+        arguments: &[Operand],
+        destination: &Place,
     ) {
         if self.module.checked && primitive.convergence == Convergence::Warp {
             let mask = self.instruction("call i32 asm sideeffect \"activemask.b32 $0;\", \"=r\"()");
@@ -343,12 +356,12 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
             Lowering::Dimensions(prefix) => {
                 for (axis, name) in ["x", "y", "z"].into_iter().enumerate() {
                     let value = self.extended_register(&format!("{prefix}.{name}"));
-                    let field = self.field(destination, axis.into());
+                    let field = self.field_place(destination, axis);
                     self.store(
                         &field,
                         &Operand {
                             value: Value::Scalar(value),
-                            layout: field.layout,
+                            shape: field.shape.clone(),
                         },
                     );
                 }
@@ -381,7 +394,7 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
                     .map(|operand| match operand {
                         CallOperand::Argument(index) => format!(
                             "{} {}",
-                            scalar_type(arguments[*index].layout.backend_repr),
+                            scalar_type(&arguments[*index].shape),
                             arguments[*index].scalar()
                         ),
                         CallOperand::Constant(text) => text.clone(),
@@ -391,24 +404,23 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
                     .iter()
                     .map(|operand| operand.split_once(' ').unwrap().0)
                     .collect();
-                let result = scalar_type(destination.layout.backend_repr);
+                let result = scalar_type(&destination.shape);
                 self.module
                     .declare(format!("declare {result} @{symbol}({})", types.join(", ")));
                 self.instruction(format!("call {result} @{symbol}({})", operands.join(", ")))
             }
             Lowering::SharedArray => {
-                let element = instance.args.type_at(0);
-                let length = instance
-                    .args
-                    .const_at(1)
-                    .try_to_target_usize(self.tcx)
+                let element = instance.args().0[0].ty().copied().unwrap();
+                let length = instance.args().0[1]
+                    .expect_const()
+                    .eval_target_usize()
                     .unwrap();
-                let layout = self.layout_of(Ty::new_array(self.tcx, element, length));
+                let layout = self.shape_of(Ty::try_new_array(element, length).unwrap());
                 let name = self.module.unique("@gpurs.shared");
-                let size = layout.size.bytes().max(1);
+                let size = layout.size().bytes().max(1);
                 self.module.global(&format!(
                     "{name} = internal addrspace(3) global [{size} x i8] undef, align {}",
-                    layout.align.abi.bytes()
+                    layout.align()
                 ));
                 self.instruction(format!(
                     "addrspacecast [{size} x i8] addrspace(3)* {name} to i8*"
@@ -420,7 +432,7 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
             destination,
             &Operand {
                 value: Value::Scalar(value),
-                layout: destination.layout,
+                shape: destination.shape.clone(),
             },
         );
     }
@@ -482,7 +494,7 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
         ));
     }
 
-    fn math(&mut self, name: &str, arguments: &[Operand<'tcx>]) -> Option<Value> {
+    fn math(&mut self, name: &str, arguments: &[Operand]) -> Option<Value> {
         let (operation, suffix, ty) = if let Some(operation) = name.strip_suffix("f32") {
             (operation, "f32", "float")
         } else {
@@ -525,7 +537,7 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
         let parameters: Vec<_> = arguments
             .iter()
             .map(|argument| {
-                let BackendRepr::Scalar(scalar) = argument.layout.backend_repr else {
+                let ValueRepr::Scalar(scalar) = argument.shape.repr().clone() else {
                     unreachable!()
                 };
                 layout::immediate_type(scalar)
@@ -545,20 +557,20 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
     fn atomic(
         &mut self,
         name: &str,
-        instance: Instance<'tcx>,
-        arguments: &[Operand<'tcx>],
-        destination: &Place<'tcx>,
+        instance: Instance,
+        arguments: &[Operand],
+        destination: &Place,
     ) {
         let orders: Vec<_> = instance
-            .args
-            .consts()
-            .filter(|value| !value.to_value().ty.is_bool())
-            .map(|value| {
-                let discriminant = value.to_value().to_branch()[0].to_leaf();
-                discriminant.to_bits(discriminant.size()) as u64
+            .args()
+            .0
+            .iter()
+            .filter_map(|argument| match argument {
+                GenericArgKind::Const(value) => Some(const_uint(value)),
+                _ => None,
             })
-            .collect();
-        let order = ordering(orders[0]);
+            .collect::<Vec<_>>();
+        let order = ordering(orders.first().copied().unwrap_or(0));
         if name.ends_with("fence") {
             let scope = if name == "atomic_singlethreadfence" {
                 "singlethread "
@@ -568,15 +580,18 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
             self.emit(format!("fence {scope}{order}"));
             return;
         }
-        let layout = self.layout_of(instance.args.type_at(0));
-        let BackendRepr::Scalar(scalar) = layout.backend_repr else {
+        let layout = self.shape_of(instance.args().0[0].ty().copied().unwrap());
+        let ValueRepr::Scalar(scalar) = layout.repr().clone() else {
             unreachable!()
         };
-        let pointer_value = matches!(scalar.primitive(), rustc_abi::Primitive::Pointer(_));
+        let pointer_value = matches!(
+            layout::primitive(scalar),
+            crate::stable::Primitive::Pointer(_)
+        );
         let ty = if pointer_value {
             "i64"
         } else {
-            layout::memory_type(scalar.primitive())
+            layout::memory_type(layout::primitive(scalar))
         };
         let pointer = self.instruction(format!("bitcast i8* {} to {ty}*", arguments[0].scalar()));
         let values: Vec<_> = arguments[1..]
@@ -594,13 +609,13 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
                 self.emit(format!(
                     "store atomic {ty} {}, {ty}* {pointer} {order}, align {}",
                     values[0],
-                    layout.align.abi.bytes()
+                    layout.align()
                 ));
                 return;
             }
             "atomic_load" => self.instruction(format!(
                 "load atomic {ty}, {ty}* {pointer} {order}, align {}",
-                layout.align.abi.bytes()
+                layout.align()
             )),
             "atomic_cxchg" | "atomic_cxchgweak" => {
                 let weak = if name == "atomic_cxchgweak" {
@@ -608,7 +623,7 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
                 } else {
                     ""
                 };
-                let failure = ordering(orders[1]);
+                let failure = ordering(orders.get(1).copied().unwrap_or(0));
                 let result = self.instruction(format!(
                     "cmpxchg {weak}{ty}* {pointer}, {ty} {}, {ty} {} {order} {failure}",
                     values[0], values[1]
@@ -624,7 +639,7 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
                     destination,
                     &Operand {
                         value: Value::Pair(value, success),
-                        layout: destination.layout,
+                        shape: destination.shape.clone(),
                     },
                 );
                 return;
@@ -662,7 +677,7 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
             destination,
             &Operand {
                 value: Value::Scalar(value),
-                layout: destination.layout,
+                shape: destination.shape.clone(),
             },
         );
     }
@@ -679,9 +694,18 @@ fn ordering(value: u64) -> &'static str {
     }
 }
 
-fn scalar_type(representation: BackendRepr) -> &'static str {
-    let BackendRepr::Scalar(scalar) = representation else {
-        unreachable!()
-    };
-    layout::immediate_type(scalar)
+fn scalar_type(shape: &Shape) -> &'static str {
+    match shape.repr() {
+        ValueRepr::Scalar(scalar) => layout::immediate_type(*scalar),
+        _ => unreachable!(),
+    }
+}
+
+/// The numeric value of a const generic argument.
+pub fn const_uint(value: &TyConst) -> u64 {
+    match value.kind() {
+        TyConstKind::Value(_, allocation) => allocation.read_uint().unwrap_or(0) as u64,
+        TyConstKind::ZSTValue(_) => 0,
+        _ => 0,
+    }
 }

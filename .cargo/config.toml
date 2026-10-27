@@ -1,0 +1,5 @@
+# The gpurs compiler links rustc's private crates, so building it needs the
+# feature gate enabled. Build scripts set this for the compiler they invoke;
+# this entry only makes `cargo build --workspace` work from a checkout.
+[env]
+RUSTC_BOOTSTRAP = "1"

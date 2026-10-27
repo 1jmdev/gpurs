@@ -1,78 +1,86 @@
 use std::fmt::Write;
 
 use gpurs_artifact::Failure;
-use rustc_abi::BackendRepr;
 use rustc_data_structures::fx::FxHashSet;
-use rustc_index::IndexVec;
-use rustc_middle::{
-    mir::{
-        self, AssertKind, BasicBlock, BinOp, Body, Local, LocalKind, NonDivergingIntrinsic,
-        ProjectionElem, Rvalue, StatementKind, TerminatorKind, traversal,
-        visit::{PlaceContext, Visitor},
-    },
-    ty::{
-        EarlyBinder, Instance, Ty, TyCtxt, TypeFoldable, TypingEnv,
-        layout::{LayoutOf, TyAndLayout},
-    },
-};
-use rustc_span::Span;
 
 use super::{
-    layout::{self, PassMode},
+    layout::{self, PassMode, Shape},
     module::ModuleBuilder,
     place::{Operand, Place, Value},
 };
-use crate::{attributes, diagnostic};
+use crate::{
+    attributes, diagnostic, stable,
+    stable::{CrateDef, Operand as MirOperand, Place as MirPlace, *},
+};
 
 /// Lowers the MIR body of one monomorphic instance to an NVVM IR function.
-pub struct FunctionBuilder<'m, 'tcx> {
-    pub module: &'m mut ModuleBuilder<'tcx>,
-    pub tcx: TyCtxt<'tcx>,
-    pub instance: Instance<'tcx>,
-    pub body: &'tcx Body<'tcx>,
-    pub locals: IndexVec<Local, Place<'tcx>>,
+pub struct FunctionBuilder<'m, 'sess> {
+    pub module: &'m mut ModuleBuilder<'sess>,
+    pub sess: Sess<'sess>,
+    pub instance: Instance,
+    pub body: Body,
+    pub locals: Vec<Place>,
     pub fast_math: bool,
     pub span: Span,
     pub(super) code: String,
     pub(super) allocas: String,
     pub label: String,
     /// Blocks whose assertion is proven for this copy of the body and is omitted.
-    pub skipped: FxHashSet<BasicBlock>,
-    block: BasicBlock,
+    pub skipped: FxHashSet<usize>,
+    block: usize,
     counter: usize,
 }
 
-impl<'m, 'tcx> FunctionBuilder<'m, 'tcx> {
-    pub fn new(module: &'m mut ModuleBuilder<'tcx>, instance: Instance<'tcx>) -> Self {
-        let tcx = module.tcx;
-        let body = tcx.instance_mir(instance.def);
+impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
+    pub fn new(module: &'m mut ModuleBuilder<'sess>, instance: Instance) -> Self {
+        let sess = module.sess;
+        let body = instance
+            .body()
+            .unwrap_or_else(|| panic!("no body for `{:?}`", instance.name()));
+        let span = body.span;
         FunctionBuilder {
-            tcx,
-            fast_math: attributes::is_fast_math(tcx, instance.def_id()),
+            sess,
+            fast_math: attributes::is_fast_math(sess, instance.def.def_id()),
             module,
             instance,
             body,
-            locals: IndexVec::new(),
-            span: body.span,
+            locals: Vec::new(),
+            span,
             code: String::new(),
             allocas: String::new(),
             label: "start".to_owned(),
             skipped: FxHashSet::default(),
-            block: mir::START_BLOCK,
+            block: 0,
             counter: 0,
         }
     }
 
-    pub fn monomorphize<T: TypeFoldable<TyCtxt<'tcx>>>(&self, value: T) -> T {
-        self.instance.instantiate_mir_and_normalize_erasing_regions(
-            self.tcx,
-            TypingEnv::fully_monomorphized(),
-            EarlyBinder::bind(self.tcx, value),
-        )
+    pub fn shape_of(&self, ty: Ty) -> Shape {
+        Shape::of(self.sess, ty)
     }
 
-    pub fn layout_of(&self, ty: Ty<'tcx>) -> TyAndLayout<'tcx> {
-        self.module.cx.layout_of(ty)
+    /// The place of an enum tag, which is not a field of any variant.
+    pub fn tag_place(&mut self, place: &Place, tag_field: usize, scalar: Scalar) -> Place {
+        let offset = place.shape.offset(tag_field);
+        let shape = Shape::of(self.sess, layout::scalar_ty(scalar));
+        let pointer = self.offset(&place.pointer, offset.bytes() as u64);
+        Place {
+            pointer,
+            meta: None,
+            align: layout::restrict_align(place.align, offset),
+            shape,
+        }
+    }
+
+    /// The element layout of an array, slice, reference, or single-field aggregate.
+    pub fn element_shape(&self, place: &Place) -> Shape {
+        match stable::rigid(place.shape.ty) {
+            RigidTy::Array(element, _)
+            | RigidTy::Slice(element)
+            | RigidTy::Ref(_, element, _)
+            | RigidTy::RawPtr(element, _) => self.shape_of(element),
+            _ => place.shape.field(self.sess, 0),
+        }
     }
 
     pub fn emit(&mut self, line: impl AsRef<str>) {
@@ -98,11 +106,11 @@ impl<'m, 'tcx> FunctionBuilder<'m, 'tcx> {
     }
 
     /// A stack slot allocated in the entry block.
-    pub fn temporary(&mut self, layout: TyAndLayout<'tcx>) -> Place<'tcx> {
+    pub fn temporary(&mut self, shape: Shape) -> Place {
         self.counter += 1;
         let name = format!("%s{}", self.counter);
-        let size = layout.size.bytes().max(1);
-        let align = layout.align.abi.bytes();
+        let size = shape.size().bytes().max(1);
+        let align = shape.align();
         writeln!(
             self.allocas,
             "  {name}.slot = alloca [{size} x i8], align {align}"
@@ -113,16 +121,16 @@ impl<'m, 'tcx> FunctionBuilder<'m, 'tcx> {
             "  {name} = bitcast [{size} x i8]* {name}.slot to i8*"
         )
         .unwrap();
-        Place::new(name, layout)
+        Place::new(name, shape)
     }
 
     pub fn error(&self, message: impl Into<String>) {
-        self.tcx.dcx().span_err(self.span, message.into());
+        self.sess.error(self.span, message);
     }
 
     pub fn unsupported(&self, what: &str) {
         diagnostic::error(
-            self.tcx,
+            self.sess,
             self.span,
             format!("{what} is not supported in GPU code"),
             "use a supported Rust operation or move this operation to the host before launching the kernel",
@@ -137,27 +145,25 @@ impl<'m, 'tcx> FunctionBuilder<'m, 'tcx> {
 
     pub fn lower(mut self, name: &str) -> String {
         let signature = self.module.signature(self.instance);
-        for (local, declaration) in self.body.local_decls.iter_enumerated() {
-            let layout = self.layout_of(self.monomorphize(declaration.ty));
-            let place = if layout.is_zst() || layout.is_unsized() {
-                Place::new(
-                    format!("inttoptr (i64 {} to i8*)", layout.align.abi.bytes()),
-                    layout,
-                )
-            } else if local == mir::RETURN_PLACE && matches!(signature.result.0, PassMode::Indirect)
-            {
-                Place::new("%result".to_owned(), layout)
-            } else if let Some(index) = argument_index(self.body, local)
+        let declarations = self.body.locals().to_vec();
+        let argument_count = self.body.arg_locals().len();
+        for (local, declaration) in declarations.iter().enumerate() {
+            let shape = self.shape_of(declaration.ty);
+            let place = if shape.is_zst() || shape.is_unsized() {
+                Place::new(format!("inttoptr (i64 {} to i8*)", shape.align()), shape)
+            } else if local == RETURN_LOCAL && matches!(signature.result.0, PassMode::Indirect) {
+                Place::new("%result".to_owned(), shape)
+            } else if let Some(index) = argument_index(argument_count, local)
                 && let PassMode::Indirect = signature.arguments[index].0
             {
-                Place::new(format!("%a{index}"), layout)
+                Place::new(format!("%a{index}"), shape)
             } else {
-                self.temporary(layout)
+                self.temporary(shape)
             };
             self.locals.push(place);
         }
-        for (index, local) in self.body.args_iter().enumerate() {
-            let place = self.locals[local].clone();
+        for index in 0..argument_count {
+            let place = self.locals[1 + index].clone();
             let value = match signature.arguments[index].0 {
                 PassMode::Direct(_) => Value::Scalar(format!("%a{index}")),
                 PassMode::Pair(..) => Value::Pair(format!("%a{index}.0"), format!("%a{index}.1")),
@@ -167,33 +173,33 @@ impl<'m, 'tcx> FunctionBuilder<'m, 'tcx> {
                 &place,
                 &Operand {
                     value,
-                    layout: place.layout,
+                    shape: place.shape.clone(),
                 },
             );
         }
         self.emit("br label %bb0");
 
-        let reachable = traversal::mono_reachable_as_bitset(self.body, self.tcx, self.instance);
-        for (block, data) in self.body.basic_blocks.iter_enumerated() {
-            if data.is_cleanup {
-                continue;
-            }
+        let reachable = reachable_blocks(&self.body);
+        for block in 0..self.body.blocks.len() {
             self.block = block;
-            self.start_block(&format!("bb{}", block.as_usize()));
+            self.start_block(&format!("bb{block}"));
             if !reachable.contains(block) {
                 self.emit("unreachable");
                 continue;
             }
-            for statement in &data.statements {
+            for statement in self.body.blocks[block].statements.clone() {
                 self.span = statement.source_info.span;
                 self.statement(&statement.kind);
             }
-            self.span = data.terminator().source_info.span;
-            self.terminator(&data.terminator().kind, &signature.result);
+            self.span = self.body.blocks[block].terminator.source_info.span;
+            self.terminator(
+                &self.body.blocks[block].terminator.kind.clone(),
+                &signature.result,
+            );
         }
 
         let mut function = String::new();
-        writeln!(function, "; {}", self.instance).unwrap();
+        writeln!(function, "; {}", self.instance.name()).unwrap();
         writeln!(
             function,
             "define internal {} {name}({}) {{\nstart:",
@@ -207,28 +213,33 @@ impl<'m, 'tcx> FunctionBuilder<'m, 'tcx> {
         function
     }
 
-    fn statement(&mut self, statement: &StatementKind<'tcx>) {
+    fn statement(&mut self, statement: &StatementKind) {
         match statement {
-            StatementKind::Assign(assign) => {
-                let (destination, rvalue) = &**assign;
-                let place = self.place(*destination);
-                self.rvalue(&place, rvalue);
+            StatementKind::Assign(destination, rvalue) => {
+                let place = self.place(destination.clone());
+                let rvalue = rvalue.clone();
+                self.rvalue(&place, &rvalue);
             }
             StatementKind::SetDiscriminant {
                 place,
                 variant_index,
             } => {
-                let place = self.place(**place);
+                let place = self.place(place.clone());
                 self.set_discriminant(&place, *variant_index);
             }
-            StatementKind::Intrinsic(intrinsic) => match &**intrinsic {
+            StatementKind::Intrinsic(intrinsic) => match intrinsic {
                 NonDivergingIntrinsic::Assume(_) => {}
                 NonDivergingIntrinsic::CopyNonOverlapping(copy) => {
-                    let source = self.operand(&copy.src);
-                    let destination = self.operand(&copy.dst);
-                    let count = self.operand(&copy.count);
-                    let pointee = destination.layout.ty.builtin_deref(true).expect("pointer");
-                    let size = self.layout_of(pointee).size.bytes();
+                    let source = self.operand(&copy.src.clone());
+                    let destination = self.operand(&copy.dst.clone());
+                    let count = self.operand(&copy.count.clone());
+                    let pointee = destination
+                        .shape
+                        .ty
+                        .kind()
+                        .builtin_deref(true)
+                        .expect("pointer");
+                    let size = self.shape_of(pointee.ty).size().bytes();
                     let bytes = self.instruction(format!("mul i64 {}, {size}", count.scalar()));
                     self.emit(format!(
                         "call void @llvm.memcpy.p0i8.p0i8.i64(i8* {}, i8* {}, i64 {bytes}, i1 false)",
@@ -241,17 +252,12 @@ impl<'m, 'tcx> FunctionBuilder<'m, 'tcx> {
         }
     }
 
-    fn terminator(
-        &mut self,
-        terminator: &TerminatorKind<'tcx>,
-        result: &(PassMode, TyAndLayout<'tcx>),
-    ) {
+    fn terminator(&mut self, terminator: &TerminatorKind, result: &(PassMode, Shape)) {
         match terminator {
-            TerminatorKind::Goto { target, .. } => self.branch(*target),
-            TerminatorKind::FalseEdge { real_target, .. }
-            | TerminatorKind::FalseUnwind { real_target, .. } => self.branch(*real_target),
+            TerminatorKind::Goto { target } => self.branch(*target),
             TerminatorKind::SwitchInt { discr, targets } => {
-                if let [(value, mut target)] = targets.iter().collect::<Vec<_>>()[..] {
+                let branches: Vec<_> = targets.branches().collect();
+                if let [(value, mut target)] = branches[..] {
                     // Fuse `a && b` and `a || b` into one branch, as nvcc does, when `b` is
                     // computed by a block that cannot fail or touch memory.
                     let mut matches = self.matches(discr, value);
@@ -271,10 +277,10 @@ impl<'m, 'tcx> FunctionBuilder<'m, 'tcx> {
                             break;
                         };
                         let block = if disjunction { otherwise } else { target };
-                        for statement in &self.body.basic_blocks[block].statements {
+                        for statement in self.body.blocks[block].statements.clone() {
                             self.statement(&statement.kind);
                         }
-                        let next = self.matches(discr, value);
+                        let next = self.matches(&discr, value);
                         matches = if disjunction {
                             otherwise = default;
                             self.instruction(format!("select i1 {matches}, i1 true, i1 {next}"))
@@ -284,32 +290,33 @@ impl<'m, 'tcx> FunctionBuilder<'m, 'tcx> {
                         };
                     }
                     return self.emit(format!(
-                        "br i1 {matches}, label %bb{}, label %bb{}",
-                        target.as_usize(),
-                        otherwise.as_usize()
+                        "br i1 {matches}, label %bb{target}, label %bb{otherwise}"
                     ));
                 }
                 let discriminant = self.operand(discr);
-                let BackendRepr::Scalar(scalar) = discriminant.layout.backend_repr else {
-                    unreachable!("switch on a non-scalar `{}`", discriminant.layout.ty)
+                let ValueRepr::Scalar(scalar) = discriminant.shape.repr().clone() else {
+                    unreachable!(
+                        "switch on a non-scalar `{:?}`",
+                        discriminant.shape.ty.kind()
+                    )
                 };
                 let ty = layout::immediate_type(scalar);
-                let cases: Vec<String> = targets
+                let cases: Vec<String> = branches
                     .iter()
                     .map(|(value, target)| {
-                        let value = integer_text(value, ty, layout::bits(scalar));
-                        format!("{ty} {value}, label %bb{}", target.as_usize())
+                        let value = integer_text(*value, ty, layout::bits(scalar));
+                        format!("{ty} {value}, label %bb{target}")
                     })
                     .collect();
                 self.emit(format!(
                     "switch {ty} {}, label %bb{} [ {} ]",
                     discriminant.scalar(),
-                    targets.otherwise().as_usize(),
+                    targets.otherwise(),
                     cases.join(" ")
                 ));
             }
             TerminatorKind::Return => {
-                let place = self.locals[mir::RETURN_PLACE].clone();
+                let place = self.locals[RETURN_LOCAL].clone();
                 match result.0 {
                     PassMode::Ignore | PassMode::Indirect => self.emit("ret void"),
                     PassMode::Direct(scalar) => {
@@ -340,9 +347,9 @@ impl<'m, 'tcx> FunctionBuilder<'m, 'tcx> {
                     }
                 }
             }
-            TerminatorKind::Unreachable
-            | TerminatorKind::UnwindResume
-            | TerminatorKind::UnwindTerminate(_) => self.emit("unreachable"),
+            TerminatorKind::Unreachable | TerminatorKind::Resume | TerminatorKind::Abort => {
+                self.emit("unreachable")
+            }
             TerminatorKind::Assert {
                 cond,
                 expected,
@@ -351,41 +358,44 @@ impl<'m, 'tcx> FunctionBuilder<'m, 'tcx> {
                 ..
             } => {
                 if self.skipped.contains(&self.block)
-                    || (!self.tcx.sess.overflow_checks() && msg.is_optional_overflow_check())
+                    || (!self.sess.overflow_checks() && optional_overflow(msg))
                 {
                     return self.branch(*target);
                 }
                 let condition = self.operand(cond);
                 let failure = self.fresh_label("assert");
                 let (on_true, on_false) = match expected {
-                    true => (format!("bb{}", target.as_usize()), failure.clone()),
-                    false => (failure.clone(), format!("bb{}", target.as_usize())),
+                    true => (format!("bb{target}"), failure.clone()),
+                    false => (failure.clone(), format!("bb{target}")),
                 };
                 self.emit(format!(
                     "br i1 {}, label %{on_true}, label %{on_false}",
                     condition.scalar()
                 ));
                 self.start_block(&failure);
-                self.fail(match **msg {
-                    AssertKind::BoundsCheck { .. } => Failure::BoundsCheck,
-                    AssertKind::Overflow(..) | AssertKind::OverflowNeg(_) => Failure::Overflow,
-                    AssertKind::DivisionByZero(_) | AssertKind::RemainderByZero(_) => {
+                self.fail(match msg {
+                    AssertMessage::BoundsCheck { .. } => Failure::BoundsCheck,
+                    AssertMessage::Overflow(..) | AssertMessage::OverflowNeg(_) => {
+                        Failure::Overflow
+                    }
+                    AssertMessage::DivisionByZero(_) | AssertMessage::RemainderByZero(_) => {
                         Failure::DivisionByZero
                     }
                     _ => Failure::Panic,
                 });
             }
             TerminatorKind::Drop { place, target, .. } => {
-                let ty = self.monomorphize(place.ty(self.body, self.tcx).ty);
-                if ty.needs_drop(self.tcx, TypingEnv::fully_monomorphized()) {
-                    let place = self.place(*place);
+                let ty = self.place_type(place);
+                if self.sess.needs_drop(ty) {
+                    let place = self.place(place.clone());
                     let argument = Operand {
                         value: self.address(&place),
-                        layout: self.layout_of(Ty::new_mut_ptr(self.tcx, ty)),
+                        shape: self.shape_of(Ty::new_ptr(ty, Mutability::Mut)),
                     };
-                    let destination = self.temporary(self.layout_of(self.tcx.types.unit));
+                    let unit = Ty::from_rigid_kind(RigidTy::Tuple(Vec::new()));
+                    let destination = self.temporary(self.shape_of(unit));
                     self.invoke(
-                        Instance::resolve_drop_glue(self.tcx, ty),
+                        Instance::resolve_drop_in_place(ty),
                         &[argument],
                         &destination,
                     );
@@ -399,31 +409,26 @@ impl<'m, 'tcx> FunctionBuilder<'m, 'tcx> {
                 target,
                 ..
             } => {
-                self.call(func, args, *destination, *target);
-            }
-            TerminatorKind::TailCall { func, args, .. } => {
-                self.call(func, args, mir::RETURN_PLACE.into(), None);
-                self.unsupported("explicit tail calls");
+                self.call(func, args, destination, *target);
             }
             TerminatorKind::InlineAsm { .. } => {
                 self.unsupported("inline assembly");
                 self.emit("unreachable");
             }
-            TerminatorKind::Yield { .. } | TerminatorKind::CoroutineDrop => {
-                self.unsupported("coroutines");
-                self.emit("unreachable");
-            }
         }
     }
 
-    pub fn branch(&mut self, target: BasicBlock) {
-        self.emit(format!("br label %bb{}", target.as_usize()));
+    pub fn branch(&mut self, target: usize) {
+        self.emit(format!("br label %bb{target}"));
     }
 
-    fn matches(&mut self, discr: &mir::Operand<'tcx>, value: u128) -> String {
+    fn matches(&mut self, discr: &MirOperand, value: u128) -> String {
         let discriminant = self.operand(discr);
-        let BackendRepr::Scalar(scalar) = discriminant.layout.backend_repr else {
-            unreachable!("switch on a non-scalar `{}`", discriminant.layout.ty)
+        let ValueRepr::Scalar(scalar) = discriminant.shape.repr().clone() else {
+            unreachable!(
+                "switch on a non-scalar `{:?}`",
+                discriminant.shape.ty.kind()
+            )
         };
         let ty = layout::immediate_type(scalar);
         let value = integer_text(value, ty, layout::bits(scalar));
@@ -432,48 +437,43 @@ impl<'m, 'tcx> FunctionBuilder<'m, 'tcx> {
 
     /// The two-way switch ending `block` when the block only computes temporaries used nowhere
     /// else, so evaluating it early cannot fail, touch memory, or change an observable value.
-    fn speculatable(
-        &self,
-        block: BasicBlock,
-    ) -> Option<(&'tcx mir::Operand<'tcx>, u128, BasicBlock, BasicBlock)> {
-        let data = &self.body.basic_blocks[block];
-        let TerminatorKind::SwitchInt { discr, targets } = &data.terminator().kind else {
+    fn speculatable(&self, block: usize) -> Option<(MirOperand, u128, usize, usize)> {
+        let data = &self.body.blocks[block];
+        let TerminatorKind::SwitchInt { discr, targets } = &data.terminator.kind else {
             return None;
         };
-        let [(value, case)] = targets.iter().collect::<Vec<_>>()[..] else {
+        let branches: Vec<_> = targets.branches().collect();
+        let [(value, case)] = branches[..] else {
             return None;
         };
-        let pure = |operand: &mir::Operand<'tcx>| match operand {
-            mir::Operand::Copy(place) | mir::Operand::Move(place) => place
+        let pure = |operand: &MirOperand| match operand {
+            MirOperand::Copy(place) | MirOperand::Move(place) => place
                 .projection
                 .iter()
                 .all(|element| matches!(element, ProjectionElem::Field(..))),
-            mir::Operand::Constant(_) => true,
-            mir::Operand::RuntimeChecks(_) => false,
+            MirOperand::Constant(_) => true,
+            MirOperand::RuntimeChecks(_) => false,
         };
         let mut assigned = Vec::new();
+        let argument_count = self.body.arg_locals().len();
         for statement in &data.statements {
             match &statement.kind {
                 StatementKind::StorageLive(_)
                 | StatementKind::StorageDead(_)
                 | StatementKind::Nop => {}
-                StatementKind::Assign(assign) => {
-                    let (place, rvalue) = &**assign;
+                StatementKind::Assign(place, rvalue) => {
                     let simple = match rvalue {
                         Rvalue::Use(operand, ..)
                         | Rvalue::UnaryOp(_, operand)
                         | Rvalue::Cast(_, operand, _) => pure(operand),
-                        Rvalue::BinaryOp(operation, operands) => {
+                        Rvalue::BinaryOp(operation, left, right) => {
                             !matches!(operation, BinOp::Div | BinOp::Rem)
-                                && pure(&operands.0)
-                                && pure(&operands.1)
+                                && pure(left)
+                                && pure(right)
                         }
                         _ => false,
                     };
-                    if !simple
-                        || !place.projection.is_empty()
-                        || self.body.local_kind(place.local) != LocalKind::Temp
-                    {
+                    if !simple || !place.projection.is_empty() || place.local <= argument_count {
                         return None;
                     }
                     assigned.push(place.local);
@@ -484,17 +484,13 @@ impl<'m, 'tcx> FunctionBuilder<'m, 'tcx> {
         if assigned.len() > 16 {
             return None;
         }
-        let mut mentions = Mentions {
-            locals: &assigned,
-            found: false,
-        };
-        for (other, data) in self.body.basic_blocks.iter_enumerated() {
-            if other != block {
-                mentions.visit_basic_block_data(other, data);
+        for (other, data) in self.body.blocks.iter().enumerate() {
+            if other != block && mentions(data, &assigned) {
+                return None;
             }
         }
-        (!mentions.found).then_some((
-            discr,
+        Some((
+            discr.clone(),
             value,
             self.forward(case),
             self.forward(targets.otherwise()),
@@ -502,11 +498,11 @@ impl<'m, 'tcx> FunctionBuilder<'m, 'tcx> {
     }
 
     /// The first block reached from `block` through blocks that only end storage and jump.
-    fn forward(&self, mut block: BasicBlock) -> BasicBlock {
+    fn forward(&self, mut block: usize) -> usize {
         for _ in 0..8 {
-            let data = &self.body.basic_blocks[block];
-            match data.terminator().kind {
-                TerminatorKind::Goto { target, .. }
+            let data = &self.body.blocks[block];
+            match &data.terminator.kind {
+                TerminatorKind::Goto { target }
                     if data.statements.iter().all(|statement| {
                         matches!(
                             statement.kind,
@@ -516,7 +512,7 @@ impl<'m, 'tcx> FunctionBuilder<'m, 'tcx> {
                         )
                     }) =>
                 {
-                    block = target
+                    block = *target
                 }
                 _ => break,
             }
@@ -524,25 +520,64 @@ impl<'m, 'tcx> FunctionBuilder<'m, 'tcx> {
         block
     }
 
-    pub fn operand(&mut self, operand: &mir::Operand<'tcx>) -> Operand<'tcx> {
+    pub fn operand(&mut self, operand: &MirOperand) -> Operand {
         match operand {
-            mir::Operand::Copy(place) | mir::Operand::Move(place) => {
-                let place = self.place(*place);
+            MirOperand::Copy(place) | MirOperand::Move(place) => {
+                let place = self.place(place.clone());
                 self.load(&place)
             }
-            mir::Operand::Constant(constant) => self.constant(constant),
-            mir::Operand::RuntimeChecks(checks) => Operand {
-                value: Value::Scalar(checks.value(self.tcx.sess).to_string()),
-                layout: self.layout_of(self.tcx.types.bool),
-            },
+            MirOperand::Constant(constant) => self.constant(constant),
+            MirOperand::RuntimeChecks(checks) => {
+                let value = match checks {
+                    RuntimeChecks::OverflowChecks => self.sess.overflow_checks(),
+                    _ => true,
+                };
+                Operand {
+                    value: Value::Scalar(u8::from(value).to_string()),
+                    shape: self.shape_of(Ty::bool_ty()),
+                }
+            }
         }
+    }
+
+    /// The type of a MIR place, following its projections.
+    pub fn place_type(&self, place: &MirPlace) -> Ty {
+        let mut ty = self
+            .body
+            .local_decl(place.local)
+            .unwrap_or_else(|| panic!("no declaration for local {}", place.local))
+            .ty;
+        for element in &place.projection {
+            ty = match element {
+                ProjectionElem::Deref => {
+                    ty.kind()
+                        .builtin_deref(true)
+                        .unwrap_or_else(|| panic!("dereference of non-pointer"))
+                        .ty
+                }
+                ProjectionElem::Field(_, field) => *field,
+                ProjectionElem::Index(_)
+                | ProjectionElem::ConstantIndex { .. }
+                | ProjectionElem::Subslice { .. } => match stable::rigid(ty) {
+                    RigidTy::Array(element, _) | RigidTy::Slice(element) => element,
+                    RigidTy::Ref(_, element, _) | RigidTy::RawPtr(element, _) => {
+                        match stable::rigid(element) {
+                            RigidTy::Array(element, _) | RigidTy::Slice(element) => element,
+                            _ => element,
+                        }
+                    }
+                    _ => ty,
+                },
+                ProjectionElem::Downcast(..) => ty,
+                ProjectionElem::OpaqueCast(cast) => *cast,
+            };
+        }
+        ty
     }
 }
 
-fn argument_index(body: &Body<'_>, local: Local) -> Option<usize> {
-    (1..=body.arg_count)
-        .contains(&local.as_usize())
-        .then(|| local.as_usize() - 1)
+fn argument_index(argument_count: usize, local: usize) -> Option<usize> {
+    (1..=argument_count).contains(&local).then(|| local - 1)
 }
 
 /// Integer literal of `bits` width, printed as the signed value LLVM expects.
@@ -554,14 +589,85 @@ pub fn integer_text(value: u128, ty: &str, bits: u64) -> String {
     (((value << shift) as i128) >> shift).to_string()
 }
 
-/// Whether any of `locals` is used, not merely declared live or dead, in the visited code.
-struct Mentions<'a> {
-    locals: &'a [Local],
-    found: bool,
+pub fn optional_overflow(message: &AssertMessage) -> bool {
+    matches!(
+        message,
+        AssertMessage::Overflow(..)
+            | AssertMessage::OverflowNeg(_)
+            | AssertMessage::DivisionByZero(_)
+            | AssertMessage::RemainderByZero(_)
+    )
 }
 
-impl<'tcx> Visitor<'tcx> for Mentions<'_> {
-    fn visit_local(&mut self, local: Local, context: PlaceContext, _: mir::Location) {
-        self.found |= context.is_use() && self.locals.contains(&local);
+struct Reachable {
+    bits: Vec<u64>,
+}
+
+impl Reachable {
+    fn contains(&self, block: usize) -> bool {
+        self.bits[block / 64] & (1 << (block % 64)) != 0
+    }
+}
+
+fn reachable_blocks(body: &Body) -> Reachable {
+    let mut bits = vec![0u64; body.blocks.len().div_ceil(64)];
+    let mut pending = vec![0usize];
+    while let Some(block) = pending.pop() {
+        if bits[block / 64] & (1 << (block % 64)) != 0 {
+            continue;
+        }
+        bits[block / 64] |= 1 << (block % 64);
+        for successor in body.blocks[block].terminator.successors() {
+            pending.push(successor);
+        }
+    }
+    Reachable { bits }
+}
+
+/// Whether any statement or terminator in `data` mentions one of `locals`.
+fn mentions(data: &BasicBlock, locals: &[usize]) -> bool {
+    let place = |candidate: &MirPlace| locals.contains(&candidate.local);
+    let operand = |candidate: &MirOperand| match candidate {
+        MirOperand::Copy(location) | MirOperand::Move(location) => place(location),
+        MirOperand::Constant(_) | MirOperand::RuntimeChecks(_) => false,
+    };
+    let value = |rvalue: &Rvalue| match rvalue {
+        Rvalue::Use(candidate, _)
+        | Rvalue::UnaryOp(_, candidate)
+        | Rvalue::Cast(_, candidate, _) => operand(candidate),
+        Rvalue::BinaryOp(_, left, right) | Rvalue::CheckedBinaryOp(_, left, right) => {
+            operand(left) || operand(right)
+        }
+        Rvalue::Aggregate(_, operands) => operands.iter().any(operand),
+        _ => false,
+    };
+    if data
+        .statements
+        .iter()
+        .any(|statement| match &statement.kind {
+            StatementKind::Assign(destination, rvalue) => place(destination) || value(rvalue),
+            StatementKind::SetDiscriminant { place: target, .. } => place(target),
+            StatementKind::StorageLive(local) | StatementKind::StorageDead(local) => {
+                locals.contains(local)
+            }
+            StatementKind::FakeRead(_, target) | StatementKind::PlaceMention(target) => {
+                place(target)
+            }
+            _ => false,
+        })
+    {
+        return true;
+    }
+    match &data.terminator.kind {
+        TerminatorKind::SwitchInt { discr, .. } => operand(discr),
+        TerminatorKind::Call {
+            func,
+            args,
+            destination,
+            ..
+        } => operand(func) || args.iter().any(operand) || place(destination),
+        TerminatorKind::Assert { cond, .. } => operand(cond),
+        TerminatorKind::Drop { place: target, .. } => place(target),
+        _ => false,
     }
 }

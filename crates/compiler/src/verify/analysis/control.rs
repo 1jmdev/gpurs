@@ -1,20 +1,17 @@
 use std::iter;
 
 use rustc_data_structures::fx::FxHashSet;
-use rustc_middle::{
-    mir::{self, BinOp, Body, TerminatorKind},
-    ty,
-};
 
 use super::state::{Analysis, Region, State};
 use crate::{
     diagnostic,
+    stable::*,
     verify::symbolic::{Fact, Polynomial},
 };
 
 impl Analysis<'_, '_> {
     pub(super) fn successors(&mut self, block: usize, state: &State) -> Vec<(usize, Option<Fact>)> {
-        let terminator = self.body.basic_blocks[mir::BasicBlock::from_usize(block)].terminator();
+        let terminator = self.body.blocks[block].terminator.clone();
         if let TerminatorKind::SwitchInt { discr, targets } = &terminator.kind {
             let value = self.operand(discr, state);
             // Optimized MIR switches on `x` directly for `x == constant`; only unsigned values
@@ -23,10 +20,10 @@ impl Analysis<'_, '_> {
                 .expression
                 .clone()
                 .filter(|_| value.comparison.is_none())
-                .filter(|_| matches!(discr.ty(self.body, self.tcx).kind(), ty::Uint(_)));
-            let single = targets.iter().count() == 1;
+                .filter(|_| matches!(discr.ty(self.body.locals()), Ok(ty) if matches!(ty.kind(), TyKind::RigidTy(RigidTy::Uint(_)))));
+            let single = targets.branches().count() == 1;
             return targets
-                .iter()
+                .branches()
                 .map(|(constant, target)| {
                     let fact = match &integer {
                         Some(expression) => Some(Fact(
@@ -39,20 +36,20 @@ impl Analysis<'_, '_> {
                             .clone()
                             .map(|fact| if constant == 0 { negate(fact) } else { fact }),
                     };
-                    (target.as_usize(), fact)
+                    (target, fact)
                 })
                 .chain(iter::once((
-                    targets.otherwise().as_usize(),
+                    targets.otherwise(),
                     match &integer {
                         Some(expression) => single.then(|| {
                             Fact(
                                 BinOp::Ne,
                                 expression.clone(),
-                                Polynomial::constant(targets.iter().next().unwrap().0 as i128),
+                                Polynomial::constant(targets.branches().next().unwrap().0 as i128),
                             )
                         }),
                         None => value.comparison.clone().map(|fact| {
-                            if targets.iter().any(|(value, _)| value == 0) {
+                            if targets.branches().any(|(value, _)| value == 0) {
                                 fact
                             } else {
                                 negate(fact)
@@ -71,11 +68,11 @@ impl Analysis<'_, '_> {
         {
             let comparison = self.operand(cond, state).comparison;
             return vec![(
-                target.as_usize(),
+                *target,
                 comparison.map(|fact| if *expected { fact } else { negate(fact) }),
             )];
         }
-        normal_successors(self.body, block)
+        normal_successors(&self.body, block)
             .into_iter()
             .map(|block| (block, None))
             .collect()
@@ -90,14 +87,14 @@ impl Analysis<'_, '_> {
         {
             return;
         }
-        let count = self.body.basic_blocks.len();
+        let count = self.body.blocks.len();
         let all: FxHashSet<_> = (0..=count).collect();
         let mut postdominators = vec![all; count + 1];
         postdominators[count] = FxHashSet::from_iter([count]);
         loop {
             let mut changed = false;
             for block in (0..count).rev() {
-                let successors = normal_successors(self.body, block);
+                let successors = normal_successors(&self.body, block);
                 let successors = if successors.is_empty() {
                     vec![count]
                 } else {
@@ -117,19 +114,23 @@ impl Analysis<'_, '_> {
         }
         for (block, state) in states.iter().enumerate() {
             let Some(state) = state else { continue };
-            let terminator =
-                self.body.basic_blocks[mir::BasicBlock::from_usize(block)].terminator();
+            let terminator = self.body.blocks[block].terminator.clone();
             let TerminatorKind::SwitchInt { discr, targets } = &terminator.kind else {
                 continue;
             };
             let value = self.operand(discr, state);
             self.comparisons[block] = value.comparison.or_else(|| {
-                let [(constant, _)] = targets.iter().collect::<Vec<_>>()[..] else {
+                let [(constant, _)] = targets.branches().collect::<Vec<_>>()[..] else {
                     return None;
                 };
                 value
                     .expression
-                    .filter(|_| matches!(discr.ty(self.body, self.tcx).kind(), ty::Uint(_)))
+                    .filter(|_| {
+                        matches!(
+                            discr.ty(self.body.locals()).ok().map(|ty| ty.kind()),
+                            Some(TyKind::RigidTy(RigidTy::Uint(_)))
+                        )
+                    })
                     .map(|expression| {
                         Fact(
                             BinOp::Eq,
@@ -140,9 +141,9 @@ impl Analysis<'_, '_> {
             });
             let mut reconvergence = postdominators[block].clone();
             reconvergence.remove(&block);
-            for successor in normal_successors(self.body, block) {
+            for successor in normal_successors(&self.body, block) {
                 for target in 0..count {
-                    if reachable(self.body, successor, target, &reconvergence) {
+                    if reachable(&self.body, successor, target, &reconvergence) {
                         self.controls[target].push((block, successor));
                     }
                 }
@@ -150,14 +151,14 @@ impl Analysis<'_, '_> {
             for &(collective, permitted, span) in &self.collectives {
                 if value.variance > permitted
                     && !postdominators[block].contains(&collective)
-                    && reachable(self.body, block, collective, &reconvergence)
+                    && reachable(&self.body, block, collective, &reconvergence)
                 {
                     diagnostic::error(
-                        self.tcx,
+                        self.sess,
                         span,
                         format!(
                             "threads may reach this GPU collective on different control-flow paths in `{}`",
-                            self.instance
+                            self.instance.name()
                         ),
                         "move block barriers outside thread-dependent branches; warp collectives require every lane of the warp to participate",
                     );
@@ -184,7 +185,7 @@ fn negate(Fact(operation, left, right): Fact) -> Fact {
 }
 
 pub(super) fn reachable(
-    body: &Body<'_>,
+    body: &Body,
     start: usize,
     target: usize,
     barriers: &FxHashSet<usize>,
@@ -203,22 +204,13 @@ pub(super) fn reachable(
     false
 }
 
-pub(super) fn normal_successors(body: &Body<'_>, block: usize) -> Vec<usize> {
-    match &body.basic_blocks[mir::BasicBlock::from_usize(block)]
-        .terminator()
-        .kind
-    {
-        TerminatorKind::Call { target, .. } => {
-            target.iter().map(|block| block.as_usize()).collect()
-        }
+pub(super) fn normal_successors(body: &Body, block: usize) -> Vec<usize> {
+    let terminator = &body.blocks[block].terminator;
+    match &terminator.kind {
+        TerminatorKind::Call { target, .. } => target.iter().copied().collect(),
         TerminatorKind::Assert { target, .. } | TerminatorKind::Drop { target, .. } => {
-            vec![target.as_usize()]
+            vec![*target]
         }
-        _ => body.basic_blocks[mir::BasicBlock::from_usize(block)]
-            .terminator()
-            .successors()
-            .filter(|block| !body.basic_blocks[*block].is_cleanup)
-            .map(|block| block.as_usize())
-            .collect(),
+        _ => terminator.successors(),
     }
 }

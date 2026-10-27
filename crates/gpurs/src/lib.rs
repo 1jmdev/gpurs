@@ -3,7 +3,6 @@
 //! Annotate functions with [`gpu`] and call them from the host with a [`Stream`] and GPU
 //! buffers. Kernels are compiled by `gpurs-build` through rustc MIR, libNVVM, and ptxas, and
 //! embedded into the executable as CUBIN.
-#![feature(linkage)]
 
 mod buffer;
 mod device;

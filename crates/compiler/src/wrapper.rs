@@ -57,12 +57,24 @@ pub unsafe extern "C" fn gpurs_compiler_main(
     session(&device_arguments(rustc), &mut device)
 }
 
+#[cfg(gpurs_api_compiler_entrypoint)]
 fn session(arguments: &[String], callbacks: &mut (dyn Callbacks + Send)) -> c_int {
-    match panic::catch_unwind(AssertUnwindSafe(|| {
+    outcome(panic::catch_unwind(AssertUnwindSafe(|| {
         rustc_driver::catch_with_exit_code(|| {
             rustc_driver::compiler_entrypoint(arguments, callbacks)
         })
-    })) {
+    })))
+}
+
+#[cfg(not(gpurs_api_compiler_entrypoint))]
+fn session(arguments: &[String], callbacks: &mut (dyn Callbacks + Send)) -> c_int {
+    outcome(panic::catch_unwind(AssertUnwindSafe(|| {
+        rustc_driver::catch_with_exit_code(|| rustc_driver::run_compiler(arguments, callbacks))
+    })))
+}
+
+fn outcome(result: std::thread::Result<ExitCode>) -> c_int {
+    match result {
         Ok(ExitCode::SUCCESS) => 0,
         Ok(_) => 1,
         Err(_) => {

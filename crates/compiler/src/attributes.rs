@@ -1,44 +1,25 @@
 use gpurs_artifact::Primitive;
-use rustc_ast::attr::AttributeExt;
-use rustc_hir::def_id::DefId;
-use rustc_middle::ty::TyCtxt;
-use rustc_span::Symbol;
 
-pub fn marker(tcx: TyCtxt<'_>, def_id: DefId, name: &str) -> Option<String> {
-    let attributes = match def_id.as_local() {
-        Some(def_id) => tcx.hir_attrs(tcx.local_def_id_to_hir_id(def_id)),
-        None => tcx.attrs_for_def(def_id),
-    };
-    attributes
-        .iter()
-        .find(|attribute| {
-            attribute.path_matches(&[Symbol::intern("gpurs_tool"), Symbol::intern(name)])
-        })
-        .map(|attribute| {
-            attribute
-                .value_str()
-                .map_or_else(String::new, |value| value.to_string())
-        })
+use crate::stable::{DefId, Sess};
+
+pub fn marker(sess: Sess<'_>, def: DefId, name: &str) -> Option<String> {
+    sess.tool_attr(def, name)
 }
 
-pub fn is_device(tcx: TyCtxt<'_>, def_id: DefId) -> bool {
-    marker(tcx, def_id, "device").is_some()
-        || (tcx.is_closure_like(def_id) && is_device(tcx, tcx.typeck_root_def_id(def_id)))
+pub fn is_device(sess: Sess<'_>, def: DefId) -> bool {
+    marker(sess, def, "device").is_some()
+        || (sess.is_closure_like(def) && is_device(sess, sess.typeck_root(def)))
 }
 
-pub fn is_fast_math(tcx: TyCtxt<'_>, def_id: DefId) -> bool {
-    marker(tcx, tcx.typeck_root_def_id(def_id), "fast_math").is_some()
+pub fn is_fast_math(sess: Sess<'_>, def: DefId) -> bool {
+    marker(sess, sess.typeck_root(def), "fast_math").is_some()
 }
 
-/// The `#[gpurs::primitive]` definition of `def_id`, or of the trait item it implements.
-pub fn primitive(tcx: TyCtxt<'_>, def_id: DefId) -> Option<Primitive> {
-    if def_id.is_local() || tcx.crate_name(def_id.krate).as_str() != "gpurs" {
+/// The `#[gpurs::primitive]` definition of `def`, or of the trait item it implements.
+pub fn primitive(sess: Sess<'_>, def: DefId) -> Option<Primitive> {
+    if sess.is_local(def) || sess.crate_name(def) != "gpurs" {
         return None;
     }
-    marker(
-        tcx,
-        tcx.trait_item_of(def_id).unwrap_or(def_id),
-        "primitive",
-    )
-    .map(|text| Primitive::decode(&text))
+    marker(sess, sess.trait_item_of(def).unwrap_or(def), "primitive")
+        .map(|text| Primitive::decode(&text))
 }

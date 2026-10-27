@@ -1,8 +1,5 @@
-use rustc_middle::ty::TyCtxt;
-use rustc_span::Span;
+use crate::stable::{Sess, Span};
 
-pub fn error(tcx: TyCtxt<'_>, span: Span, message: impl Into<String>, help: &'static str) {
-    let mut diagnostic = tcx.dcx().struct_span_err(span, message.into());
-    diagnostic.help(help);
-    diagnostic.emit();
+pub fn error(sess: Sess<'_>, span: Span, message: impl Into<String>, help: &'static str) {
+    sess.error_help(span, message, help);
 }

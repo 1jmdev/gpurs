@@ -6,7 +6,7 @@ use std::{
     slice,
 };
 
-use gpurs_artifact::{ARTIFACT_SYMBOL, Artifact, Kernel};
+use gpurs_artifact::{Artifact, Kernel};
 use gpurs_driver::{self as driver, Context, DevicePointer, Function, Module};
 
 use crate::{
@@ -239,18 +239,11 @@ impl Drop for Device {
 
 fn embedded_artifact() -> Artifact {
     unsafe extern "C" {
-        #[linkage = "extern_weak"]
         #[link_name = "__gpurs_artifact"]
         static ARTIFACT: *const u64;
     }
-    // SAFETY: a weak symbol's address is null when no artifact was linked.
-    let header = unsafe { ARTIFACT };
-    if header.is_null() {
-        panic!(
-            "no GPU artifact (`{ARTIFACT_SYMBOL}`) is linked into this executable; \
-             call gpurs_build::compile in build.rs"
-        );
-    }
+    // SAFETY: `gpurs-build` links the artifact into every binary that depends on gpurs.
+    let header = std::ptr::addr_of!(ARTIFACT).cast::<u64>();
     // SAFETY: `gpurs-build` emits the artifact as a little-endian length followed by its bytes.
     let bytes = unsafe {
         let length = header.read_unaligned() as usize;

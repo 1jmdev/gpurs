@@ -6,7 +6,7 @@ gpurs lets you write NVIDIA GPU kernels in Rust and launch them from Rust. Mark 
 
 - An NVIDIA GPU and driver.
 - The CUDA toolkit, including libNVVM and `ptxas`. gpurs searches `CUDA_PATH`, `CUDA_HOME`, `/opt/cuda`, and `/usr/local/cuda`.
-- The nightly Rust toolchain and components specified in [rust-toolchain.toml](rust-toolchain.toml). Projects using gpurs need the same toolchain.
+- Rust `1.99` or newer (stable or nightly) with the `rustc-dev` component installed. No pinned toolchain is required.
 
 ## Setup
 

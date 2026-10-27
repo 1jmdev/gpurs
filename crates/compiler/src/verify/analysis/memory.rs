@@ -1,5 +1,4 @@
 use rustc_data_structures::fx::FxHashSet;
-use rustc_middle::mir::BinOp;
 
 use super::{
     control,
@@ -7,6 +6,7 @@ use super::{
 };
 use crate::{
     diagnostic,
+    stable::*,
     verify::{
         proof,
         symbolic::{Atom, Fact, Polynomial},
@@ -29,11 +29,11 @@ impl Analysis<'_, '_> {
             });
             if !access.atomic && proof.is_none() {
                 diagnostic::error(
-                    self.tcx,
+                    self.sess,
                     access.span,
                     format!(
                         "multiple GPU threads may write the same memory location in `{}`",
-                        self.instance
+                        self.instance.name()
                     ),
                     "use a distinct thread index for each write, an atomic operation, or a verified single-writer guard",
                 );
@@ -62,8 +62,8 @@ impl Analysis<'_, '_> {
                 }
                 let separated = shared
                     && access.block != other.block
-                    && !control::reachable(self.body, access.block, other.block, &self.barriers)
-                    && !control::reachable(self.body, other.block, access.block, &self.barriers);
+                    && !control::reachable(&self.body, access.block, other.block, &self.barriers)
+                    && !control::reachable(&self.body, other.block, access.block, &self.barriers);
                 let warp = Polynomial::atom(Atom::Quotient(
                     Box::new(Polynomial::atom(Atom::Thread(0))),
                     32,
@@ -92,13 +92,13 @@ impl Analysis<'_, '_> {
                         && owner(&access.facts) == owner(&other.facts)
                         && access.block != other.block
                         && !control::reachable(
-                            self.body,
+                            &self.body,
                             access.block,
                             other.block,
                             &warp_barriers,
                         )
                         && !control::reachable(
-                            self.body,
+                            &self.body,
                             other.block,
                             access.block,
                             &warp_barriers,
@@ -106,14 +106,12 @@ impl Analysis<'_, '_> {
                 if !separated
                     && (access.origin.index != other.origin.index || access.atomic != other.atomic)
                 {
-                    let mut diagnostic = self
-                        .tcx
-                        .dcx()
-                        .struct_span_err(other.span, "GPU memory accesses may race");
-                    diagnostic.span_label(access.span, "this write may overlap the access below");
-                    diagnostic.span_label(other.span, "this access is not ordered after the write");
-                    diagnostic.help("use the same distinct per-thread index, or separate shared-memory phases with gpu::sync_block()");
-                    diagnostic.emit();
+                    diagnostic::error(
+                        self.sess,
+                        other.span,
+                        "GPU memory accesses may race",
+                        "use the same distinct per-thread index, or separate shared-memory phases with gpu::sync_block()",
+                    );
                 }
             }
         }
@@ -129,9 +127,9 @@ impl Analysis<'_, '_> {
                 .iter()
                 .filter(|write| write.write && write.origin.region == access.origin.region)
                 .find_map(|write| {
-                    if control::reachable(self.body, write.block, access.block, &self.barriers)
+                    if control::reachable(&self.body, write.block, access.block, &self.barriers)
                         || !control::reachable(
-                            self.body,
+                            &self.body,
                             write.block,
                             access.block,
                             &FxHashSet::default(),
@@ -175,7 +173,7 @@ impl Analysis<'_, '_> {
                 self.conditions.extend(conditions);
             } else {
                 diagnostic::error(
-                    self.tcx,
+                    self.sess,
                     access.span,
                     "shared memory may be read before it is initialized",
                     "initialize every shared-memory element, then call gpu::sync_block() before other threads read it",

@@ -4,33 +4,30 @@ use gpurs_artifact::{
     Bound, Condition, Expression, Extent, Failure, INPUT_CAPACITY, INPUTS_OFFSET, Kernel,
     PARAMETERS_OFFSET, Parameter, RESULT_OFFSET, Relation, Value, Variant, parameter_offsets,
 };
-use rustc_middle::{
-    mir::BasicBlock,
-    ty::{Instance, layout::TyAndLayout},
-};
 
-use super::{function::FunctionBuilder, module::ModuleBuilder, place::Place};
+use super::{function::FunctionBuilder, layout::Shape, module::ModuleBuilder, place::Place};
+use crate::{stable, stable::*};
 
-#[derive(Clone, Copy)]
-pub struct KernelParameter<'tcx> {
-    pub layout: TyAndLayout<'tcx>,
+#[derive(Clone)]
+pub struct KernelParameter {
+    pub layout: Shape,
     pub metadata: Parameter,
 }
 
 #[derive(Clone)]
-pub struct KernelPlan<'tcx> {
-    pub instance: Instance<'tcx>,
+pub struct KernelPlan {
+    pub instance: Instance,
     pub key: String,
     pub symbol: String,
-    pub parameters: Vec<KernelParameter<'tcx>>,
+    pub parameters: Vec<KernelParameter>,
     pub extent: Extent,
     pub conditions: Vec<Condition>,
     /// Assertions of the kernel body, by block, that cannot fail when their bound holds.
     pub proofs: Vec<(usize, Bound)>,
 }
 
-impl<'tcx> ModuleBuilder<'tcx> {
-    pub fn kernel(&mut self, plan: KernelPlan<'tcx>) -> Kernel {
+impl<'sess> ModuleBuilder<'sess> {
+    pub fn kernel(&mut self, plan: KernelPlan) -> Kernel {
         let dimensions = std::array::from_fn(|index| {
             let dimension = if index < 3 {
                 Expression::BlockDimension(index)
@@ -63,11 +60,7 @@ impl<'tcx> ModuleBuilder<'tcx> {
         self.entry(&plan, &plan.symbol, root);
         let fast = (!plan.proofs.is_empty()).then(|| {
             let symbol = format!("{}_fast", plan.symbol);
-            let skipped = plan
-                .proofs
-                .iter()
-                .map(|(block, _)| BasicBlock::from_usize(*block))
-                .collect();
+            let skipped = plan.proofs.iter().map(|(block, _)| *block).collect();
             let root = self.variant(plan.instance, skipped);
             self.entry(&plan, &symbol, root);
             Variant {
@@ -79,16 +72,16 @@ impl<'tcx> ModuleBuilder<'tcx> {
         Kernel {
             key: plan.key,
             symbol: plan.symbol,
-            name: plan.instance.to_string(),
+            name: plan.instance.name(),
             parameters: plan
                 .parameters
                 .iter()
                 .map(|parameter| parameter.metadata)
                 .collect(),
             extent: plan.extent,
-            result: (!signature.result.1.ty.is_unit()).then_some(Value {
-                size: signature.result.1.size.bytes(),
-                align: signature.result.1.align.abi.bytes(),
+            result: (!is_unit(&signature.result.1)).then_some(Value {
+                size: signature.result.1.size().bytes() as u64,
+                align: signature.result.1.align(),
             }),
             conditions: plan.conditions,
             fast,
@@ -97,7 +90,7 @@ impl<'tcx> ModuleBuilder<'tcx> {
     }
 
     /// Emits the entry point `symbol`, which runs the launch protocol around a call to `root`.
-    fn entry(&mut self, plan: &KernelPlan<'tcx>, symbol: &str, root: String) {
+    fn entry(&mut self, plan: &KernelPlan, symbol: &str, root: String) {
         let parameters: Vec<_> = plan
             .parameters
             .iter()
@@ -111,9 +104,9 @@ impl<'tcx> ModuleBuilder<'tcx> {
             .unwrap_or(8)
             .max(8);
         let signature = self.signature(plan.instance);
-        let result = (!signature.result.1.ty.is_unit()).then_some(Value {
-            size: signature.result.1.size.bytes(),
-            align: signature.result.1.align.abi.bytes(),
+        let result = (!is_unit(&signature.result.1)).then_some(Value {
+            size: signature.result.1.size().bytes() as u64,
+            align: signature.result.1.align(),
         });
         let argument_offset = if self.checked {
             0
@@ -209,10 +202,10 @@ impl<'tcx> ModuleBuilder<'tcx> {
             .zip(offsets)
             .map(|(parameter, offset)| {
                 let pointer = function.offset(&arguments, offset - argument_offset);
-                function.load(&Place::new(pointer, parameter.layout))
+                function.load(&Place::new(pointer, parameter.layout.clone()))
             })
             .collect();
-        let destination = function.temporary(signature.result.1);
+        let destination = function.temporary(signature.result.1.clone());
         function.invoke_named(&root, plan.instance, &operands, &destination);
         if let Some(result) = result {
             let mut block =
@@ -238,7 +231,7 @@ impl<'tcx> ModuleBuilder<'tcx> {
                 "getelementptr inbounds i8, i8* {pointer}, i64 {offset}"
             ));
             let value = function.load(&destination);
-            function.store(&Place::new(pointer, destination.layout), &value);
+            function.store(&Place::new(pointer, destination.shape.clone()), &value);
         }
         function.emit("ret void");
         function.start_block("failed");
@@ -265,4 +258,8 @@ impl<'tcx> ModuleBuilder<'tcx> {
             ));
         }
     }
+}
+
+fn is_unit(shape: &Shape) -> bool {
+    matches!(stable::rigid(shape.ty), RigidTy::Tuple(fields) if fields.is_empty())
 }

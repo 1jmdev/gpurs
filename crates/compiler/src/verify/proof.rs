@@ -1,9 +1,9 @@
 use std::collections::BTreeSet;
 
 use gpurs_artifact::{Condition, Expression, Relation};
-use rustc_middle::mir::BinOp;
 
 use super::symbolic::{Atom, Fact, Polynomial};
+use crate::stable::*;
 
 pub fn injective(expression: &Polynomial, facts: &[Fact], shared: bool) -> Option<Vec<Condition>> {
     let mut conditions = Vec::new();

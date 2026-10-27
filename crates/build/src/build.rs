@@ -62,6 +62,7 @@ pub fn compile(architecture: &str) {
         .arg(private.join("device"))
         .args((variable("PROFILE") == "release").then_some("--release"))
         .env("RUSTC", variable("RUSTC"))
+        .env("RUSTC_BOOTSTRAP", "1")
         .env("RUSTC_WRAPPER", &wrapper)
         .env("CARGO_ENCODED_RUSTFLAGS", format!("-Zalways-encode-mir\u{1f}-Zmir-opt-level=2\u{1f}-Zinline-mir=no\u{1f}-Copt-level=3\u{1f}-Coverflow-checks=on\u{1f}-Cmetadata={}", identity(architecture)))
         // librustc_driver uses initial-exec TLS, which needs room when loaded with dlopen.

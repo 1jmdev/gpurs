@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use rustc_middle::mir::BinOp;
+use crate::stable::*;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Fact(pub BinOp, pub Polynomial, pub Polynomial);

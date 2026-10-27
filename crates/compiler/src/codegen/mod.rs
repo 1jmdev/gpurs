@@ -9,10 +9,11 @@ mod constant;
 mod function;
 mod intrinsic;
 mod kernel;
-mod layout;
+pub(crate) mod layout;
 mod module;
 mod place;
 mod rvalue;
 
 pub use kernel::{KernelParameter, KernelPlan};
+pub(crate) use layout::Shape;
 pub use module::ModuleBuilder;
