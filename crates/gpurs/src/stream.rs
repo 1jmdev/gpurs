@@ -52,6 +52,11 @@ pub(crate) mod sealed {
 }
 
 impl Stream {
+    #[doc(hidden)]
+    pub fn benchmark_raw(&self) -> *mut std::ffi::c_void {
+        self.raw.raw
+    }
+
     pub(crate) fn new(device: Rc<Device>) -> Self {
         Stream {
             device,

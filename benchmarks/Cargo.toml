@@ -1,0 +1,11 @@
+[package]
+name = "gpurs-benchmarks"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+gpurs.workspace = true
+
+[build-dependencies]
+gpurs-build.workspace = true

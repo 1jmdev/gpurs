@@ -75,6 +75,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "gpurs-benchmarks"
+version = "0.1.0"
+dependencies = [
+ "gpurs",
+ "gpurs-build",
+]
+
+[[package]]
 name = "gpurs-build"
 version = "0.1.0"
 dependencies = [
