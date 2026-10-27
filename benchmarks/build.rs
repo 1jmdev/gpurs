@@ -8,7 +8,11 @@ fn main() {
         Command::new("nvcc")
             .args([
                 "-O3",
-                "--fmad=false",
+                "--fmad=true",
+                "--prec-div=true",
+                "--prec-sqrt=true",
+                "--ftz=false",
+                "--restrict",
                 "-std=c++17",
                 "-c",
                 "reference.cu",

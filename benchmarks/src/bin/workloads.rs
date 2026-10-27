@@ -6,10 +6,10 @@ const TILE: usize = 16;
 const BLOCK: usize = 256;
 
 unsafe extern "C" {
-    fn benchmark_event_create() -> *mut c_void;
-    fn benchmark_event_record(event: *mut c_void, stream: *mut c_void);
-    fn benchmark_event_elapsed(start: *mut c_void, end: *mut c_void) -> f32;
-    fn benchmark_event_destroy(event: *mut c_void);
+    fn benchmark_capture_begin(stream: *mut c_void) -> *mut c_void;
+    fn benchmark_capture_end(graph: *mut c_void, stream: *mut c_void);
+    fn benchmark_graph_time(graph: *mut c_void, stream: *mut c_void, iterations: u32) -> f32;
+    fn benchmark_graph_destroy(graph: *mut c_void);
     fn benchmark_workload(
         operation: u32,
         input: *const f32,
@@ -181,32 +181,37 @@ fn main() {
                 run();
             }
             stream.synchronize();
-            let iterations = 20;
+            let iterations = 32;
             // SAFETY: the events, stream, and host buffers remain valid until the work completes.
             let (gpurs_time, cuda_time) = unsafe {
-                let start = benchmark_event_create();
-                let end = benchmark_event_create();
+                let graph = benchmark_capture_begin(stream.benchmark_raw());
+                for _ in 0..iterations {
+                    run();
+                }
+                benchmark_capture_end(graph, stream.benchmark_raw());
                 let mut gpurs_times = Vec::new();
                 let mut cuda_times = Vec::new();
-                for _ in 0..5 {
-                    benchmark_event_record(start, stream.benchmark_raw());
-                    for _ in 0..iterations {
-                        run();
+                for batch in 0..5 {
+                    for implementation in [batch % 2, 1 - batch % 2] {
+                        if implementation == 0 {
+                            gpurs_times.push(benchmark_graph_time(
+                                graph,
+                                stream.benchmark_raw(),
+                                iterations,
+                            ));
+                        } else {
+                            cuda_times.push(benchmark_workload(
+                                operation as u32,
+                                input.as_ptr(),
+                                weights.as_ptr(),
+                                reference.as_mut_ptr(),
+                                size,
+                                iterations,
+                            ));
+                        }
                     }
-                    benchmark_event_record(end, stream.benchmark_raw());
-                    gpurs_times.push(benchmark_event_elapsed(start, end) / iterations as f32);
-                    stream.synchronize();
-                    cuda_times.push(benchmark_workload(
-                        operation as u32,
-                        input.as_ptr(),
-                        weights.as_ptr(),
-                        reference.as_mut_ptr(),
-                        size,
-                        iterations,
-                    ));
                 }
-                benchmark_event_destroy(start);
-                benchmark_event_destroy(end);
+                benchmark_graph_destroy(graph);
                 gpurs_times.sort_by(f32::total_cmp);
                 cuda_times.sort_by(f32::total_cmp);
                 (gpurs_times[2], cuda_times[2])

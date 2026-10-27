@@ -13,7 +13,8 @@
   } while (0)
 
 template <int operation>
-__global__ void reference(const uint32_t *left, const uint32_t *right,
+__global__ void reference(const uint32_t *left, size_t left_count,
+                          const uint32_t *right, size_t right_count,
                           uint32_t *output, size_t count) {
   size_t index = blockIdx.x * blockDim.x + threadIdx.x;
   if (index >= count)
@@ -58,9 +59,9 @@ __global__ void reference(const uint32_t *left, const uint32_t *right,
   if constexpr (operation == 17)
     value = ~a;
   if constexpr (operation == 18)
-    value = left[count - 1 - index];
+    value = left[left_count - 1 - index];
   if constexpr (operation == 19)
-    value = left[(index + 1) % count];
+    value = left[(index + 1) % left_count];
   if constexpr (operation == 20) {
     value = a;
     for (int step = 0; step < 4; ++step)
@@ -80,27 +81,52 @@ __global__ void reference(const uint32_t *left, const uint32_t *right,
   output[index] = value;
 }
 
-extern "C" void *benchmark_event_create() {
-  cudaEvent_t event;
-  CUDA(cudaEventCreate(&event));
-  return event;
+struct BenchmarkGraph {
+  cudaGraphExec_t executable;
+  cudaEvent_t start, end;
+};
+
+extern "C" void *benchmark_capture_begin(void *stream) {
+  auto graph = new BenchmarkGraph;
+  CUDA(cudaEventCreate(&graph->start));
+  CUDA(cudaEventCreate(&graph->end));
+  CUDA(cudaStreamBeginCapture(static_cast<cudaStream_t>(stream),
+                              cudaStreamCaptureModeRelaxed));
+  CUDA(cudaEventRecordWithFlags(graph->start, static_cast<cudaStream_t>(stream),
+                               cudaEventRecordExternal));
+  return graph;
 }
 
-extern "C" void benchmark_event_record(void *event, void *stream) {
-  CUDA(cudaEventRecord(static_cast<cudaEvent_t>(event),
-                       static_cast<cudaStream_t>(stream)));
+extern "C" void benchmark_capture_end(void *graph, void *stream) {
+  auto capture = static_cast<BenchmarkGraph *>(graph);
+  cudaGraph_t definition;
+  CUDA(cudaEventRecordWithFlags(capture->end, static_cast<cudaStream_t>(stream),
+                               cudaEventRecordExternal));
+  CUDA(cudaStreamEndCapture(static_cast<cudaStream_t>(stream), &definition));
+  CUDA(cudaGraphInstantiate(&capture->executable, definition, 0));
+  CUDA(cudaGraphDestroy(definition));
+  CUDA(cudaGraphUpload(capture->executable, static_cast<cudaStream_t>(stream)));
 }
 
-extern "C" float benchmark_event_elapsed(void *start, void *end) {
+extern "C" float benchmark_graph_time(void *graph, void *stream,
+                                       unsigned iterations) {
+  auto capture = static_cast<BenchmarkGraph *>(graph);
+  auto queue = static_cast<cudaStream_t>(stream);
+  CUDA(cudaGraphLaunch(capture->executable, queue));
+  CUDA(cudaStreamSynchronize(queue));
+  CUDA(cudaGraphLaunch(capture->executable, queue));
+  CUDA(cudaStreamSynchronize(queue));
   float milliseconds;
-  CUDA(cudaEventSynchronize(static_cast<cudaEvent_t>(end)));
-  CUDA(cudaEventElapsedTime(&milliseconds, static_cast<cudaEvent_t>(start),
-                            static_cast<cudaEvent_t>(end)));
-  return milliseconds;
+  CUDA(cudaEventElapsedTime(&milliseconds, capture->start, capture->end));
+  return milliseconds / iterations;
 }
 
-extern "C" void benchmark_event_destroy(void *event) {
-  CUDA(cudaEventDestroy(static_cast<cudaEvent_t>(event)));
+extern "C" void benchmark_graph_destroy(void *graph) {
+  auto capture = static_cast<BenchmarkGraph *>(graph);
+  CUDA(cudaGraphExecDestroy(capture->executable));
+  CUDA(cudaEventDestroy(capture->start));
+  CUDA(cudaEventDestroy(capture->end));
+  delete capture;
 }
 
 extern "C" float benchmark_reference(int operation, const uint32_t *left,
@@ -122,8 +148,8 @@ extern "C" float benchmark_reference(int operation, const uint32_t *left,
     switch (operation) {
 #define CASE(n)                                                                \
   case n:                                                                      \
-    reference<n><<<grid, block, 0, stream>>>(device_left, device_right,        \
-                                             device_output, count);            \
+    reference<n><<<grid, block, 0, stream>>>(device_left, count, device_right,    \
+                                            count, device_output, count);       \
     break;
       CASE(0)
       CASE(1) CASE(2) CASE(3) CASE(4) CASE(5) CASE(6) CASE(7) CASE(8) CASE(9)
@@ -136,30 +162,26 @@ extern "C" float benchmark_reference(int operation, const uint32_t *left,
   };
   for (int warmup = 0; warmup < 10; ++warmup)
     launch();
-  cudaEvent_t start, end;
-  CUDA(cudaEventCreate(&start));
-  CUDA(cudaEventCreate(&end));
-  CUDA(cudaEventRecord(start, stream));
+  CUDA(cudaStreamSynchronize(stream));
+  void *graph = benchmark_capture_begin(stream);
   for (unsigned iteration = 0; iteration < iterations; ++iteration)
     launch();
-  CUDA(cudaEventRecord(end, stream));
-  CUDA(cudaEventSynchronize(end));
-  float milliseconds;
-  CUDA(cudaEventElapsedTime(&milliseconds, start, end));
+  benchmark_capture_end(graph, stream);
+  float milliseconds = benchmark_graph_time(graph, stream, iterations);
+  benchmark_graph_destroy(graph);
   CUDA(cudaMemcpyAsync(output, device_output, count * sizeof(uint32_t),
                        cudaMemcpyDeviceToHost, stream));
   CUDA(cudaStreamSynchronize(stream));
-  CUDA(cudaEventDestroy(start));
-  CUDA(cudaEventDestroy(end));
   CUDA(cudaFree(device_left));
   CUDA(cudaFree(device_right));
   CUDA(cudaFree(device_output));
   CUDA(cudaStreamDestroy(stream));
-  return milliseconds / iterations;
+  return milliseconds;
 }
 
-__global__ void workload_matrix(const float *input, const float *weights,
-                                float *output, size_t size) {
+__global__ void workload_matrix(const float *input, size_t input_count,
+                                const float *weights, size_t weight_count,
+                                float *output, size_t output_count, size_t size) {
   __shared__ float input_tile[256];
   __shared__ float weight_tile[256];
   size_t row = blockIdx.y * 16 + threadIdx.y;
@@ -185,10 +207,12 @@ __global__ void workload_matrix(const float *input, const float *weights,
     output[row * size + column] = total;
 }
 
-__global__ void workload_convolution(const float *input, const float *weights,
-                                     float *output, size_t size) {
+__global__ void workload_convolution(const float *input, size_t input_count,
+                                     const float *weights, size_t weight_count,
+                                     float *output, size_t output_count,
+                                     size_t size) {
   size_t index = blockIdx.x * blockDim.x + threadIdx.x;
-  if (index < size * size) {
+  if (index < output_count) {
     size_t row = index / size;
     size_t column = index % size;
     float total = 0.0f;
@@ -204,8 +228,8 @@ __global__ void workload_convolution(const float *input, const float *weights,
   }
 }
 
-__global__ void workload_reduction(const float *input, float *output,
-                                   size_t count) {
+__global__ void workload_reduction(const float *input, size_t count,
+                                   float *output, size_t output_count) {
   __shared__ float values[8];
   size_t index = blockIdx.x * blockDim.x + threadIdx.x;
   size_t thread = threadIdx.x;
@@ -226,10 +250,10 @@ __global__ void workload_reduction(const float *input, float *output,
   }
 }
 
-__global__ void workload_normalization(const float *input, float *output,
-                                       size_t count) {
+__global__ void workload_normalization(const float *input, size_t count,
+                                       float *output, size_t output_count) {
   size_t index = blockIdx.x * blockDim.x + threadIdx.x;
-  if (index < count) {
+  if (index < output_count) {
     size_t start = index / 32 * 32;
     float sum = 0.0f;
     float squares = 0.0f;
@@ -251,6 +275,7 @@ extern "C" float benchmark_workload(unsigned operation, const float *input,
                                     const float *weights, float *output,
                                     size_t size, unsigned iterations) {
   size_t count = size * size;
+  size_t weight_count = max(count, size_t(25));
   size_t output_count = operation == 2 ? (count + 255) / 256 : count;
   float *device_input, *device_weights, *device_output;
   cudaStream_t stream;
@@ -265,39 +290,36 @@ extern "C" float benchmark_workload(unsigned operation, const float *input,
   auto launch = [&] {
     if (operation == 0)
       workload_matrix<<<dim3((size + 15) / 16, (size + 15) / 16),
-                        dim3(16, 16), 0, stream>>>(device_input, device_weights,
-                                                   device_output, size);
+                        dim3(16, 16), 0, stream>>>(device_input, count, device_weights,
+                                                   weight_count, device_output,
+                                                   output_count, size);
     if (operation == 1)
       workload_convolution<<<(count + 255) / 256, 256, 0, stream>>>(
-          device_input, device_weights, device_output, size);
+          device_input, count, device_weights, weight_count, device_output,
+          output_count, size);
     if (operation == 2)
       workload_reduction<<<(count + 255) / 256, 256, 0, stream>>>(
-          device_input, device_output, count);
+          device_input, count, device_output, output_count);
     if (operation == 3)
       workload_normalization<<<(count + 255) / 256, 256, 0, stream>>>(
-          device_input, device_output, count);
+          device_input, count, device_output, output_count);
     CUDA(cudaGetLastError());
   };
   for (int warmup = 0; warmup < 5; ++warmup)
     launch();
-  cudaEvent_t start, end;
-  CUDA(cudaEventCreate(&start));
-  CUDA(cudaEventCreate(&end));
-  CUDA(cudaEventRecord(start, stream));
+  CUDA(cudaStreamSynchronize(stream));
+  void *graph = benchmark_capture_begin(stream);
   for (unsigned iteration = 0; iteration < iterations; ++iteration)
     launch();
-  CUDA(cudaEventRecord(end, stream));
-  CUDA(cudaEventSynchronize(end));
-  float milliseconds;
-  CUDA(cudaEventElapsedTime(&milliseconds, start, end));
+  benchmark_capture_end(graph, stream);
+  float milliseconds = benchmark_graph_time(graph, stream, iterations);
+  benchmark_graph_destroy(graph);
   CUDA(cudaMemcpyAsync(output, device_output, output_count * sizeof(float),
                        cudaMemcpyDeviceToHost, stream));
   CUDA(cudaStreamSynchronize(stream));
-  CUDA(cudaEventDestroy(start));
-  CUDA(cudaEventDestroy(end));
   CUDA(cudaFree(device_input));
   CUDA(cudaFree(device_weights));
   CUDA(cudaFree(device_output));
   CUDA(cudaStreamDestroy(stream));
-  return milliseconds / iterations;
+  return milliseconds;
 }
