@@ -29,6 +29,7 @@ mod diagnostic;
 mod discovery;
 mod nvvm;
 mod paths;
+mod policy;
 mod stable;
 mod transfer;
 mod verify;

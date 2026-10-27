@@ -19,7 +19,7 @@ pub struct ModuleBuilder<'sess> {
     functions: FxHashMap<Instance, String>,
     queue: Vec<Instance>,
     /// Copies of kernel bodies that skip the assertions in the proven blocks.
-    variants: Vec<(Instance, String, FxHashSet<usize>)>,
+    variants: Vec<(Instance, String, FxHashSet<usize>, FxHashSet<usize>, bool)>,
     pub(super) allocations: FxHashMap<AllocId, ir::Value>,
 }
 
@@ -63,10 +63,18 @@ impl<'sess> ModuleBuilder<'sess> {
         name
     }
 
-    /// Name of a copy of `instance` that omits the assertions ending the `skipped` blocks.
-    pub fn variant(&mut self, instance: Instance, skipped: FxHashSet<usize>) -> String {
+    /// Name of a copy of `instance` that omits the assertions ending the `skipped` blocks and
+    /// the checked accessors of the `shared` blocks, and folds the launch geometry when `linear`.
+    pub fn variant(
+        &mut self,
+        instance: Instance,
+        skipped: FxHashSet<usize>,
+        shared: FxHashSet<usize>,
+        linear: bool,
+    ) -> String {
         let name = format!("gpurs.v{}", self.variants.len());
-        self.variants.push((instance, name.clone(), skipped));
+        self.variants
+            .push((instance, name.clone(), skipped, shared, linear));
         name
     }
 
@@ -90,9 +98,11 @@ impl<'sess> ModuleBuilder<'sess> {
 
     /// Lowers every queued function and renders the module.
     pub fn finish(mut self) -> String {
-        for (instance, name, skipped) in mem::take(&mut self.variants) {
+        for (instance, name, skipped, shared, linear) in mem::take(&mut self.variants) {
             let mut builder = FunctionBuilder::new(&mut self, instance);
             builder.skipped = skipped;
+            builder.unchecked_shared = shared;
+            builder.linear = linear;
             builder.lower(&name);
         }
         while let Some(instance) = self.queue.pop() {

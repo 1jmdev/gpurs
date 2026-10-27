@@ -374,7 +374,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                     "ntid.z", "nctaid.x", "nctaid.y", "nctaid.z",
                 ]
                 .map(|name| self.extended_register(name));
-                self.linear_index(&registers, Flags::NUW)
+                self.linear_index(&registers)
             }
             Lowering::Barrier => return self.barrier(),
             Lowering::Call { symbol, operands } => {
@@ -421,9 +421,19 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
     }
 
     /// The linear thread index from the twelve geometry registers, in `tid`, `ctaid`, `ntid`,
-    /// `nctaid` order.
-    pub(super) fn linear_index(&mut self, registers: &[ir::Value; 12], flags: Flags) -> ir::Value {
+    /// `nctaid` order. The arithmetic is 32-bit, as the geometry registers are, and only the
+    /// result is widened for slice offsets. A one-dimensional launch uses the x axis alone.
+    pub(super) fn linear_index(&mut self, registers: &[ir::Value; 12]) -> ir::Value {
+        let flags = Flags::empty();
+        let registers = registers
+            .clone()
+            .map(|value| self.ir.cast(Conversion::Trunc, value, Type::I32));
         let [tx, ty, tz, bx, by, bz, nx, ny, nz, gx, gy, _] = registers.clone();
+        if self.linear {
+            let offset = self.ir.binary(Binary::Mul, flags, bx, nx);
+            let index = self.ir.binary(Binary::Add, flags, offset, tx);
+            return self.ir.cast(Conversion::ZExt, index, Type::I64);
+        }
         let mut multiply_add = |product: ir::Value, factor, addend| {
             let product = self.ir.binary(Binary::Mul, flags, product, factor);
             self.ir.binary(Binary::Add, flags, product, addend)
@@ -435,7 +445,8 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
         let count = self.ir.binary(Binary::Mul, flags, nx, ny);
         let count = self.ir.binary(Binary::Mul, flags, count, nz);
         let offset = self.ir.binary(Binary::Mul, flags, block, count);
-        self.ir.binary(Binary::Add, flags, offset, thread)
+        let index = self.ir.binary(Binary::Add, flags, offset, thread);
+        self.ir.cast(Conversion::ZExt, index, Type::I64)
     }
 
     fn extended_register(&mut self, register: &str) -> ir::Value {

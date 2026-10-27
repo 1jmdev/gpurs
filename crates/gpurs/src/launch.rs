@@ -216,10 +216,13 @@ impl<S: Launch> KernelLaunch<'_, S> {
                 shared_bytes: 0,
             },
             Extent::Length(parameter) => {
-                let block = *self
-                    .kernel
-                    .block_size
-                    .get_or_init(|| self.kernel.function.preferred_block_size().clamp(32, 1024));
+                let block = *self.kernel.block_size.get_or_init(|| {
+                    self.kernel
+                        .checking
+                        .general
+                        .preferred_block_size()
+                        .clamp(32, 1024)
+                });
                 let threads = self.lengths[parameter] as usize;
                 LaunchConfig {
                     grid: [threads.div_ceil(block as usize), 1, 1],
@@ -320,11 +323,16 @@ impl<S: Launch> KernelLaunch<'_, S> {
         }
         let dimensions = |values: [usize; 3]| values.map(|value| value as u32);
         let infallible = sources.is_empty() && infallible;
-        let function = match (&kernel.infallible, &kernel.fast) {
-            (Some(function), _) if infallible => function,
-            (_, Some(function)) if fast => function,
-            _ => &kernel.function,
+        let entry = match (&kernel.infallible, &kernel.fast) {
+            (Some(entry), _) if infallible => entry,
+            (_, Some(entry)) if fast => entry,
+            _ => &kernel.checking,
         };
+        let linear = config.grid[1] == 1
+            && config.grid[2] == 1
+            && config.block[1] == 1
+            && config.block[2] == 1;
+        let function = entry.select(linear);
         let status = (!infallible).then(|| device.status(&metadata.name));
         if let Some(status) = &status {
             self.arguments[..artifact::PARAMETERS_OFFSET as usize].fill(MaybeUninit::new(0));

@@ -35,6 +35,11 @@ fn main() {
             crates.join(dependency).display()
         );
     }
+    // Kernels inline device-side `gpurs` code, so a change to it must re-run the device view.
+    println!(
+        "cargo::rerun-if-changed={}",
+        crates.join("gpurs/src").display()
+    );
     for manifest in ["Cargo.toml", "Cargo.lock"] {
         println!(
             "cargo::rerun-if-changed={}",

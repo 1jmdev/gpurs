@@ -1,6 +1,6 @@
 use std::{
     env, fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{self, Command},
     time::UNIX_EPOCH,
 };
@@ -64,14 +64,18 @@ pub fn compile(architecture: &str) {
         .env("RUSTC", variable("RUSTC"))
         .env("RUSTC_BOOTSTRAP", "1")
         .env("RUSTC_WRAPPER", &wrapper)
-        .env("CARGO_ENCODED_RUSTFLAGS", format!("-Zalways-encode-mir\u{1f}-Zmir-opt-level=2\u{1f}-Zinline-mir=no\u{1f}-Copt-level=3\u{1f}-Coverflow-checks=on\u{1f}-Cmetadata={}", identity(architecture)))
+        .env("CARGO_ENCODED_RUSTFLAGS", format!("-Zalways-encode-mir\u{1f}-Zmir-opt-level=2\u{1f}-Zinline-mir=no\u{1f}-Copt-level=3\u{1f}-Cmetadata={}", identity(architecture)))
         // librustc_driver uses initial-exec TLS, which needs room when loaded with dlopen.
         .env("GLIBC_TUNABLES", "glibc.rtld.optional_static_tls=65536")
         .env("GPURS_WRAPPER", "1")
         .env("GPURS_DEVICE_BUILD", "1")
         .env("GPURS_PACKAGE", &package)
         .env("GPURS_ARCHITECTURE", architecture)
-        .env("GPURS_ARTIFACTS", &artifacts);
+        .env("GPURS_ARTIFACTS", &artifacts)
+        .env(
+            "GPURS_OVERFLOW_CHECKS",
+            if variable("PROFILE") == "release" { "0" } else { "1" },
+        );
     let crates = run_check(check, &package);
 
     let mut artifact = Artifact {
@@ -102,15 +106,45 @@ pub(crate) fn fail(message: &str) -> ! {
     process::exit(1)
 }
 
-/// Changes whenever the compiler library or target architecture changes, forcing re-analysis.
+/// Changes whenever the compiler library, the device-side `gpurs` code, or the target architecture
+/// changes. Kernels inline code from `gpurs`, so editing the runtime crate invalidates them.
 fn identity(architecture: &str) -> String {
     let metadata = fs::metadata(COMPILER_LIBRARY).unwrap_or_else(|error| fail(&error.to_string()));
-    let modified = metadata
+    let mut modified = metadata
         .modified()
         .ok()
         .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
         .map_or(0, |duration| duration.as_nanos());
+    let device = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap_or_default())
+        .join("..")
+        .join("gpurs")
+        .join("src");
+    modified = modified.max(newest(&device));
     format!("gpurs-{architecture}-{modified:x}-{:x}", metadata.len())
+}
+
+/// Modification time of the newest file below `directory`, in nanoseconds since the epoch.
+fn newest(directory: &Path) -> u128 {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .map(|entry| {
+            let path = entry.path();
+            if path.is_dir() {
+                newest(&path)
+            } else {
+                entry
+                    .metadata()
+                    .ok()
+                    .and_then(|metadata| metadata.modified().ok())
+                    .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                    .map_or(0, |duration| duration.as_nanos())
+            }
+        })
+        .max()
+        .unwrap_or(0)
 }
 
 /// Runs the device check and returns the crate names of the package's binaries and examples.

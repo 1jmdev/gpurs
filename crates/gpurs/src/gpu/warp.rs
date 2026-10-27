@@ -94,9 +94,14 @@ pub fn shuffle_xor<T: Shuffle>(value: T, mask: usize) -> T {
     proof = Varying
 )]
 pub fn reduce_sum<T: Shuffle + Add<Output = T>>(value: T) -> T {
-    [16, 8, 4, 2, 1]
-        .into_iter()
-        .fold(value, |total, mask| total + total.shuffle_xor(mask))
+    // Written as five statements rather than a fold over a mask array: a dynamically indexed
+    // array cannot be promoted to registers, so it would be spilled to local memory and the
+    // shuffle sequence would become a loop.
+    let value = value + value.shuffle_xor(16);
+    let value = value + value.shuffle_xor(8);
+    let value = value + value.shuffle_xor(4);
+    let value = value + value.shuffle_xor(2);
+    value + value.shuffle_xor(1)
 }
 
 #[primitive(

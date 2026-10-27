@@ -37,10 +37,25 @@ pub(crate) struct Device {
     pub context: Context,
 }
 
+/// One entry point, and the copy of it for a one-dimensional launch.
+pub(crate) struct Entry {
+    pub general: Function,
+    pub linear: Option<Function>,
+}
+
+impl Entry {
+    pub fn select(&self, linear: bool) -> &Function {
+        match (&self.linear, linear) {
+            (Some(function), true) => function,
+            _ => &self.general,
+        }
+    }
+}
+
 pub(crate) struct LoadedKernel {
-    pub function: Function,
-    pub fast: Option<Function>,
-    pub infallible: Option<Function>,
+    pub checking: Entry,
+    pub fast: Option<Entry>,
+    pub infallible: Option<Entry>,
     pub offsets: Vec<u64>,
     pub size: usize,
     pub infallible_offset: usize,
@@ -182,16 +197,25 @@ impl Device {
         } else {
             gpurs_artifact::PARAMETERS_OFFSET
         };
-        let kernel = Rc::new(LoadedKernel {
-            function: module.function(&metadata.symbol),
-            fast: metadata
-                .fast
+        let load = |module: &Module, variant: &gpurs_artifact::Variant| Entry {
+            general: module.function(&variant.symbol),
+            linear: variant
+                .linear
                 .as_ref()
-                .map(|fast| module.function(&fast.symbol)),
+                .map(|symbol| module.function(symbol)),
+        };
+        let kernel = Rc::new(LoadedKernel {
+            checking: Entry {
+                general: module.function(&metadata.symbol),
+                linear: None,
+            },
+            fast: metadata.fast.as_ref().map(|fast| load(module, fast)),
             infallible: metadata.infallible.as_ref().map(|variant| {
-                self.infallible[index]
-                    .get_or_init(|| Module::load(&self.artifact.modules[index].infallible))
-                    .function(&variant.symbol)
+                load(
+                    self.infallible[index]
+                        .get_or_init(|| Module::load(&self.artifact.modules[index].infallible)),
+                    variant,
+                )
             }),
             offsets,
             size: size as usize,

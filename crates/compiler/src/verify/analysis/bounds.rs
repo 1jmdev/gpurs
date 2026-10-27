@@ -215,6 +215,31 @@ impl Analysis<'_, '_> {
         }
     }
 
+    /// Records the launch bound under which the shared-memory access at `block` is in range.
+    pub(super) fn prove_shared(
+        &mut self,
+        block: usize,
+        index: &Value,
+        state: &State,
+        length: u64,
+    ) -> bool {
+        let values: Vec<_> = self
+            .maxima(index, state)
+            .iter()
+            .filter_map(launch)
+            .collect();
+        match (
+            values.is_empty(),
+            launch(&Polynomial::constant(length as i128)),
+        ) {
+            (false, Some(limit)) => {
+                self.proofs.push((block, Bound { values, limit }));
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Locals whose address is taken, except iterator ranges stepped only by `next`.
     pub(super) fn escapes(&self) -> FxHashSet<usize> {
         let mut stepped = FxHashSet::default();

@@ -18,14 +18,28 @@ use crate::{
     verify::symbolic::{Atom, Fact, Polynomial},
 };
 
+/// What the analysis established about one kernel.
+pub(in crate::verify) struct Outcome {
+    pub extent: Extent,
+    pub conditions: Vec<Condition>,
+    /// Runtime checks, by block, that cannot fail when their launch bound holds.
+    pub proofs: Vec<(usize, Bound)>,
+    /// Shared-memory accesses, by block, whose index bound was proven.
+    pub shared: Vec<usize>,
+    /// Failures in an accessor that every proven call site covers.
+    pub solved: FxHashSet<(Instance, usize)>,
+    pub uses_index: bool,
+}
+
 pub(in crate::verify) fn verify<'sess>(
     sess: Sess<'sess>,
     instance: Instance,
     parameters: &[KernelParameter],
     functions: &FxHashSet<Instance>,
+    failures: &[(Instance, usize)],
     configured: bool,
     returns_value: bool,
-) -> (Extent, Vec<Condition>, Vec<(usize, Bound)>) {
+) -> Outcome {
     let body = instance.body().unwrap();
     let block_count = body.blocks.len();
     let body_span = body.span;
@@ -43,6 +57,9 @@ pub(in crate::verify) fn verify<'sess>(
         comparisons: vec![None; block_count],
         conditions: Vec::new(),
         proofs: Vec::new(),
+        shared_proofs: Vec::new(),
+        shared_unproven: FxHashSet::default(),
+        shared_proven: FxHashSet::default(),
         escaped: FxHashSet::default(),
         uses_index: functions.iter().any(|function| {
             attributes::primitive(sess, function.def.def_id())
@@ -160,16 +177,32 @@ pub(in crate::verify) fn verify<'sess>(
             conditions.push(condition);
         }
     }
-    (extent, conditions, analysis.proofs)
+    // One unproven call site keeps the checking entry point in use.
+    let solved = analysis
+        .shared_proven
+        .iter()
+        .filter(|accessor| !analysis.shared_unproven.contains(*accessor))
+        .flat_map(|accessor| {
+            failures
+                .iter()
+                .filter(move |(function, _)| function == accessor)
+        })
+        .copied()
+        .collect();
+    Outcome {
+        extent,
+        conditions,
+        proofs: analysis.proofs,
+        shared: analysis.shared_proofs,
+        solved,
+        uses_index: analysis.uses_index,
+    }
 }
 
 impl<'sess> Analysis<'_, 'sess> {
     fn block(&mut self, block: usize, state: &mut State) {
         self.block = block;
         let data = self.body.blocks[block].clone();
-        if false {
-            return;
-        }
         for statement in &data.statements {
             self.span = statement.source_info.span;
             match &statement.kind {
@@ -321,6 +354,18 @@ impl<'sess> Analysis<'_, 'sess> {
         if (path.starts_with("core::slice::index::") || path.starts_with("gpurs::gpu::shared::"))
             && (path.ends_with("::index") || path.ends_with("::index_mut"))
         {
+            // Record the bound under which the accessor's own index check cannot fail.
+            if self.collect && path.starts_with("gpurs::gpu::shared::") {
+                let proven = shared_length(&instance).zip(arguments.get(1)).is_some_and(
+                    |(length, index)| self.prove_shared(self.block, index, state, length),
+                );
+                if proven {
+                    self.shared_proofs.push(self.block);
+                    self.shared_proven.insert(instance);
+                } else {
+                    self.shared_unproven.insert(instance);
+                }
+            }
             let mut value = arguments[0].clone();
             if let Some(origin) = &mut value.origin {
                 origin.index = arguments[1].expression.clone();
@@ -472,4 +517,16 @@ impl<'sess> Analysis<'_, 'sess> {
             self.conditions.push(condition);
         }
     }
+}
+
+/// The element count of the `SharedArray` that `instance` indexes.
+fn shared_length(instance: &Instance) -> Option<u64> {
+    instance
+        .args()
+        .0
+        .iter()
+        .find_map(|argument| match argument {
+            GenericArgKind::Const(value) => value.eval_target_usize().ok(),
+            _ => None,
+        })
 }

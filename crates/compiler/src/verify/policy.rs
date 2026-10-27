@@ -109,12 +109,17 @@ fn visit(
                 }
             }
             TerminatorKind::Assert { msg, .. }
-                if sess.overflow_checks() || !optional_overflow(msg) =>
+                if !crate::policy::unchecked_overflow(msg)
+                    && !crate::policy::precondition_check(sess, instance)
+                    && (sess.overflow_checks() || !optional_overflow(msg)) =>
             {
                 failures.push((instance, block));
             }
-            // Drop glue is not visited, so it is assumed to fail.
-            TerminatorKind::Call { target: None, .. } | TerminatorKind::Drop { .. } => {
+            // Drop glue is not visited, so it is assumed to fail. A diverging call that only
+            // reports a violated `unsafe` precondition is a debug facility and is dropped.
+            TerminatorKind::Call { target: None, .. } | TerminatorKind::Drop { .. }
+                if !crate::policy::precondition_check(sess, instance) =>
+            {
                 failures.push((instance, block));
             }
             TerminatorKind::InlineAsm { .. } => {

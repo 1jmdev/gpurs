@@ -60,6 +60,12 @@ pub(super) struct Analysis<'a, 'sess> {
     pub conditions: Vec<Condition>,
     /// Runtime checks of the kernel body, by block, that cannot fail when the bound holds.
     pub proofs: Vec<(usize, Bound)>,
+    /// Shared-memory accesses, by block, whose index bound was proven for this launch.
+    pub shared_proofs: Vec<usize>,
+    /// Shared-array accessors with at least one call site whose bound was not proven.
+    pub shared_unproven: FxHashSet<Instance>,
+    /// Shared-array accessors whose every call site was proven.
+    pub shared_proven: FxHashSet<Instance>,
     /// Locals whose address escapes, so their values are unknown after any call.
     pub escaped: FxHashSet<usize>,
     pub uses_index: bool,

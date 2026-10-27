@@ -26,7 +26,11 @@ pub struct FunctionBuilder<'m, 'sess> {
     blocks: Vec<ir::Block>,
     /// Blocks whose assertion is proven for this copy of the body and is omitted.
     pub skipped: FxHashSet<usize>,
-    block: usize,
+    /// Blocks whose shared-memory access index is proven, so the accessor's check is omitted.
+    pub unchecked_shared: FxHashSet<usize>,
+    /// Whether the launch has one block and thread dimension.
+    pub linear: bool,
+    pub block: usize,
 }
 
 impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
@@ -47,6 +51,8 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
             ir: ir::Function::new("", Type::Void, Vec::new()),
             blocks: Vec::new(),
             skipped: FxHashSet::default(),
+            unchecked_shared: FxHashSet::default(),
+            linear: false,
             block: 0,
         }
     }
@@ -279,6 +285,8 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
             } => {
                 if self.skipped.contains(&self.block)
                     || (!self.sess.overflow_checks() && optional_overflow(msg))
+                    || crate::policy::unchecked_overflow(msg)
+                    || crate::policy::precondition_check(self.sess, self.instance)
                 {
                     return self.branch(*target);
                 }

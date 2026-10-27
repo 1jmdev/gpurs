@@ -2,6 +2,7 @@ use gpurs_artifact::Failure;
 
 use super::{
     function::FunctionBuilder,
+    ir::{self, Access, Binary, Flags, Type},
     layout::PassMode,
     place::{Operand, Place, Value},
 };
@@ -52,8 +53,46 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
     }
 
     pub fn invoke(&mut self, instance: Instance, arguments: &[Operand], destination: &Place) {
+        if self.trusted_shared_index(instance, arguments, destination) {
+            return;
+        }
         let name = self.module.function(instance);
         self.invoke_named(&name, instance, arguments, destination);
+    }
+
+    /// Lowers a `SharedArray` access whose index bound was proven for this launch.
+    fn trusted_shared_index(
+        &mut self,
+        instance: Instance,
+        arguments: &[Operand],
+        destination: &Place,
+    ) -> bool {
+        if !self.unchecked_shared.contains(&self.block) || arguments.len() < 2 {
+            return false;
+        }
+        let path = crate::paths::path(self.sess, instance.def.def_id());
+        if !(path.starts_with("gpurs::gpu::shared::")
+            && (path.ends_with("::index") || path.ends_with("::index_mut")))
+        {
+            return false;
+        }
+        let size = self.element_shape(destination).size().bytes() as u64;
+        let index = arguments[1].scalar();
+        // The receiver is `&self`, so the array's data pointer is the field it points at.
+        let slot = arguments[0].scalar();
+        let base = self.ir.load(Type::byte_pointer(), slot, 8, Access::Plain);
+        let bytes = self
+            .ir
+            .binary(Binary::Mul, Flags::empty(), index, ir::Value::i64(size));
+        let pointer = self.ir.offset(base, bytes, true);
+        self.store(
+            destination,
+            &Operand {
+                value: Value::Scalar(pointer),
+                shape: destination.shape.clone(),
+            },
+        );
+        true
     }
 
     /// Calls the lowered function `name`, which implements `instance`.

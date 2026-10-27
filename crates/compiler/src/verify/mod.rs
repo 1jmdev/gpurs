@@ -68,25 +68,29 @@ pub fn kernel(
     }
     let returns_value =
         !matches!(stable::rigid(result.ty), RigidTy::Tuple(fields) if fields.is_empty());
-    let (extent, conditions, proofs) = analysis::verify(
+    let outcome = analysis::verify(
         sess,
         instance,
         &parameters,
         &functions,
+        &failures,
         configured,
         returns_value,
     );
     let infallible = failures.iter().all(|(function, block)| {
-        *function == instance && proofs.iter().any(|(proven, _)| proven == block)
+        (*function == instance && outcome.proofs.iter().any(|(proven, _)| proven == block))
+            || outcome.solved.contains(&(*function, *block))
     });
     Some(KernelPlan {
         instance,
         key,
         symbol,
         parameters,
-        extent,
-        conditions,
-        proofs,
+        extent: outcome.extent,
+        conditions: outcome.conditions,
+        proofs: outcome.proofs,
+        shared_proofs: outcome.shared,
+        uses_index: outcome.uses_index,
         infallible,
     })
 }

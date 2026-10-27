@@ -28,6 +28,10 @@ pub struct KernelPlan {
     pub conditions: Vec<Condition>,
     /// Assertions of the kernel body, by block, that cannot fail when their bound holds.
     pub proofs: Vec<(usize, Bound)>,
+    /// Shared-memory accesses, by block, whose index bound was proven for this launch.
+    pub shared_proofs: Vec<usize>,
+    /// Whether the kernel reads the linear thread index.
+    pub uses_index: bool,
     /// Every runtime check is one of `proofs`, so the kernel cannot fail when they hold.
     pub infallible: bool,
 }
@@ -37,22 +41,33 @@ impl<'sess> ModuleBuilder<'sess> {
         let fast = (!plan.proofs.is_empty()).then(|| {
             let symbol = format!("{}_fast", plan.symbol);
             let skipped = plan.proofs.iter().map(|(block, _)| *block).collect();
-            let root = self.variant(plan.instance, skipped);
-            self.entry(&plan, &symbol, root);
+            let shared = plan.shared_proofs.iter().copied().collect();
+            let root = self.variant(plan.instance, skipped, shared, false);
+            self.entry(&plan, &symbol, root, false);
+            let linear = plan.uses_index.then(|| {
+                let linear = format!("{symbol}_linear");
+                let skipped = plan.proofs.iter().map(|(block, _)| *block).collect();
+                let shared = plan.shared_proofs.iter().copied().collect();
+                let root = self.variant(plan.instance, skipped, shared, true);
+                self.entry(&plan, &linear, root, true);
+                linear
+            });
             Variant {
                 symbol,
+                linear,
                 bounds: plan.proofs.iter().map(|(_, bound)| bound.clone()).collect(),
             }
         });
         // The unchecked module holds only infallible kernels, which need one entry point.
         if self.checked || fast.is_none() {
             let root = self.function(plan.instance);
-            self.entry(&plan, &plan.symbol, root);
+            self.entry(&plan, &plan.symbol, root, false);
         }
         let signature = self.signature(plan.instance);
         let infallible = plan.infallible.then(|| {
             fast.clone().unwrap_or_else(|| Variant {
                 symbol: plan.symbol.clone(),
+                linear: None,
                 bounds: Vec::new(),
             })
         });
@@ -77,7 +92,7 @@ impl<'sess> ModuleBuilder<'sess> {
     }
 
     /// Emits the entry point `symbol`, which runs the launch protocol around a call to `root`.
-    fn entry(&mut self, plan: &KernelPlan, symbol: &str, root: String) {
+    fn entry(&mut self, plan: &KernelPlan, symbol: &str, root: String, linear: bool) {
         let parameters: Vec<_> = plan
             .parameters
             .iter()
@@ -107,6 +122,7 @@ impl<'sess> ModuleBuilder<'sess> {
         };
         let size = size - argument_offset;
         let mut function = FunctionBuilder::new(self, plan.instance);
+        function.linear = linear;
         function.ir = ir::Function::new(symbol, Type::Void, vec![Type::bytes(size).pointer()]);
         function.ir.internal = false;
         function.ir.byval(0, align);
@@ -117,23 +133,21 @@ impl<'sess> ModuleBuilder<'sess> {
         let raw = [
             "tid.x", "tid.y", "tid.z", "ctaid.x", "ctaid.y", "ctaid.z", "ntid.x", "ntid.y",
             "ntid.z", "nctaid.x", "nctaid.y", "nctaid.z",
-        ]
-        .map(|register| function.special_register(register));
-        let registers = raw
-            .clone()
-            .map(|value| function.ir.cast(Conversion::ZExt, value, Type::I64));
+        ];
         let failed = function.ir.block("failed");
         if function.module.checked {
+            let thread =
+                ["tid.x", "tid.y", "tid.z"].map(|register| function.special_register(register));
             let first = function.ir.binary(
                 Binary::Or,
                 Flags::empty(),
-                registers[0].clone(),
-                registers[1].clone(),
+                thread[0].clone(),
+                thread[1].clone(),
             );
             let first = function
                 .ir
-                .binary(Binary::Or, Flags::empty(), first, registers[2].clone());
-            let first = function.ir.compare(Predicate::Eq, first, ir::Value::i64(0));
+                .binary(Binary::Or, Flags::empty(), first, thread[2].clone());
+            let first = function.ir.compare(Predicate::Eq, first, ir::Value::i32(0));
             let status_pointer = Type::I32.pointer();
             let status =
                 function
@@ -144,8 +158,9 @@ impl<'sess> ModuleBuilder<'sess> {
             function.ir.position(status_block);
             let slot = function.module.status.clone();
             function.ir.store(status, slot, 8, Access::Plain);
-            // The first thread checks the failure sources once for its block; when one failed, it
-            // fails with `Upstream`, and the barrier then stops the rest of the block.
+            // The first thread checks the failure sources once for its block. No barrier follows:
+            // a barrier in the body counts arrivals, so a sibling that stopped early cannot
+            // deadlock the block, and the launch status already marks the output invalid.
             let inputs = function.ir.block("inputs");
             for index in 0..INPUT_CAPACITY {
                 let pointer = function.offset(arguments.clone(), INPUTS_OFFSET + index as u64 * 8);
@@ -175,7 +190,6 @@ impl<'sess> ModuleBuilder<'sess> {
             function.ir.position(inputs);
             function.ir.branch(ready);
             function.ir.position(ready);
-            function.barrier();
         }
         let operands: Vec<_> = plan
             .parameters
@@ -189,7 +203,10 @@ impl<'sess> ModuleBuilder<'sess> {
         let destination = function.temporary(signature.result.1.clone());
         function.invoke_named(&root, plan.instance, &operands, &destination);
         if let Some(result) = result {
-            let index = function.linear_index(&registers, Flags::empty());
+            let registers = raw
+                .map(|register| function.special_register(register))
+                .map(|value| function.ir.cast(Conversion::ZExt, value, Type::I64));
+            let index = function.linear_index(&registers);
             let offset = function.ir.binary(
                 Binary::Mul,
                 Flags::empty(),

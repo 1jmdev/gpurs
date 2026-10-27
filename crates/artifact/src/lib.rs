@@ -53,6 +53,9 @@ pub struct Kernel {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Variant {
     pub symbol: String,
+    /// Entry point of the same variant for a launch with one block and thread dimension, whose
+    /// linear index needs neither the y nor the z axis.
+    pub linear: Option<String>,
     pub bounds: Vec<Bound>,
 }
 
