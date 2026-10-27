@@ -6,50 +6,9 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false
-autoexamples = false
 
 [dependencies]
 gpurs.workspace = true
 
 [build-dependencies]
 gpurs-build.workspace = true
-
-[[example]]
-name = "api"
-path = "api.rs"
-
-[[example]]
-name = "atomic_histogram"
-path = "atomic_histogram.rs"
-
-[[example]]
-name = "device_methods"
-path = "device_methods.rs"
-
-[[example]]
-name = "elementwise_pipeline"
-path = "elementwise_pipeline.rs"
-
-[[example]]
-name = "failure_recovery"
-path = "failure_recovery.rs"
-
-[[example]]
-name = "iterators_and_returns"
-path = "iterators_and_returns.rs"
-
-[[example]]
-name = "matrix_multiplication"
-path = "matrix_multiplication.rs"
-
-[[example]]
-name = "parallel_reduction"
-path = "parallel_reduction.rs"
-
-[[example]]
-name = "stream_dependencies"
-path = "stream_dependencies.rs"
-
-[[example]]
-name = "launch_variants"
-path = "launch_variants.rs"
