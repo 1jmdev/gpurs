@@ -1,36 +1,68 @@
 use std::collections::BTreeSet;
 
+use serde::{Deserialize, Serialize};
+
 use super::{
     analysis::{Analysis, Kind, Obligation},
     render,
     symbolic::Clause,
 };
-use crate::{policy::Strictness, stable::*};
+use crate::{
+    policy::{self, Strictness},
+    stable::{CrateDef, Instance, Sess},
+};
+
+#[derive(Serialize, Deserialize)]
+pub struct Warning {
+    pub function: String,
+    pub block: Option<usize>,
+    pub statement: Option<usize>,
+    pub message: String,
+    pub notes: Vec<String>,
+}
+
+impl Warning {
+    pub fn emit(&self, sess: Sess<'_>, functions: &[Instance]) {
+        let instance = functions
+            .iter()
+            .find(|instance| instance.name() == self.function)
+            .unwrap();
+        let span = self.block.map_or_else(
+            || instance.def.def_id().span(),
+            |block| {
+                let body = instance.body().unwrap();
+                let block = &body.blocks[block];
+                self.statement
+                    .map_or(block.terminator.source_info.span, |statement| {
+                        block.statements[statement].source_info.span
+                    })
+            },
+        );
+        match policy::strictness() {
+            Strictness::Error => sess.error_notes(span, self.message.clone(), &self.notes),
+            _ => sess.warning_notes(span, self.message.clone(), &self.notes),
+        }
+    }
+}
 
 /// One diagnostic per obligation that could not be discharged.
-pub(super) fn report(
-    sess: Sess<'_>,
-    analysis: &Analysis<'_, '_>,
-    residual: &[&Obligation],
-    strictness: Strictness,
-) {
+pub(super) fn report(analysis: &Analysis<'_, '_>, residual: &[&Obligation]) -> Vec<Warning> {
     let kernel = analysis.kernel.name();
-    let consequence = match strictness {
+    let consequence = match policy::strictness() {
         Strictness::Error => format!("kernel `{kernel}` has no certified entry point"),
         _ => format!(
             "kernel `{kernel}` keeps every runtime check; set GPURS_STRICTNESS=omit to silence this"
         ),
     };
-    let emit = |span, message: String, notes: &[String]| match strictness {
-        Strictness::Error => sess.error_notes(span, message, notes),
-        _ => sess.warning_notes(span, message, notes),
-    };
+    let mut warnings = Vec::new();
     if analysis.failed {
-        emit(
-            analysis.span,
-            format!("the safety analysis of `{kernel}` did not converge"),
-            std::slice::from_ref(&consequence),
-        );
+        warnings.push(Warning {
+            function: kernel.clone(),
+            block: None,
+            statement: None,
+            message: format!("the safety analysis of `{kernel}` did not converge"),
+            notes: vec![consequence.clone()],
+        });
     }
     for obligation in residual {
         let function = analysis.contexts[obligation.context].instance.name();
@@ -42,15 +74,25 @@ pub(super) fn report(
             ));
         }
         notes.push(consequence.clone());
-        emit(
-            obligation.span,
-            format!(
+        warnings.push(Warning {
+            function: function.clone(),
+            block: Some(obligation.block),
+            statement: analysis.contexts[obligation.context]
+                .instance
+                .body()
+                .unwrap()
+                .blocks[obligation.block]
+                .statements
+                .iter()
+                .position(|statement| statement.source_info.span == obligation.span),
+            message: format!(
                 "cannot prove that {} in `{function}`",
                 obligation.description
             ),
-            &notes,
-        );
+            notes,
+        });
     }
+    warnings
 }
 
 /// Why an obligation was not discharged.

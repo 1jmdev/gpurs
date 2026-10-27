@@ -69,7 +69,11 @@ pub(crate) fn expand_function(function: ItemFn, fast_math: bool) -> Tokens {
     }
 }
 
-pub(crate) fn expand_implementation(mut implementation: ItemImpl, fast_math: bool) -> Tokens {
+pub(crate) fn expand_implementation(
+    mut implementation: ItemImpl,
+    fast_math: bool,
+    host_only: bool,
+) -> Tokens {
     let self_type = &implementation.self_ty;
     let prefix = match &implementation.trait_ {
         Some((path, _)) => format!("<{} as {}>", text(self_type), text(path)),
@@ -145,6 +149,7 @@ pub(crate) fn expand_implementation(mut implementation: ItemImpl, fast_math: boo
     let generics = &implementation.generics;
     let (impl_generics, type_generics, where_clause) = generics.split_for_impl();
     let trait_parameters = impl_parameters.iter();
+    let implementation = (!host_only).then_some(&implementation);
     quote! {
         #implementation
 

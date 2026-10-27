@@ -2,15 +2,14 @@ use gpurs_artifact::{self as artifact, Access, Extent, Parameter, Value};
 
 use super::{
     analysis::{Analysis, Kind, Obligation},
-    diagnostic::{report, summary},
-    policy, render,
+    diagnostic, policy as device_policy, render,
     symbolic::{self, Clause},
 };
 use crate::{
     codegen::{Certificate, KernelParameter, KernelPlan, ModuleBuilder},
-    policy::{self as build, Strictness},
+    policy::{self, Strictness},
     stable,
-    stable::*,
+    stable::{CrateDef, Instance, Mutability, RigidTy, Sess, TyKind},
     transfer,
 };
 
@@ -21,7 +20,7 @@ pub fn kernel(
     key: String,
     symbol: String,
 ) -> Option<KernelPlan> {
-    policy::verify(sess, instance);
+    device_policy::verify(sess, instance);
     let module = ModuleBuilder::new(sess);
     let signature = module.signature(instance);
     let mut parameters = Vec::new();
@@ -98,10 +97,11 @@ pub fn kernel(
         .filter(|obligation| obligation.verdict.is_none() && obligation.kind != Kind::Arithmetic)
         .collect();
     let certified = !analysis.failed && residual.is_empty();
-    let strictness = build::strictness();
-    if !certified && strictness != Strictness::Omit {
-        report(sess, &analysis, &residual, strictness);
-    }
+    let warnings = if !certified && policy::strictness() != Strictness::Omit {
+        diagnostic::report(&analysis, &residual)
+    } else {
+        Vec::new()
+    };
     let mut preconditions: Vec<Clause> = Vec::new();
     for clause in analysis
         .obligations
@@ -133,7 +133,7 @@ pub fn kernel(
     };
     let certificate = certified.then(|| certify(&analysis, 0));
     let status = certificate.as_ref().is_some_and(Certificate::records);
-    let summary = summary(&analysis, certified, &preconditions, &residual);
+    let summary = diagnostic::summary(&analysis, certified, &preconditions, &residual);
     Some(KernelPlan {
         instance,
         key,
@@ -148,9 +148,10 @@ pub fn kernel(
         },
         certificate,
         status,
-        instrumented: !certified || build::instrumented(),
+        instrumented: !certified || policy::instrumented(),
         uses_index: analysis.uses_index,
         summary,
+        warnings,
     })
 }
 

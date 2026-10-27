@@ -31,6 +31,7 @@ pub(crate) fn expand(attribute: Tokens, item: Tokens) -> Result<Tokens> {
         ))
     })
     .parse2(item)?;
+    let inline = body.as_ref().map(|_| quote!(#[inline]));
     let body = match (&primitive.lowering, body) {
         (Lowering::Body, Some(body)) => quote!(#body),
         (Lowering::Body, None) => quote!(;),
@@ -58,8 +59,11 @@ pub(crate) fn expand(attribute: Tokens, item: Tokens) -> Result<Tokens> {
         }
     };
     let encoded = primitive.encode();
+    let documentation = format!("<!-- gpurs::primitive={encoded} -->");
     Ok(quote! {
         #(#attributes)*
+        #inline
+        #[doc = #documentation]
         #[cfg_attr(gpurs_device, gpurs_tool::primitive = #encoded)]
         #visibility #signature #body
     })

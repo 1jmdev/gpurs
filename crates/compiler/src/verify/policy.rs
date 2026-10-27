@@ -3,7 +3,10 @@ use std::env;
 use gpurs_artifact::{Convergence, Memory};
 use rustc_data_structures::fx::FxHashSet;
 
-use crate::{attributes, diagnostic, paths, stable::*};
+use crate::{
+    attributes, diagnostic, paths,
+    stable::{Body, CrateDef, Instance, InstanceKind, RigidTy, Sess, Span, TerminatorKind, TyKind},
+};
 
 /// Rejects call graphs that GPU code cannot express: recursion, dynamic dispatch, host-only
 /// callees, and primitives beyond the target architecture.

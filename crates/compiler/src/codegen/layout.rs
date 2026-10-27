@@ -1,5 +1,8 @@
 use super::ir::Type;
-use crate::stable::*;
+use crate::stable::{
+    FieldsShape, FloatLength, IntegerLength, LayoutShape, MachineSize, Primitive, Scalar, Sess, Ty,
+    ValueRepr, VariantIdx, VariantsShape,
+};
 
 /// The layout of one fully monomorphized value, in the form the backend consumes.
 #[derive(Clone, Debug)]

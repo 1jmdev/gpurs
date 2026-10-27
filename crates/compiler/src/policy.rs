@@ -7,7 +7,7 @@
 
 use std::env;
 
-use crate::stable::*;
+use crate::stable::{AssertMessage, RuntimeChecks, Sess};
 
 /// Whether unchecked arithmetic is instrumented. `GPURS_OVERFLOW_CHECKS` overrides the profile.
 pub fn overflow_checks() -> bool {

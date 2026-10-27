@@ -8,7 +8,13 @@ use super::{
     layout,
     place::{Operand, Place, Value},
 };
-use crate::{attributes, paths, stable::*};
+use crate::{
+    attributes, paths,
+    stable::{
+        BinOp, CrateDef, GenericArgKind, Instance, RigidTy, Ty, TyConst, TyConstKind, TyKind,
+        ValueRepr,
+    },
+};
 
 impl<'sess> FunctionBuilder<'_, 'sess> {
     pub fn intrinsic(

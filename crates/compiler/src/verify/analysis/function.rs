@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 
 use super::{Analysis, Frame, Pointer, State, Value};
 use crate::{
-    stable::*,
+    stable::{Instance, TerminatorKind},
     verify::{
         engine::{Bound, Direction},
         symbolic::{Fact, Polynomial, Requirement},

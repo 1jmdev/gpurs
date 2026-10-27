@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use super::Direction;
 use crate::verify::symbolic::{
-    Atom, Clause, Fact, Polynomial, Predicate, Relation, Requirement, divide_monomial,
+    self, Atom, Clause, Fact, Polynomial, Predicate, Relation, Requirement,
 };
 
 const OPTIONS: usize = 4;
@@ -316,7 +316,7 @@ impl Engine<'_> {
                 }
                 for (fact, extra) in facts {
                     for (term, factor) in &fact.0 {
-                        let Some(multiplier) = divide_monomial(monomial, term) else {
+                        let Some(multiplier) = symbolic::divide_monomial(monomial, term) else {
                             continue;
                         };
                         if term.is_empty() || coefficient % factor != 0 || coefficient / factor <= 0

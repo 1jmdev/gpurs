@@ -3,10 +3,8 @@ use std::{
     collections::{BTreeSet, BinaryHeap},
 };
 
-use super::{Engine, solver::union};
-use crate::verify::symbolic::{
-    Atom, Monomial, Polynomial, Requirement, divide_monomial, launch_monomial,
-};
+use super::{Engine, solver};
+use crate::verify::symbolic::{self, Atom, Monomial, Polynomial, Requirement};
 
 const LIMIT: usize = 3;
 const DEPTH: usize = 6;
@@ -63,24 +61,24 @@ impl Engine<'_> {
                 break;
             }
             for (bound, extra) in self.structural(&current, direction, 0) {
-                results.push((bound, union(&requirement, &extra), count));
+                results.push((bound, solver::union(&requirement, &extra), count));
             }
             if steps == DEPTH {
                 continue;
             }
             for (monomial, coefficient) in &current.0 {
-                if launch_monomial(monomial) {
+                if symbolic::launch_monomial(monomial) {
                     continue;
                 }
                 for (fact, extra) in facts {
                     for (term, factor) in &fact.0 {
-                        if launch_monomial(term) {
+                        if symbolic::launch_monomial(term) {
                             continue;
                         }
-                        let Some(multiplier) = divide_monomial(monomial, term) else {
+                        let Some(multiplier) = symbolic::divide_monomial(monomial, term) else {
                             continue;
                         };
-                        if !launch_monomial(&multiplier) {
+                        if !symbolic::launch_monomial(&multiplier) {
                             continue;
                         }
                         let numerator = match direction {
@@ -106,7 +104,7 @@ impl Engine<'_> {
                                 next.varying(),
                                 steps + 1,
                                 next,
-                                union(&requirement, extra),
+                                solver::union(&requirement, extra),
                             )));
                         }
                     }
@@ -125,7 +123,7 @@ impl Engine<'_> {
     ) -> Vec<Bound> {
         let mut sums = vec![(Polynomial::default(), Requirement::new())];
         for (monomial, coefficient) in &polynomial.0 {
-            let terms = if launch_monomial(monomial) {
+            let terms = if symbolic::launch_monomial(monomial) {
                 vec![(
                     Polynomial::monomial(monomial.clone(), *coefficient),
                     Requirement::new(),
@@ -147,7 +145,7 @@ impl Engine<'_> {
                 .iter()
                 .flat_map(|(sum, left)| {
                     terms.iter().filter_map(move |(term, right)| {
-                        Some((sum.add(term, 1)?, union(left, right)))
+                        Some((sum.add(term, 1)?, solver::union(left, right)))
                     })
                 })
                 .take(LIMIT + 1)
@@ -167,7 +165,7 @@ impl Engine<'_> {
                 .iter()
                 .flat_map(|(product, left)| {
                     bounds.iter().filter_map(move |(bound, right)| {
-                        Some((product.multiply(bound)?, union(left, right)))
+                        Some((product.multiply(bound)?, solver::union(left, right)))
                     })
                 })
                 .take(LIMIT)
@@ -220,7 +218,9 @@ impl Engine<'_> {
                     .map(|bound| self.structural(bound, direction, depth + 1))
                     .unwrap_or_default()
                     .into_iter()
-                    .map(|(bound, requirement)| (bound, union(&requirement, &info.requirement)))
+                    .map(|(bound, requirement)| {
+                        (bound, solver::union(&requirement, &info.requirement))
+                    })
                     .collect();
                 if direction == Direction::Lower {
                     bounds.extend(zero());
@@ -233,7 +233,7 @@ impl Engine<'_> {
                     for (divisor, right) in self.structural(divisor, direction.flip(), depth + 1) {
                         bounds.push((
                             Polynomial::quotient(dividend.clone(), divisor),
-                            union(&left, &right),
+                            solver::union(&left, &right),
                         ));
                     }
                 }
@@ -249,7 +249,7 @@ impl Engine<'_> {
                 if let Some(requirement) = self.nonzero(divisor) {
                     for (divisor, extra) in self.structural(divisor, Direction::Upper, depth + 1) {
                         if let Some(bound) = divisor.offset(-1) {
-                            bounds.push((bound, union(&requirement, &extra)));
+                            bounds.push((bound, solver::union(&requirement, &extra)));
                         }
                     }
                 }

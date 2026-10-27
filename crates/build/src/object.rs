@@ -20,7 +20,7 @@ pub(crate) fn write_object(artifact: &[u8], path: &Path) {
         size: data.len() as u64,
         kind: SymbolKind::Data,
         scope: SymbolScope::Linkage,
-        weak: false,
+        weak: true,
         section: SymbolSection::Section(section),
         flags: SymbolFlags::None,
     });

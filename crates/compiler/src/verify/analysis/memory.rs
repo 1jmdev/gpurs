@@ -3,7 +3,7 @@ use rustc_data_structures::fx::FxHashSet;
 use super::{Analysis, Region, control};
 use crate::{
     diagnostic,
-    stable::*,
+    stable::BinOp,
     verify::{
         proof::{self, Comparison, Proofs},
         symbolic::{Atom, Polynomial, Relation},

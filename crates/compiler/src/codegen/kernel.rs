@@ -1,6 +1,6 @@
 use gpurs_artifact::{
-    Clause, Entry, Extent, Kernel, PARAMETERS_OFFSET, Parameter, RESULT_OFFSET, STATUS_OFFSET,
-    Value, parameter_offsets,
+    self as artifact, Clause, Entry, Extent, Kernel, PARAMETERS_OFFSET, Parameter, RESULT_OFFSET,
+    STATUS_OFFSET, Value,
 };
 
 use super::{
@@ -10,7 +10,10 @@ use super::{
     module::{Certificate, ModuleBuilder},
     place::Place,
 };
-use crate::{stable, stable::*};
+use crate::{
+    stable,
+    stable::{Instance, RigidTy},
+};
 
 #[derive(Clone)]
 pub struct KernelParameter {
@@ -18,7 +21,6 @@ pub struct KernelParameter {
     pub metadata: Parameter,
 }
 
-#[derive(Clone)]
 pub struct KernelPlan {
     pub instance: Instance,
     pub key: String,
@@ -37,6 +39,7 @@ pub struct KernelPlan {
     pub uses_index: bool,
     /// The kernel's entry in the `*.preconditions` report.
     pub summary: String,
+    pub warnings: Vec<crate::verify::Warning>,
 }
 
 impl<'sess> ModuleBuilder<'sess> {
@@ -95,7 +98,7 @@ impl<'sess> ModuleBuilder<'sess> {
             .iter()
             .map(|parameter| parameter.metadata)
             .collect();
-        let (offsets, size) = parameter_offsets(&parameters);
+        let (offsets, size) = artifact::parameter_offsets(&parameters);
         let align = parameters
             .iter()
             .map(|parameter| parameter.value().align)

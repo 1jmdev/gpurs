@@ -13,6 +13,20 @@ use libloading::Library;
 
 type Program = *mut c_void;
 
+pub fn compile(
+    ir: &str,
+    architecture: &str,
+    toolkit: &Path,
+    output: &Path,
+) -> Result<Vec<u8>, String> {
+    let scratch = output.with_added_extension(format!("{}.nvvm", std::process::id()));
+    fs::create_dir_all(&scratch).map_err(|error| error.to_string())?;
+    let result =
+        ptx(toolkit, ir, architecture).and_then(|ptx| cubin(toolkit, &ptx, architecture, &scratch));
+    fs::remove_dir_all(scratch).map_err(|error| error.to_string())?;
+    result
+}
+
 /// Locates the CUDA toolkit through `CUDA_PATH`, `CUDA_HOME`, or the standard install paths.
 pub fn toolkit() -> Result<PathBuf, String> {
     ["CUDA_PATH", "CUDA_HOME"]
@@ -25,7 +39,7 @@ pub fn toolkit() -> Result<PathBuf, String> {
 }
 
 /// Compiles NVVM IR text, linked lazily against libdevice, to PTX for `compute_XY`.
-pub fn ptx(toolkit: &Path, ir: &str, architecture: &str) -> Result<String, String> {
+fn ptx(toolkit: &Path, ir: &str, architecture: &str) -> Result<String, String> {
     // SAFETY: libNVVM is a C library whose entry points match the declared signatures.
     unsafe {
         let library = Library::new(toolkit.join("nvvm/lib64/libnvvm.so"))
@@ -93,7 +107,7 @@ pub fn ptx(toolkit: &Path, ir: &str, architecture: &str) -> Result<String, Strin
 }
 
 /// Assembles PTX into native CUBIN for `sm_XY` with ptxas.
-pub fn cubin(
+fn cubin(
     toolkit: &Path,
     ptx: &str,
     architecture: &str,

@@ -4,7 +4,13 @@ use super::{
     layout::{self, Shape},
     place::{Operand, Place, Value},
 };
-use crate::{stable, stable::*};
+use crate::{
+    stable,
+    stable::{
+        AggregateKind, BinOp, CastKind, PointerCoercion, RigidTy, Rvalue, Scalar, TagEncoding, Ty,
+        TyKind, UnOp, ValueRepr, VariantIdx, VariantsShape,
+    },
+};
 
 impl<'sess> FunctionBuilder<'_, 'sess> {
     pub fn rvalue(&mut self, destination: &Place, rvalue: &Rvalue) {

@@ -18,5 +18,7 @@ pub use stream::{ConfiguredStream, Launch, LaunchConfig, Stream};
 
 #[doc(hidden)]
 pub mod __private {
+    pub use gpurs_macros::{compilation, device};
+
     pub use crate::launch::{KernelCache, KernelLaunch, kernel};
 }

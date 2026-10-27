@@ -30,24 +30,28 @@ pub trait Shuffle: Copy {
 }
 
 impl Shuffle for u32 {
+    #[inline]
     fn shuffle_xor(self, mask: u32) -> Self {
         intrinsics::shuffle_xor(self, mask)
     }
 }
 
 impl Shuffle for i32 {
+    #[inline]
     fn shuffle_xor(self, mask: u32) -> Self {
         (self as u32).shuffle_xor(mask) as i32
     }
 }
 
 impl Shuffle for f32 {
+    #[inline]
     fn shuffle_xor(self, mask: u32) -> Self {
         f32::from_bits(self.to_bits().shuffle_xor(mask))
     }
 }
 
 impl Shuffle for u64 {
+    #[inline]
     fn shuffle_xor(self, mask: u32) -> Self {
         let low = (self as u32).shuffle_xor(mask) as u64;
         let high = ((self >> 32) as u32).shuffle_xor(mask) as u64;
@@ -56,18 +60,21 @@ impl Shuffle for u64 {
 }
 
 impl Shuffle for i64 {
+    #[inline]
     fn shuffle_xor(self, mask: u32) -> Self {
         (self as u64).shuffle_xor(mask) as i64
     }
 }
 
 impl Shuffle for f64 {
+    #[inline]
     fn shuffle_xor(self, mask: u32) -> Self {
         f64::from_bits(self.to_bits().shuffle_xor(mask))
     }
 }
 
 impl Shuffle for usize {
+    #[inline]
     fn shuffle_xor(self, mask: u32) -> Self {
         (self as u64).shuffle_xor(mask) as usize
     }

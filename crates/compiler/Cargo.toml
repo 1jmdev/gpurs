@@ -16,3 +16,7 @@ rustc_private = true
 bitflags.workspace = true
 gpurs-artifact.workspace = true
 libloading.workspace = true
+postcard.workspace = true
+proc-macro2 = { workspace = true, features = ["span-locations"] }
+serde.workspace = true
+syn.workspace = true

@@ -24,7 +24,7 @@ pub struct Artifact {
     pub types: Vec<TransferType>,
 }
 
-/// Kernels compiled from one crate into one CUBIN image.
+/// Kernel entry points compiled into one CUBIN image.
 #[derive(Serialize, Deserialize, Debug, Default)]
 pub struct Module {
     pub cubin: Vec<u8>,

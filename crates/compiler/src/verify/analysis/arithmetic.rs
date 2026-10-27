@@ -1,6 +1,6 @@
 use super::{Analysis, Origin, Pointer, State, Value};
 use crate::{
-    stable::*,
+    stable::{BinOp, CastKind, IntTy, Operand, RigidTy, Ty, TyKind, UintTy},
     verify::symbolic::{Atom, Fact, Polynomial, Predicate, Relation, Requirement},
 };
 

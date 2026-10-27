@@ -11,7 +11,11 @@ use super::{
 };
 use crate::{
     attributes, diagnostic, stable,
-    stable::{CrateDef, Operand as MirOperand, Place as MirPlace, *},
+    stable::{
+        AssertMessage, BinOp, Body, CrateDef, Instance, Mutability, NonDivergingIntrinsic,
+        Operand as MirOperand, Place as MirPlace, ProjectionElem, RETURN_LOCAL, RigidTy, Rvalue,
+        Sess, Span, StatementKind, TerminatorKind, Ty, ValueRepr,
+    },
 };
 
 /// Lowers the MIR body of one monomorphic instance to an NVVM IR function.

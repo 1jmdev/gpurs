@@ -16,7 +16,6 @@ mod memory;
 mod place;
 mod state;
 
-pub(super) use arithmetic::{bits, integer_kind, range};
 pub(super) use interpreter::Analysis;
 pub(super) use state::{
     Access, Context, Frame, Kind, Obligation, Origin, Pointer, Region, State, Value,

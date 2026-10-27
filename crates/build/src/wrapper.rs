@@ -11,9 +11,9 @@ use crate::build;
 
 pub(crate) const COMPILER_LIBRARY: &str = env!("GPURS_COMPILER_LIBRARY");
 
-/// Acts as rustc for the private check by delegating to the gpurs compiler library.
+/// Delegates the private compilation to the gpurs compiler library.
 pub(crate) fn run_wrapper() -> i32 {
-    let arguments: Vec<_> = env::args_os().collect();
+    let mut arguments: Vec<_> = env::args_os().collect();
     let target = env::var("CARGO_PKG_NAME").ok() == env::var("GPURS_PACKAGE").ok()
         && arguments
             .windows(2)
@@ -24,17 +24,82 @@ pub(crate) fn run_wrapper() -> i32 {
         && !arguments
             .iter()
             .any(|argument| argument.to_string_lossy().starts_with("--print"));
-    if !target
-        && !arguments
-            .windows(2)
-            .any(|pair| pair[0] == "--crate-name" && pair[1] == "gpurs")
-    {
+    if !target {
         return Command::new(&arguments[1])
             .args(&arguments[2..])
             .status()
             .unwrap_or_else(|error| build::fail(&format!("cannot run rustc: {error}")))
             .code()
             .unwrap_or(1);
+    }
+    if arguments.iter().any(|argument| {
+        let argument = argument.to_string_lossy();
+        argument.starts_with("--emit=") && !argument.contains("link")
+    }) {
+        let directory =
+            std::path::PathBuf::from(env::var_os("GPURS_ARTIFACTS").unwrap()).join("metadata");
+        let mut command = Command::new(env::var_os("CARGO").unwrap());
+        for (name, _) in env::vars_os() {
+            let name = name.to_string_lossy();
+            if (name.starts_with("CARGO_") && name != "CARGO_HOME")
+                || name.starts_with("RUSTC")
+                || name.starts_with("RUSTDOC")
+                || name.starts_with("__CARGO")
+                || name == "RUSTFLAGS"
+            {
+                command.env_remove(&*name);
+            }
+        }
+        let output = command
+            .args([
+                "check",
+                "--quiet",
+                "--lib",
+                "--message-format=json",
+                "--manifest-path",
+            ])
+            .arg(env::var_os("GPURS_RUNTIME_MANIFEST").unwrap())
+            .arg("--target-dir")
+            .arg(&directory)
+            .env("RUSTC", &arguments[1])
+            .env("RUSTC_BOOTSTRAP", "1")
+            .env(
+                "CARGO_ENCODED_RUSTFLAGS",
+                "-Zalways-encode-mir\u{1f}-Zinline-mir=no",
+            )
+            .output()
+            .unwrap_or_else(|error| build::fail(&error.to_string()));
+        if !output.status.success() {
+            build::fail(&String::from_utf8_lossy(&output.stderr));
+        }
+        let mut runtime = None;
+        for line in output.stdout.split(|byte| *byte == b'\n') {
+            let Ok(message) = serde_json::from_slice::<serde_json::Value>(line) else {
+                continue;
+            };
+            if message["reason"] == "compiler-artifact" {
+                for file in message["filenames"].as_array().unwrap() {
+                    let file = file.as_str().unwrap();
+                    if message["target"]["name"] == "gpurs" && file.ends_with(".rmeta") {
+                        runtime = Some(file.to_owned());
+                    }
+                    arguments.extend([
+                        "-L".into(),
+                        format!(
+                            "dependency={}",
+                            std::path::Path::new(file).parent().unwrap().display(),
+                        )
+                        .into(),
+                    ]);
+                }
+            }
+        }
+        let runtime = runtime.expect("runtime compilation produces metadata");
+        for argument in &mut arguments {
+            if argument.to_string_lossy().starts_with("gpurs=") {
+                *argument = format!("gpurs={runtime}").into();
+            }
+        }
     }
     let arguments: Vec<CString> = arguments
         .iter()

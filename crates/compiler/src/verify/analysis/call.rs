@@ -1,12 +1,9 @@
 use gpurs_artifact::{Convergence, Memory, Primitive, Proof};
 
-use super::{
-    Analysis, Kind, Obligation, Origin, Pointer, Region, State, Value, integer_kind,
-    state::{get, pointed_slots},
-};
+use super::{Analysis, Kind, Obligation, Origin, Pointer, Region, State, Value, arithmetic, state};
 use crate::{
     attributes, paths,
-    stable::*,
+    stable::{CrateDef, Instance, Operand, Place, RigidTy, Ty, TyKind},
     verify::{
         policy,
         symbolic::{Atom, Polynomial, Predicate, Relation, Requirement},
@@ -157,7 +154,7 @@ impl Analysis<'_, '_> {
     /// Calls the analysis cannot see into may change whatever their arguments point to.
     fn forget(&mut self, arguments: &[Value], state: &mut State) {
         for argument in arguments {
-            for slot in pointed_slots(argument) {
+            for slot in state::pointed_slots(argument) {
                 if let Some(value) = state.slots.get_mut(slot) {
                     *value = Value::varying(2);
                 }
@@ -199,7 +196,7 @@ impl Analysis<'_, '_> {
             let Some(Pointer::Slot(slot, path)) = arguments[0].pointer.clone() else {
                 return None;
             };
-            let iterator = get(&state.slots[slot], &path);
+            let iterator = state::get(&state.slots[slot], &path);
             let start = iterator
                 .fields
                 .first()
@@ -243,7 +240,7 @@ impl Analysis<'_, '_> {
             TyKind::RigidTy(RigidTy::Adt(definition, arguments))
                 if paths::is(self.sess, definition.def_id(), "core::ops::range::Range")
                     && arguments.0.first().and_then(|argument| argument.ty())
-                        .and_then(|element| integer_kind(*element))
+                        .and_then(|element| arithmetic::integer_kind(*element))
                         .is_some_and(|(signed, _)| !signed)
         )
     }

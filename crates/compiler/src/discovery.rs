@@ -1,25 +1,28 @@
 //! Host view: discovers kernel launches and transfer types from monomorphized host code.
 
 use gpurs_artifact::TransferType;
-use rustc_driver::{Callbacks, Compilation};
-use rustc_interface::interface::Compiler;
+use rustc_data_structures::fx::FxHashSet;
+use rustc_public::{
+    mir::visit::MirVisitor,
+    ty::ClosureKind,
+    visitor::{Visitable, Visitor},
+};
 
 use crate::{
     stable::{
-        self, Body, ConstOperand, CrateDef, Instance, InstanceKind, Operand, ProjectionElem,
-        RigidTy, Rvalue, Sess, Session, StatementKind, TerminatorKind, TyCtxt, TyKind,
+        Body, ConstOperand, CrateDef, Instance, InstanceKind, Operand, ProjectionElem, RigidTy,
+        Rvalue, Sess, StatementKind, TerminatorKind, Ty, TyKind,
     },
-    transfer::{self, Portable},
+    transfer,
 };
 
 /// One launcher instantiation found in host code.
-#[derive(Clone, Debug, PartialEq)]
 pub struct Launch {
     /// Runtime lookup key: `module::tail` followed by the generic tuple type name, if any.
     pub key: String,
     pub module: String,
     pub tail: String,
-    pub generics: Vec<Portable>,
+    pub generics: Vec<Ty>,
     /// Launched through `ConfiguredStream`, i.e. with explicit geometry.
     pub configured: bool,
 }
@@ -28,22 +31,52 @@ pub struct Launch {
 pub struct HostView {
     pub launches: Vec<Launch>,
     pub types: Vec<TransferType>,
+    pending: Vec<Instance>,
+    visited_types: FxHashSet<Ty>,
 }
 
-impl Callbacks for HostView {
-    fn after_analysis(&mut self, _: &Compiler, tcx: TyCtxt<'_>) -> Compilation {
-        stable::run(tcx, || {
-            let session = Session::new(tcx);
-            self.analyze(session);
-        });
-        Compilation::Continue
+impl Visitor for HostView {
+    type Break = ();
+
+    fn visit_ty(&mut self, ty: &Ty) -> std::ops::ControlFlow<()> {
+        if !self.visited_types.insert(*ty) {
+            return std::ops::ControlFlow::Continue(());
+        }
+        let instance = match ty.kind() {
+            TyKind::RigidTy(RigidTy::FnPtr(..) | RigidTy::Dynamic(..)) => {
+                return std::ops::ControlFlow::Continue(());
+            }
+            TyKind::RigidTy(RigidTy::FnDef(definition, arguments)) => {
+                Instance::resolve(definition, &arguments).ok()
+            }
+            TyKind::RigidTy(RigidTy::Closure(definition, arguments)) => {
+                Instance::resolve_closure(definition, &arguments, ClosureKind::FnOnce).ok()
+            }
+            TyKind::RigidTy(RigidTy::Adt(..)) => {
+                let instance = Instance::resolve_drop_in_place(*ty);
+                (!instance.is_empty_shim()).then_some(instance)
+            }
+            _ => None,
+        };
+        self.pending.extend(instance);
+        ty.super_visit(self)
+    }
+}
+
+impl MirVisitor for HostView {
+    fn visit_ty(&mut self, ty: &Ty, _: rustc_public::mir::visit::Location) {
+        let _ = Visitor::visit_ty(self, ty);
     }
 }
 
 impl HostView {
-    fn analyze(&mut self, sess: Sess<'_>) {
-        for instance in sess.mono_functions() {
-            self.scan(sess, instance);
+    pub fn analyze(&mut self, sess: Sess<'_>) {
+        self.pending.extend(sess.entry());
+        let mut visited = FxHashSet::default();
+        while let Some(instance) = self.pending.pop() {
+            if visited.insert(instance) {
+                self.scan(sess, instance);
+            }
         }
         sess.abort_if_errors();
     }
@@ -68,12 +101,19 @@ impl HostView {
             }
             return;
         }
-        if !matches!(instance.kind, InstanceKind::Item) || !instance.has_body() {
+        if (["std", "core", "alloc", "compiler_builtins", "proc_macro"]
+            .contains(&sess.crate_name(def).as_str())
+            && instance.kind != InstanceKind::Shim)
+            || !matches!(instance.kind, InstanceKind::Item | InstanceKind::Shim)
+            || !instance.has_body()
+        {
             return;
         }
         let Some(body) = instance.body() else {
             return;
         };
+        self.pending.extend(sess.callees(instance));
+        self.visit_body(&body);
         for block in &body.blocks {
             let TerminatorKind::Call { func, args, .. } = &block.terminator.kind else {
                 continue;
@@ -104,17 +144,6 @@ impl HostView {
                 );
                 continue;
             };
-            let generics = elements
-                .iter()
-                .map(|element| transfer::portable(sess, *element))
-                .collect::<Result<Vec<_>, _>>();
-            let generics = match generics {
-                Ok(generics) => generics,
-                Err(message) => {
-                    sess.error(block.terminator.source_info.span, message);
-                    continue;
-                }
-            };
             let suffix = if elements.is_empty() {
                 String::new()
             } else {
@@ -132,10 +161,12 @@ impl HostView {
                 key: format!("{module}::{tail}{suffix}"),
                 module,
                 tail,
-                generics,
+                generics: elements,
                 configured,
             };
-            if !self.launches.contains(&launch) {
+            if let Some(existing) = self.launches.iter_mut().find(|item| item.key == launch.key) {
+                existing.configured |= launch.configured;
+            } else {
                 self.launches.push(launch);
             }
         }

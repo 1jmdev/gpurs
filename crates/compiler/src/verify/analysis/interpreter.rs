@@ -3,11 +3,13 @@ use std::{collections::BTreeMap, rc::Rc};
 use gpurs_artifact::Parameter;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 
-use super::{Access, Context, Frame, Obligation, Origin, Pointer, Region, State, Value, bits};
+use super::{
+    Access, Context, Frame, Obligation, Origin, Pointer, Region, State, Value, arithmetic,
+};
 use crate::{
     codegen::KernelParameter,
     stable,
-    stable::*,
+    stable::{Body, Instance, RigidTy, Sess, Span},
     verify::{
         engine::{Engine, Variable},
         render::Names,
@@ -63,7 +65,7 @@ impl<'a, 'sess> Analysis<'a, 'sess> {
             scalars: parameters
                 .iter()
                 .map(|parameter| match stable::rigid(parameter.layout.ty) {
-                    RigidTy::Uint(kind) => bits(kind),
+                    RigidTy::Uint(kind) => arithmetic::bits(kind),
                     _ => 64,
                 })
                 .collect(),

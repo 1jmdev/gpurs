@@ -1,7 +1,7 @@
 use std::{collections::BTreeMap, rc::Rc};
 
 use super::super::symbolic::{Fact, Polynomial, Predicate, Requirement};
-use crate::stable::*;
+use crate::stable::{Body, Instance, Span};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Region {

@@ -1,12 +1,10 @@
-use super::{
-    Analysis, Origin, Pointer, Region, State, Value, integer_kind,
-    place::Location,
-    range,
-    state::{get, set},
-};
+use super::{Analysis, Origin, Pointer, Region, State, Value, arithmetic, place::Location, state};
 use crate::{
     policy, stable,
-    stable::*,
+    stable::{
+        AdtKind, AggregateKind, Allocation, ConstantKind, NonDivergingIntrinsic, Operand, RigidTy,
+        Rvalue, StatementKind, Ty, TyConstKind, TyKind, UnOp, VariantIdx,
+    },
     verify::symbolic::{Atom, Polynomial},
 };
 
@@ -31,10 +29,10 @@ impl Analysis<'_, '_> {
                 let ty = self.place_type(place);
                 let variant = discriminant(ty, *variant_index);
                 if let Location::Slot(slot, path) = self.locate(place, state) {
-                    let mut value = get(&state.slots[slot], &path);
+                    let mut value = state::get(&state.slots[slot], &path);
                     value.variant = variant;
                     value.guards.clear();
-                    set(&mut state.slots[slot], &path, value);
+                    state::set(&mut state.slots[slot], &path, value);
                 }
             }
             StatementKind::StorageLive(local) | StatementKind::StorageDead(local) => {
@@ -56,8 +54,8 @@ impl Analysis<'_, '_> {
         if value.integer.is_some() {
             return;
         }
-        if let Some(kind @ (false, _)) = integer_kind(ty) {
-            let (_, maximum) = range(kind);
+        if let Some(kind @ (false, _)) = arithmetic::integer_kind(ty) {
+            let (_, maximum) = arithmetic::range(kind);
             value.integer = Some(self.variable(
                 path,
                 Polynomial::default(),
@@ -181,7 +179,7 @@ impl Analysis<'_, '_> {
                     },
                     _ => return Value::default(),
                 };
-                if let Some(kind) = integer_kind(ty) {
+                if let Some(kind) = arithmetic::integer_kind(ty) {
                     let value = if kind.0 {
                         allocation.read_int().ok()
                     } else {
@@ -231,7 +229,7 @@ impl Analysis<'_, '_> {
             .into_iter()
             .enumerate()
             .map(|(field, element)| {
-                let Some(kind) = integer_kind(element) else {
+                let Some(kind) = arithmetic::integer_kind(element) else {
                     return Value::default();
                 };
                 let start = shape.offset(field).bytes();

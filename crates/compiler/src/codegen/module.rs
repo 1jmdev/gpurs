@@ -7,7 +7,7 @@ use super::{
     ir::{self, Access, Ordering, Type},
     layout::{self, PassMode, Shape},
 };
-use crate::stable::*;
+use crate::stable::{AllocId, Instance, Sess};
 
 /// Which checks of one function copy the verifier discharged, by MIR block.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]

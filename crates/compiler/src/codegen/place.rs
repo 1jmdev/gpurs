@@ -3,7 +3,13 @@ use super::{
     ir::{self, Access, Binary, Conversion, Flags, Transfer, Type},
     layout::{self, Shape},
 };
-use crate::{stable, stable::*};
+use crate::{
+    stable,
+    stable::{
+        AdtKind, FieldsShape, FloatTy, MachineSize, ProjectionElem, RigidTy, Scalar, Ty, TyKind,
+        ValueRepr, VariantIdx,
+    },
+};
 
 /// A value in registers or, for aggregates, behind a pointer to read-only memory.
 #[derive(Clone, Debug)]

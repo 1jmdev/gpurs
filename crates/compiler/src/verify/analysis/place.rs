@@ -1,8 +1,9 @@
-use super::{
-    Analysis, Origin, Pointer, State, Value,
-    state::{get, pointed_slots, set},
+use super::{Analysis, Origin, Pointer, State, Value, state};
+use crate::{
+    stable,
+    stable::{Operand, Place, ProjectionElem, RigidTy, Ty, TyKind},
+    verify::symbolic::Polynomial,
 };
-use crate::{stable, stable::*, verify::symbolic::Polynomial};
 
 /// Where a place lives.
 pub(super) enum Location {
@@ -19,7 +20,7 @@ impl Analysis<'_, '_> {
             location = match (location, projection) {
                 (location, ProjectionElem::Deref) => {
                     let pointer = match &location {
-                        Location::Slot(slot, path) => get(&state.slots[*slot], path).pointer,
+                        Location::Slot(slot, path) => state::get(&state.slots[*slot], path).pointer,
                         _ => None,
                     };
                     match pointer {
@@ -140,7 +141,7 @@ impl Analysis<'_, '_> {
     pub fn read(&mut self, place: &Place, state: &State) -> Value {
         let variance = self.index_variance(place, state);
         match self.locate(place, state) {
-            Location::Slot(slot, path) => get(&state.slots[slot], &path),
+            Location::Slot(slot, path) => state::get(&state.slots[slot], &path),
             Location::Memory(origin) => {
                 self.access(&origin, false, false, state);
                 let mut value = Value::varying(2);
@@ -165,12 +166,13 @@ impl Analysis<'_, '_> {
 
     pub fn assign(&mut self, place: &Place, value: Value, state: &mut State) {
         match self.locate(place, state) {
-            Location::Slot(slot, path) => set(&mut state.slots[slot], &path, value),
+            Location::Slot(slot, path) => state::set(&mut state.slots[slot], &path, value),
             Location::Memory(origin) => self.access(&origin, true, false, state),
             Location::Unknown => {
                 // A write through an unknown pointer may change any local whose address is
                 // held somewhere.
-                let addressed: Vec<usize> = state.slots.iter().flat_map(pointed_slots).collect();
+                let addressed: Vec<usize> =
+                    state.slots.iter().flat_map(state::pointed_slots).collect();
                 for slot in addressed {
                     if let Some(value) = state.slots.get_mut(slot) {
                         *value = Value::varying(2);

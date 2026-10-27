@@ -1,9 +1,9 @@
 use rustc_data_structures::fx::FxHashSet;
 
-use super::{Analysis, Kind, Obligation, Region, State, Value, integer_kind, range};
+use super::{Analysis, Kind, Obligation, Region, State, Value, arithmetic};
 use crate::{
     diagnostic, policy,
-    stable::*,
+    stable::{AssertMessage, BinOp, Body, TerminatorKind},
     verify::symbolic::{Atom, Fact, Polynomial, Predicate, Relation, Requirement},
 };
 
@@ -24,10 +24,11 @@ impl Analysis<'_, '_> {
                         .map_or(targets.otherwise(), |(_, target)| target);
                     return vec![(target, Vec::new())];
                 }
-                let integer = value
-                    .integer
-                    .clone()
-                    .filter(|_| self.operand_type(discr).and_then(integer_kind).is_some());
+                let integer = value.integer.clone().filter(|_| {
+                    self.operand_type(discr)
+                        .and_then(arithmetic::integer_kind)
+                        .is_some()
+                });
                 let branches: Vec<_> = targets.branches().collect();
                 let mut successors: Vec<_> = branches
                     .iter()
@@ -170,12 +171,12 @@ impl Analysis<'_, '_> {
                 (Kind::Memory, guard(), description)
             }
             AssertMessage::Overflow(operation, left, right) => {
-                let kind = self.operand_type(left).and_then(integer_kind);
+                let kind = self.operand_type(left).and_then(arithmetic::integer_kind);
                 let (left, right) = (self.operand(left, state), self.operand(right, state));
                 let goals = kind
                     .zip(left.integer.clone().zip(right.integer.clone()))
                     .and_then(|((signed, bits), (a, b))| {
-                        let (minimum, maximum) = range((signed, bits));
+                        let (minimum, maximum) = arithmetic::range((signed, bits));
                         let result = match operation {
                             BinOp::Add => a.add(&b, 1)?,
                             BinOp::Sub => a.add(&b, -1)?,

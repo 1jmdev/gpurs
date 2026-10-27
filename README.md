@@ -193,10 +193,6 @@ A configured launch of a value-returning function returns a buffer with one resu
 
 Failures in GPU work are observed when the affected work is synchronized or its result is downloaded. gpurs tracks dependencies so failures can propagate to dependent work; overwriting affected buffer regions allows those regions to be recovered.
 
-## How it works
-
-The build script runs a separate Cargo check to discover launches and GPU functions. gpurs examines and verifies Rust's typed intermediate representation, lowers GPU code to NVVM IR, and uses libNVVM and `ptxas` to produce a CUBIN. The CUBIN and launch metadata are embedded in the executable. At runtime gpurs loads kernels through the NVIDIA driver and tracks buffer access and stream dependencies. GPU code is limited to the operations and types supported by the gpurs compiler.
-
 ## License
 
 [MIT](LICENSE), copyright 2026 1jmdev.

@@ -5,7 +5,7 @@ use super::{
     layout::PassMode,
     place::{Operand, Place, Value},
 };
-use crate::stable::*;
+use crate::stable::{Instance, InstanceKind, RigidTy, TyKind};
 
 impl<'sess> FunctionBuilder<'_, 'sess> {
     pub fn call(

@@ -4,11 +4,6 @@
 use std::{env, path::PathBuf, process::Command};
 
 fn main() {
-    println!("cargo::rerun-if-env-changed=GPURS_DEVICE_BUILD");
-    if env::var_os("GPURS_DEVICE_BUILD").is_some() {
-        println!("cargo::rustc-env=GPURS_COMPILER_LIBRARY=");
-        return;
-    }
     let crates = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap()).join("..");
     let target = PathBuf::from(env::var("OUT_DIR").unwrap()).join("compiler");
     let status = cargo(&env::var("CARGO").unwrap())
@@ -35,11 +30,6 @@ fn main() {
             crates.join(dependency).display()
         );
     }
-    // Kernels inline device-side `gpurs` code, so a change to it must re-run the device view.
-    println!(
-        "cargo::rerun-if-changed={}",
-        crates.join("gpurs/src").display()
-    );
     for manifest in ["Cargo.toml", "Cargo.lock"] {
         println!(
             "cargo::rerun-if-changed={}",
