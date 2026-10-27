@@ -22,7 +22,32 @@ pub fn is(tcx: TyCtxt<'_>, def_id: DefId, expected: &str) -> bool {
 }
 
 pub fn math(tcx: TyCtxt<'_>, def_id: DefId) -> Option<String> {
-    if !path(tcx, def_id).starts_with("core::num::imp::libm::") {
+    let path = path(tcx, def_id);
+    if let Some(suffix) = ["f32", "f64"]
+        .into_iter()
+        .find(|suffix| path.starts_with(&format!("std::{suffix}::")))
+    {
+        let operation = tcx.item_name(def_id);
+        return matches!(
+            operation.as_str(),
+            "sqrt"
+                | "floor"
+                | "ceil"
+                | "trunc"
+                | "round"
+                | "round_ties_even"
+                | "sin"
+                | "cos"
+                | "exp"
+                | "exp2"
+                | "log2"
+                | "log10"
+                | "powf"
+                | "powi"
+        )
+        .then(|| format!("{}{suffix}", operation.as_str()));
+    }
+    if !path.starts_with("core::num::imp::libm::") {
         return None;
     }
     let name = tcx.item_name(def_id);

@@ -1,18 +1,21 @@
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::RefCell, mem::MaybeUninit, rc::Rc};
 
 use gpurs_driver as driver;
 
 use crate::{
     buffer::{Buffer, Pending},
     device::Device,
-    tracking::Status,
+    tracking::{self, Access, Status},
 };
 
 /// An ordered queue of GPU work. Launches return without waiting for completion.
 pub struct Stream {
     pub(crate) device: Rc<Device>,
-    pub(crate) raw: driver::Stream,
+    pub(crate) raw: Rc<driver::Stream>,
     pub(crate) launched: RefCell<Vec<Rc<Status>>>,
+    pub(crate) arguments: RefCell<Vec<MaybeUninit<u8>>>,
+    pub(crate) lengths: RefCell<Vec<u64>>,
+    pub(crate) accesses: RefCell<Vec<Access>>,
 }
 
 /// Explicit grid and block geometry for one launch.
@@ -52,8 +55,11 @@ impl Stream {
     pub(crate) fn new(device: Rc<Device>) -> Self {
         Stream {
             device,
-            raw: driver::Stream::new(),
+            raw: Rc::new(driver::Stream::new()),
             launched: RefCell::default(),
+            arguments: RefCell::default(),
+            lengths: RefCell::default(),
+            accesses: RefCell::default(),
         }
     }
 
@@ -69,10 +75,7 @@ impl Stream {
     #[track_caller]
     pub fn synchronize(&self) {
         self.raw.synchronize();
-        self.launched
-            .take()
-            .iter()
-            .for_each(|status| status.observe());
+        tracking::observe(&self.launched.take());
     }
 }
 

@@ -33,6 +33,8 @@ impl DeviceView {
         }
         tcx.dcx().abort_if_errors();
         let mut module = ModuleBuilder::new(tcx);
+        let mut proven = ModuleBuilder::new(tcx);
+        proven.checked = false;
         let mut kernels = Vec::new();
         for launch in &self.host.launches {
             let Some((def_id, _)) = definitions.iter().find(|(def_id, tail)| {
@@ -71,7 +73,7 @@ impl DeviceView {
             if let Some((parameters, extent, conditions, proofs)) =
                 verify::kernel(tcx, instance, launch.configured)
             {
-                kernels.push(module.kernel(KernelPlan {
+                let plan = KernelPlan {
                     instance,
                     key: launch.key.clone(),
                     symbol: format!("gpurs_kernel_{}", kernels.len()),
@@ -79,7 +81,9 @@ impl DeviceView {
                     extent,
                     conditions,
                     proofs,
-                }));
+                };
+                proven.kernel(plan.clone());
+                kernels.push(module.kernel(plan));
             }
         }
         tcx.dcx().abort_if_errors();
@@ -97,19 +101,48 @@ impl DeviceView {
             let ir = module.finish();
             tcx.dcx().abort_if_errors();
             let toolkit = nvvm::toolkit()?;
+            let proven_ir = proven.finish();
+            let proven = nvvm::ptx(&toolkit, &proven_ir, &architecture)?;
+            for kernel in &mut kernels {
+                kernel.infallible = if nvvm::infallible(&proven, &kernel.symbol) {
+                    Some(gpurs_artifact::Variant {
+                        symbol: kernel.symbol.clone(),
+                        bounds: Vec::new(),
+                    })
+                } else {
+                    kernel
+                        .fast
+                        .as_ref()
+                        .filter(|variant| nvvm::infallible(&proven, &variant.symbol))
+                        .cloned()
+                };
+            }
             let scratch = directory.join(&self.crate_name);
             fs::create_dir_all(&scratch).map_err(|error| error.to_string())?;
             if env::var_os("GPURS_KEEP_IR").is_some() {
                 fs::write(scratch.join("kernels.ll"), &ir).map_err(|error| error.to_string())?;
+                fs::write(scratch.join("proven.ll"), &proven_ir)
+                    .map_err(|error| error.to_string())?;
+                fs::write(scratch.join("proven.ptx"), &proven)
+                    .map_err(|error| error.to_string())?;
             }
             let ptx = nvvm::ptx(&toolkit, &ir, &architecture)?;
             let cubin = nvvm::cubin(&toolkit, &ptx, &architecture, &scratch)?;
+            let infallible = if kernels.iter().any(|kernel| kernel.infallible.is_some()) {
+                nvvm::cubin(&toolkit, &proven, &architecture, &scratch)?
+            } else {
+                Vec::new()
+            };
             if env::var_os("GPURS_KEEP_IR").is_none() {
                 fs::remove_file(scratch.join("kernels.ptx")).map_err(|error| error.to_string())?;
                 fs::remove_file(scratch.join("kernels.cubin"))
                     .map_err(|error| error.to_string())?;
             }
-            artifact.modules.push(Module { cubin, kernels });
+            artifact.modules.push(Module {
+                cubin,
+                infallible,
+                kernels,
+            });
         }
         fs::write(
             directory.join(format!("{}.gpurs", self.crate_name)),

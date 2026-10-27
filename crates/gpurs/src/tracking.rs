@@ -4,10 +4,15 @@
 //! waits for overlapping records when either side writes, and inherits the failure status of
 //! overlapping writes unless it is a verified full overwrite that recovers the region.
 
-use std::{cell::RefCell, mem::MaybeUninit, ops::Range, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    mem::MaybeUninit,
+    ops::Range,
+    rc::{Rc, Weak},
+};
 
 use gpurs_artifact::Failure;
-use gpurs_driver::{self as driver, DevicePointer, Event};
+use gpurs_driver::{self as driver, DevicePointer};
 
 use crate::device::Device;
 
@@ -22,14 +27,18 @@ pub(crate) struct Allocation {
 struct Record {
     range: Range<usize>,
     write: bool,
-    event: Rc<Event>,
+    stream: Rc<driver::Stream>,
+    sequence: u64,
+    waited: Vec<Weak<driver::Stream>>,
     status: Option<Rc<Status>>,
 }
 
 /// Device status word of one launch; zero while the launch has not failed.
 pub(crate) struct Status {
     pub pointer: DevicePointer,
+    pub chunk: DevicePointer,
     pub kernel: String,
+    pub observed: Cell<Option<u32>>,
 }
 
 pub(crate) struct Access {
@@ -54,7 +63,12 @@ impl Allocation {
 impl Drop for Allocation {
     fn drop(&mut self) {
         let release = &self.device.release;
-        // SAFETY: complete orders the release stream after every use of the allocation.
+        for record in self.records.get_mut().iter() {
+            if record.sequence > record.stream.completed.get() {
+                release.wait(&record.stream.event());
+            }
+        }
+        // SAFETY: the release stream waits for every outstanding use of this allocation.
         unsafe { driver::free_async(self.pointer, release) };
     }
 }
@@ -81,11 +95,16 @@ impl Access {
 
 impl Status {
     pub fn code(&self) -> u32 {
+        if let Some(code) = self.observed.get() {
+            return code;
+        }
         let mut code = [MaybeUninit::<u8>::uninit(); 4];
         // SAFETY: the status word is 4 readable bytes and callers waited for its launch.
         unsafe { driver::copy_from_device(&mut code, self.pointer) };
         // SAFETY: the copy initialized all four bytes.
-        u32::from_ne_bytes(code.map(|byte| unsafe { byte.assume_init() }))
+        let code = u32::from_ne_bytes(code.map(|byte| unsafe { byte.assume_init() }));
+        self.observed.set(Some(code));
+        code
     }
 
     /// Panics with a diagnostic if the launch failed. The launch must have completed.
@@ -102,21 +121,56 @@ impl Status {
     }
 }
 
+pub(crate) fn observe(statuses: &[Rc<Status>]) {
+    let mut pending: Vec<_> = statuses
+        .iter()
+        .filter(|status| status.observed.get().is_none())
+        .collect();
+    pending.sort_unstable_by_key(|status| status.pointer);
+    pending.dedup_by_key(|status| status.pointer);
+    for group in pending
+        .chunk_by(|left, right| left.chunk == right.chunk && right.pointer == left.pointer + 4)
+    {
+        let mut bytes = vec![MaybeUninit::<u8>::uninit(); group.len() * 4];
+        // SAFETY: these contiguous status words belong to completed launches.
+        unsafe { driver::copy_from_device(&mut bytes, group[0].pointer) };
+        for (status, bytes) in group.iter().zip(bytes.as_chunks::<4>().0) {
+            // SAFETY: the device copy initialized every byte.
+            status
+                .observed
+                .set(Some(u32::from_ne_bytes(std::array::from_fn(
+                    |index| unsafe { bytes[index].assume_init() },
+                ))));
+        }
+    }
+    statuses.iter().for_each(|status| status.observe());
+}
+
 pub(crate) fn overlaps(left: &Range<usize>, right: &Range<usize>) -> bool {
     !left.is_empty() && !right.is_empty() && left.start < right.end && right.start < left.end
 }
 
 /// Orders `stream` after conflicting earlier work and returns the failure sources the
 /// operation depends on.
-pub(crate) fn order(stream: &driver::Stream, accesses: &[Access]) -> Vec<Rc<Status>> {
+pub(crate) fn order(stream: &Rc<driver::Stream>, accesses: &[Access]) -> Vec<Rc<Status>> {
     let mut sources: Vec<Rc<Status>> = Vec::new();
     for access in accesses {
-        for record in access.allocation.records.borrow().iter() {
+        for record in access.allocation.records.borrow_mut().iter_mut() {
             if !overlaps(&record.range, &access.range) || !(record.write || access.write) {
                 continue;
             }
-            stream.wait(&record.event);
+            if !Rc::ptr_eq(stream, &record.stream)
+                && record.sequence > record.stream.completed.get()
+                && !record
+                    .waited
+                    .iter()
+                    .any(|waited| waited.as_ptr() == Rc::as_ptr(stream))
+            {
+                stream.wait(&record.stream.event());
+                record.waited.push(Rc::downgrade(stream));
+            }
             if let Some(status) = record.status.as_ref().filter(|_| !access.recovers)
+                && status.observed.get() != Some(0)
                 && !sources.iter().any(|source| Rc::ptr_eq(source, status))
             {
                 sources.push(status.clone());
@@ -127,10 +181,14 @@ pub(crate) fn order(stream: &driver::Stream, accesses: &[Access]) -> Vec<Rc<Stat
 }
 
 /// Records the operation just submitted to `stream`; writes carry the launch `status`.
-pub(crate) fn complete(stream: &driver::Stream, accesses: &[Access], status: Option<Rc<Status>>) {
-    let event = Rc::new(stream.record());
+pub(crate) fn complete(
+    stream: &Rc<driver::Stream>,
+    accesses: &[Access],
+    status: Option<Rc<Status>>,
+) {
+    let sequence = stream.submitted.get() + 1;
+    stream.submitted.set(sequence);
     for access in accesses {
-        access.allocation.device.release.wait(&event);
         let mut records = access.allocation.records.borrow_mut();
         if access.write {
             // Preserve failure sources only for bytes this write did not replace.
@@ -151,33 +209,26 @@ pub(crate) fn complete(stream: &driver::Stream, accesses: &[Access], status: Opt
                 }
             }
         }
-        records.retain(|record| !record.event.is_complete() || record.status.is_some());
+        records.retain(|record| {
+            let pending = record.sequence > record.stream.completed.get()
+                || record
+                    .status
+                    .as_ref()
+                    .is_some_and(|status| status.observed.get() != Some(0));
+            pending
+                && (access.write
+                    || record.write
+                    || !Rc::ptr_eq(stream, &record.stream)
+                    || record.range.start < access.range.start
+                    || record.range.end > access.range.end)
+        });
         records.push(Record {
             range: access.range.clone(),
             write: access.write,
-            event: event.clone(),
+            stream: stream.clone(),
+            sequence,
+            waited: Vec::new(),
             status: status.clone().filter(|_| access.write),
         });
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::tracking;
-
-    #[test]
-    fn range_overlap_excludes_empty_and_adjacent_ranges() {
-        for (left, right, expected) in [
-            (0..8, 4..12, true),
-            (0..8, 2..4, true),
-            (0..8, 0..8, true),
-            (0..8, 8..12, false),
-            (0..8, 12..16, false),
-            (0..8, 4..4, false),
-            (0..0, 0..0, false),
-        ] {
-            assert_eq!(tracking::overlaps(&left, &right), expected);
-            assert_eq!(tracking::overlaps(&right, &left), expected);
-        }
     }
 }

@@ -265,12 +265,27 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
                     place.align.restrict_for_offset(b_offset),
                 );
             }
-            (Value::Memory(source, align), _) => self.copy(
-                &place.pointer,
-                source,
-                operand.layout.size,
-                place.align.min(*align),
-            ),
+            (Value::Memory(source, align), _) => {
+                let mut layout = operand.layout;
+                while let ty::Adt(definition, _) = layout.ty.kind()
+                    && definition.is_struct()
+                    && layout.fields.count() == 1
+                    && layout.fields.offset(0).bytes() == 0
+                    && layout.field(&self.module.cx, 0).size == layout.size
+                {
+                    layout = layout.field(&self.module.cx, 0);
+                }
+                let typed = matches!(layout.ty.kind(), ty::Array(element, _)
+                    if matches!(element.kind(), ty::Float(ty::FloatTy::F32 | ty::FloatTy::F64) | ty::Int(_) | ty::Uint(_)));
+                self.copy(
+                    &place.pointer,
+                    source,
+                    operand.layout.size,
+                    place.align,
+                    *align,
+                    typed,
+                );
+            }
             (value, repr) => panic!("cannot store {value:?} as {repr:?}"),
         }
     }
@@ -298,11 +313,38 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
         ));
     }
 
-    pub fn copy(&mut self, destination: &str, source: &str, size: Size, align: Align) {
+    pub fn copy(
+        &mut self,
+        destination: &str,
+        source: &str,
+        size: Size,
+        destination_align: Align,
+        source_align: Align,
+        typed: bool,
+    ) {
+        if typed
+            && size.bytes() > 0
+            && size.bytes().is_multiple_of(4)
+            && destination_align.bytes() >= 4
+            && source_align.bytes() >= 4
+        {
+            let ty = format!("<{} x i32>", size.bytes() / 4);
+            let source = self.instruction(format!("bitcast i8* {source} to {ty}*"));
+            let value = self.instruction(format!(
+                "load {ty}, {ty}* {source}, align {}",
+                source_align.bytes()
+            ));
+            let destination = self.instruction(format!("bitcast i8* {destination} to {ty}*"));
+            self.emit(format!(
+                "store {ty} {value}, {ty}* {destination}, align {}",
+                destination_align.bytes()
+            ));
+            return;
+        }
         if size.bytes() > 0 {
             self.emit(format!(
                 "call void @llvm.memcpy.p0i8.p0i8.i64(i8* align {align} {destination}, i8* align {align} {source}, i64 {size}, i1 false)",
-                align = align.bytes(),
+                align = destination_align.min(source_align).bytes(),
                 size = size.bytes()
             ));
         }

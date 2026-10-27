@@ -119,6 +119,16 @@ impl<'tcx> Analysis<'_, 'tcx> {
                     && value.variable() == Some(&Atom::Thread(0))
                     && divisor.is_multiple_of(32)
                 {
+                    if self.collect {
+                        for axis in [1, 2] {
+                            self.condition(
+                                gpurs_artifact::Expression::BlockDimension(axis),
+                                gpurs_artifact::Relation::Equal,
+                                gpurs_artifact::Expression::Constant(1),
+                                "thread-x warp groups require a one-dimensional block",
+                            );
+                        }
+                    }
                     1
                 } else {
                     variance
@@ -177,6 +187,46 @@ impl<'tcx> Analysis<'_, 'tcx> {
             mir::Operand::Copy(place) | mir::Operand::Move(place) => self.read(*place, state),
             mir::Operand::Constant(constant) => {
                 let constant = self.monomorphize(constant.const_);
+                if self.is_range(constant.ty())
+                    && let Ok(mir::ConstValue::Indirect { alloc_id, offset }) =
+                        constant.eval(self.tcx, TypingEnv::fully_monomorphized(), self.span)
+                    && let mir::interpret::GlobalAlloc::Memory(allocation) =
+                        self.tcx.global_alloc(alloc_id)
+                {
+                    let ty::Adt(_, arguments) = constant.ty().kind() else {
+                        unreachable!()
+                    };
+                    let environment = TypingEnv::fully_monomorphized();
+                    let layout = self
+                        .tcx
+                        .layout_of(environment.as_query_input(constant.ty()))
+                        .unwrap();
+                    let element = self
+                        .tcx
+                        .layout_of(environment.as_query_input(arguments.type_at(0)))
+                        .unwrap();
+                    let fields = (0..2)
+                        .map(|field| {
+                            let start = (offset + layout.fields.offset(field)).bytes() as usize;
+                            let bytes = allocation
+                                .inner()
+                                .inspect_with_uninit_and_ptr_outside_interpreter(
+                                    start..start + element.size.bytes() as usize,
+                                );
+                            let mut integer = [0; 16];
+                            integer[..bytes.len()].copy_from_slice(bytes);
+                            i128::try_from(u128::from_le_bytes(integer))
+                                .ok()
+                                .map_or_else(Value::default, |value| {
+                                    Value::expression(Polynomial::constant(value), 0)
+                                })
+                        })
+                        .collect();
+                    return Value {
+                        fields,
+                        ..Value::default()
+                    };
+                }
                 Value {
                     expression: constant
                         .try_eval_bits(self.tcx, TypingEnv::fully_monomorphized())

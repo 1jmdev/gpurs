@@ -155,7 +155,10 @@ impl Analysis<'_, '_> {
                     diagnostic::error(
                         self.tcx,
                         span,
-                        "threads may reach this GPU collective on different control-flow paths",
+                        format!(
+                            "threads may reach this GPU collective on different control-flow paths in `{}`",
+                            self.instance
+                        ),
                         "move block barriers outside thread-dependent branches; warp collectives require every lane of the warp to participate",
                     );
                 }

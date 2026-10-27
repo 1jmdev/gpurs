@@ -154,7 +154,13 @@ pub(in crate::verify) fn verify<'tcx>(
     if configured || extent != Extent::Single {
         analysis.races();
     }
-    (extent, analysis.conditions, analysis.proofs)
+    let mut conditions = Vec::new();
+    for condition in analysis.conditions {
+        if !conditions.contains(&condition) {
+            conditions.push(condition);
+        }
+    }
+    (extent, conditions, analysis.proofs)
 }
 
 impl<'tcx> Analysis<'_, 'tcx> {
@@ -269,8 +275,19 @@ impl<'tcx> Analysis<'_, 'tcx> {
                 .get(1)
                 .and_then(bounds::maximum)
                 .map(|end| end.add(&Polynomial::constant(1), -1));
+            let expression = (variance == 0)
+                .then(|| {
+                    let end = maximum.as_ref()?.value()?.checked_add(1)?;
+                    Some(if end == 1 {
+                        Polynomial::constant(0)
+                    } else {
+                        Polynomial::atom(Atom::Iteration(self.block, u64::try_from(end).ok()?))
+                    })
+                })
+                .flatten();
             return Value {
                 fields: vec![Value {
+                    expression,
                     maximum,
                     variance,
                     ..Value::default()
@@ -312,6 +329,14 @@ impl<'tcx> Analysis<'_, 'tcx> {
         if path == "gpurs::gpu::warp::lane_id" {
             self.uses_index = true;
             self.geometry = true;
+            if self.collect {
+                self.condition(
+                    Expression::Constant(32),
+                    Relation::Divides,
+                    Expression::BlockDimension(0),
+                    "warp lane proofs require thread-x rows aligned to complete warps",
+                );
+            }
             return Value::expression(
                 Polynomial::atom(Atom::Remainder(
                     Box::new(Polynomial::atom(Atom::Thread(0))),
@@ -335,7 +360,7 @@ impl<'tcx> Analysis<'_, 'tcx> {
                 self.condition(
                     Expression::Constant(32),
                     Relation::Divides,
-                    Expression::BlockDimension(0),
+                    Expression::BlockThreads,
                     "warp operations require complete warps",
                 );
             }
@@ -428,7 +453,13 @@ impl<'tcx> Analysis<'_, 'tcx> {
             || value.fields.iter().any(|field| self.writable(field))
     }
 
-    fn condition(&mut self, left: Expression, relation: Relation, right: Expression, reason: &str) {
+    pub(super) fn condition(
+        &mut self,
+        left: Expression,
+        relation: Relation,
+        right: Expression,
+        reason: &str,
+    ) {
         let condition = Condition {
             left,
             relation,

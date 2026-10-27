@@ -2,7 +2,7 @@ use std::fmt::Write;
 
 use gpurs_artifact::{
     Bound, Condition, Expression, Extent, Failure, INPUT_CAPACITY, INPUTS_OFFSET, Kernel,
-    Parameter, RESULT_OFFSET, Relation, Value, Variant, parameter_offsets,
+    PARAMETERS_OFFSET, Parameter, RESULT_OFFSET, Relation, Value, Variant, parameter_offsets,
 };
 use rustc_middle::{
     mir::BasicBlock,
@@ -11,11 +11,13 @@ use rustc_middle::{
 
 use super::{function::FunctionBuilder, module::ModuleBuilder, place::Place};
 
+#[derive(Clone, Copy)]
 pub struct KernelParameter<'tcx> {
     pub layout: TyAndLayout<'tcx>,
     pub metadata: Parameter,
 }
 
+#[derive(Clone)]
 pub struct KernelPlan<'tcx> {
     pub instance: Instance<'tcx>,
     pub key: String,
@@ -29,6 +31,34 @@ pub struct KernelPlan<'tcx> {
 
 impl<'tcx> ModuleBuilder<'tcx> {
     pub fn kernel(&mut self, plan: KernelPlan<'tcx>) -> Kernel {
+        let dimensions = std::array::from_fn(|index| {
+            let dimension = if index < 3 {
+                Expression::BlockDimension(index)
+            } else {
+                Expression::GridDimension(index - 3)
+            };
+            plan.conditions
+                .iter()
+                .find_map(|condition| match condition {
+                    Condition {
+                        left,
+                        relation: Relation::Equal,
+                        right: Expression::Constant(value),
+                        ..
+                    } if *left == dimension => Some(*value),
+                    _ => None,
+                })
+        });
+        self.dimensions
+            .entry(plan.instance)
+            .and_modify(|previous| {
+                for (previous, current) in previous.iter_mut().zip(dimensions) {
+                    if *previous != current {
+                        *previous = None;
+                    }
+                }
+            })
+            .or_insert(dimensions);
         let root = self.function(plan.instance);
         self.entry(&plan, &plan.symbol, root);
         let fast = (!plan.proofs.is_empty()).then(|| {
@@ -62,6 +92,7 @@ impl<'tcx> ModuleBuilder<'tcx> {
             }),
             conditions: plan.conditions,
             fast,
+            infallible: None,
         }
     }
 
@@ -84,10 +115,19 @@ impl<'tcx> ModuleBuilder<'tcx> {
             size: signature.result.1.size.bytes(),
             align: signature.result.1.align.abi.bytes(),
         });
+        let argument_offset = if self.checked {
+            0
+        } else {
+            let start = if result.is_some() {
+                RESULT_OFFSET
+            } else {
+                PARAMETERS_OFFSET
+            };
+            start / align * align
+        };
+        let size = size - argument_offset;
         let mut function = FunctionBuilder::new(self, plan.instance);
         let arguments = function.instruction(format!("bitcast [{size} x i8]* %arguments to i8*"));
-        let status = function.instruction(format!("bitcast i8* {arguments} to i32**"));
-        let status = function.instruction(format!("load i32*, i32** {status}, align 8"));
         let raw: Vec<_> = [
             "tid.x", "tid.y", "tid.z", "ctaid.x", "ctaid.y", "ctaid.z", "ntid.x", "ntid.y",
             "ntid.z", "nctaid.x", "nctaid.y", "nctaid.z",
@@ -131,40 +171,44 @@ impl<'tcx> ModuleBuilder<'tcx> {
         let first = function.instruction(format!("or i64 {}, {}", registers[0], registers[1]));
         let first = function.instruction(format!("or i64 {first}, {}", registers[2]));
         let first = function.instruction(format!("icmp eq i64 {first}, 0"));
-        function.emit(format!("br i1 {first}, label %status, label %ready"));
-        function.start_block("status");
-        function.emit(format!(
-            "store i32* {status}, i32* addrspace(3)* @gpurs.status, align 8"
-        ));
-        // The first thread checks the failure sources once for its block; when one failed, it
-        // fails with `Upstream`, and the barrier then stops the rest of the block.
-        for index in 0..INPUT_CAPACITY {
-            let pointer = function.offset(&arguments, INPUTS_OFFSET + index as u64 * 8);
-            let pointer = function.instruction(format!("bitcast i8* {pointer} to i32**"));
-            let pointer = function.instruction(format!("load i32*, i32** {pointer}, align 8"));
-            let present = function.instruction(format!("icmp ne i32* {pointer}, null"));
+        if function.module.checked {
+            let status = function.instruction(format!("bitcast i8* {arguments} to i32**"));
+            let status = function.instruction(format!("load i32*, i32** {status}, align 8"));
+            function.emit(format!("br i1 {first}, label %status, label %ready"));
+            function.start_block("status");
             function.emit(format!(
-                "br i1 {present}, label %input{index}, label %inputs"
+                "store i32* {status}, i32* addrspace(3)* @gpurs.status, align 8"
             ));
-            function.start_block(&format!("input{index}"));
-            let value = function.instruction(format!(
-                "load atomic i32, i32* {pointer} monotonic, align 4"
-            ));
-            let failed = function.instruction(format!("icmp ne i32 {value}, 0"));
-            function.emit(format!("br i1 {failed}, label %failed, label %next{index}"));
-            function.start_block(&format!("next{index}"));
+            // The first thread checks the failure sources once for its block; when one failed, it
+            // fails with `Upstream`, and the barrier then stops the rest of the block.
+            for index in 0..INPUT_CAPACITY {
+                let pointer = function.offset(&arguments, INPUTS_OFFSET + index as u64 * 8);
+                let pointer = function.instruction(format!("bitcast i8* {pointer} to i32**"));
+                let pointer = function.instruction(format!("load i32*, i32** {pointer}, align 8"));
+                let present = function.instruction(format!("icmp ne i32* {pointer}, null"));
+                function.emit(format!(
+                    "br i1 {present}, label %input{index}, label %inputs"
+                ));
+                function.start_block(&format!("input{index}"));
+                let value = function.instruction(format!(
+                    "load atomic i32, i32* {pointer} monotonic, align 4"
+                ));
+                let failed = function.instruction(format!("icmp ne i32 {value}, 0"));
+                function.emit(format!("br i1 {failed}, label %failed, label %next{index}"));
+                function.start_block(&format!("next{index}"));
+            }
+            function.emit("br label %inputs");
+            function.start_block("inputs");
+            function.emit("br label %ready");
+            function.start_block("ready");
+            function.barrier();
         }
-        function.emit("br label %inputs");
-        function.start_block("inputs");
-        function.emit("br label %ready");
-        function.start_block("ready");
-        function.barrier();
         let operands: Vec<_> = plan
             .parameters
             .iter()
             .zip(offsets)
             .map(|(parameter, offset)| {
-                let pointer = function.offset(&arguments, offset);
+                let pointer = function.offset(&arguments, offset - argument_offset);
                 function.load(&Place::new(pointer, parameter.layout))
             })
             .collect();
@@ -187,7 +231,7 @@ impl<'tcx> ModuleBuilder<'tcx> {
             let index = function.instruction(format!("mul i64 {block}, {threads}"));
             let index = function.instruction(format!("add i64 {index}, {thread}"));
             let offset = function.instruction(format!("mul i64 {index}, {}", result.size));
-            let pointer = function.offset(&arguments, RESULT_OFFSET);
+            let pointer = function.offset(&arguments, RESULT_OFFSET - argument_offset);
             let pointer = function.instruction(format!("bitcast i8* {pointer} to i8**"));
             let pointer = function.instruction(format!("load i8*, i8** {pointer}, align 8"));
             let pointer = function.instruction(format!(

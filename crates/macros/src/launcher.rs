@@ -84,11 +84,19 @@ pub(crate) fn launcher(
     quote! {
         fn #name<#(#generic_parameters,)* __S: ::gpurs::Launch>(#(#inputs),*) #output #where_clause {
             #reference
-            let mut __launch = ::gpurs::__private::kernel::<__S, (#(#generics,)*)>(
-                stream,
-                ::core::module_path!(),
-                #tail,
-            );
+            ::std::thread_local! {
+                static __KERNEL: ::gpurs::__private::KernelCache = const {
+                    ::gpurs::__private::KernelCache::new()
+                };
+            }
+            let mut __launch = __KERNEL.with(|cache| {
+                ::gpurs::__private::kernel::<__S, (#(#generics,)*)>(
+                    stream,
+                    ::core::module_path!(),
+                    #tail,
+                    cache,
+                )
+            });
             #(#arguments)*
             #finish
         }

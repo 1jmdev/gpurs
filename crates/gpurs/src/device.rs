@@ -1,5 +1,5 @@
 use std::{
-    cell::{OnceCell, RefCell},
+    cell::{Cell, OnceCell, RefCell},
     collections::HashMap,
     mem::MaybeUninit,
     rc::Rc,
@@ -25,12 +25,13 @@ pub struct Gpu {
 }
 
 pub(crate) struct Device {
-    pub transfer: driver::Stream,
-    pub download: driver::Stream,
-    pub release: driver::Stream,
+    pub transfer: Rc<driver::Stream>,
+    pub download: Rc<driver::Stream>,
+    pub release: Rc<driver::Stream>,
     pub artifact: Artifact,
     modules: Vec<OnceCell<Module>>,
-    kernels: RefCell<HashMap<String, Rc<LoadedKernel>>>,
+    infallible: Vec<OnceCell<Module>>,
+    kernels: RefCell<HashMap<(&'static str, &'static str, &'static str), Rc<LoadedKernel>>>,
     statuses: RefCell<Vec<DevicePointer>>,
     status_count: RefCell<usize>,
     pub context: Context,
@@ -39,6 +40,11 @@ pub(crate) struct Device {
 pub(crate) struct LoadedKernel {
     pub function: Function,
     pub fast: Option<Function>,
+    pub infallible: Option<Function>,
+    pub offsets: Vec<u64>,
+    pub size: usize,
+    pub infallible_offset: usize,
+    pub validated: RefCell<Option<launch::ValidatedLaunch>>,
     pub metadata: Kernel,
     pub block_size: OnceCell<u32>,
 }
@@ -65,10 +71,11 @@ impl Gpu {
             );
         }
         let device = Device {
-            transfer: driver::Stream::new(),
-            download: driver::Stream::new(),
-            release: driver::Stream::new(),
+            transfer: Rc::new(driver::Stream::new()),
+            download: Rc::new(driver::Stream::new()),
+            release: Rc::new(driver::Stream::new()),
             modules: artifact.modules.iter().map(|_| OnceCell::new()).collect(),
+            infallible: artifact.modules.iter().map(|_| OnceCell::new()).collect(),
             artifact,
             kernels: RefCell::default(),
             statuses: RefCell::default(),
@@ -130,10 +137,21 @@ impl Gpu {
 
 impl Device {
     #[track_caller]
-    pub fn kernel(&self, key: &str) -> Rc<LoadedKernel> {
-        if let Some(kernel) = self.kernels.borrow().get(key) {
+    pub fn kernel(
+        &self,
+        module: &'static str,
+        tail: &'static str,
+        generics: &'static str,
+    ) -> Rc<LoadedKernel> {
+        let identity = (module, tail, generics);
+        if let Some(kernel) = self.kernels.borrow().get(&identity) {
             return kernel.clone();
         }
+        let key = if generics == "()" {
+            format!("{module}::{tail}")
+        } else {
+            format!("{module}::{tail}{generics}")
+        };
         let found = self
             .artifact
             .modules
@@ -151,18 +169,38 @@ impl Device {
         };
         let module =
             self.modules[index].get_or_init(|| Module::load(&self.artifact.modules[index].cubin));
+        let (offsets, size) = gpurs_artifact::parameter_offsets(&metadata.parameters);
+        let align = metadata
+            .parameters
+            .iter()
+            .map(|parameter| parameter.value().align)
+            .max()
+            .unwrap_or(8)
+            .max(8);
+        let start = if metadata.result.is_some() {
+            gpurs_artifact::RESULT_OFFSET
+        } else {
+            gpurs_artifact::PARAMETERS_OFFSET
+        };
         let kernel = Rc::new(LoadedKernel {
             function: module.function(&metadata.symbol),
             fast: metadata
                 .fast
                 .as_ref()
                 .map(|fast| module.function(&fast.symbol)),
+            infallible: metadata.infallible.as_ref().map(|variant| {
+                self.infallible[index]
+                    .get_or_init(|| Module::load(&self.artifact.modules[index].infallible))
+                    .function(&variant.symbol)
+            }),
+            offsets,
+            size: size as usize,
+            infallible_offset: (start / align * align) as usize,
+            validated: RefCell::default(),
             metadata: metadata.clone(),
             block_size: OnceCell::new(),
         });
-        self.kernels
-            .borrow_mut()
-            .insert(key.to_owned(), kernel.clone());
+        self.kernels.borrow_mut().insert(identity, kernel.clone());
         kernel
     }
 
@@ -177,11 +215,14 @@ impl Device {
             self.transfer.synchronize();
             chunks.push(chunk);
         }
-        let pointer = chunks[*count / STATUS_CHUNK] + 4 * (*count % STATUS_CHUNK) as u64;
+        let chunk = chunks[*count / STATUS_CHUNK];
+        let pointer = chunk + 4 * (*count % STATUS_CHUNK) as u64;
         *count += 1;
         Rc::new(Status {
             pointer,
+            chunk,
             kernel: kernel.to_owned(),
+            observed: Cell::new(None),
         })
     }
 }

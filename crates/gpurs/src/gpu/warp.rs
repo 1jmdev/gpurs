@@ -70,3 +70,21 @@ pub fn reduce_sum<T: Shuffle + Add<Output = T>>(value: T) -> T {
         .into_iter()
         .fold(value, |total, mask| total + total.shuffle_xor(mask))
 }
+
+pub fn reduce_max(mut value: f32, lanes: usize) -> f32 {
+    let mut distance = lanes / 2;
+    while distance != 0 {
+        value = value.max(shuffle_xor(value, distance));
+        distance >>= 1;
+    }
+    value
+}
+
+pub fn reduce_sum_group(mut value: f32, lanes: usize) -> f32 {
+    let mut distance = lanes / 2;
+    while distance != 0 {
+        value += shuffle_xor(value, distance);
+        distance >>= 1;
+    }
+    value
+}

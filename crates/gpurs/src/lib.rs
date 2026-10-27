@@ -19,5 +19,5 @@ pub use stream::{ConfiguredStream, Launch, LaunchConfig, Stream};
 
 #[doc(hidden)]
 pub mod __private {
-    pub use crate::launch::{KernelLaunch, kernel};
+    pub use crate::launch::{KernelCache, KernelLaunch, kernel};
 }

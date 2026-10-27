@@ -58,6 +58,7 @@ fn atom_upper(atom: &Atom) -> Option<Polynomial> {
             })
             .add(&Polynomial::constant(1), -1),
         Atom::Remainder(_, divisor) => Polynomial::constant(*divisor as i128 - 1),
+        Atom::Iteration(_, end) => Polynomial::constant(*end as i128 - 1),
         Atom::Quotient(value, divisor) => {
             Polynomial::atom(Atom::Quotient(Box::new(upper(value)?), *divisor))
         }

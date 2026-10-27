@@ -7,7 +7,9 @@ use super::symbolic::{Atom, Fact, Polynomial};
 
 pub fn injective(expression: &Polynomial, facts: &[Fact], shared: bool) -> Option<Vec<Condition>> {
     let mut conditions = Vec::new();
-    let covered = decompose(expression, facts, &mut conditions, 0)?;
+    let mut expression = expression.clone();
+    expression.0.remove(&Vec::new());
+    let covered = decompose(&expression, facts, &mut conditions, 0)?;
     for axis in 0..3 {
         for atom in [Atom::Thread(axis), Atom::Block(axis)] {
             if (shared && matches!(atom, Atom::Block(_)))
@@ -30,6 +32,34 @@ pub fn injective(expression: &Polynomial, facts: &[Fact], shared: bool) -> Optio
         }
     }
     Some(conditions)
+}
+
+pub fn disjoint(left: &Polynomial, right: &Polynomial) -> Option<Vec<Condition>> {
+    let difference = left.add(right, -1).value()?;
+    let modulus = left
+        .0
+        .iter()
+        .filter(|(term, _)| !term.is_empty() && term.as_slice() != [Atom::Thread(0)])
+        .map(|(_, coefficient)| *coefficient)
+        .min()?;
+    if modulus <= 0
+        || left.0.get(&vec![Atom::Thread(0)]) != Some(&1)
+        || left.0.iter().any(|(term, coefficient)| {
+            !term.is_empty() && term.as_slice() != [Atom::Thread(0)] && coefficient % modulus != 0
+        })
+    {
+        return None;
+    }
+    let distance = difference.rem_euclid(modulus);
+    let limit = distance.min(modulus - distance);
+    (limit > 0).then(|| {
+        vec![Condition {
+            left: Expression::BlockDimension(0),
+            relation: Relation::LessEqual,
+            right: Expression::Constant(limit as u64),
+            reason: "thread-strided stores must occupy disjoint vector ranges".to_owned(),
+        }]
+    })
 }
 
 pub fn coverage(expression: &Polynomial, facts: &[Fact], length: u64) -> Option<Vec<Condition>> {
@@ -122,7 +152,21 @@ fn decompose(
             bases.push(right.clone());
         }
     }
-    digits.sort_by(|left, right| right.0.len().cmp(&left.0.len()).then(left.cmp(right)));
+    let weight = |digit: &Polynomial| {
+        digit
+            .variable()
+            .and_then(|atom| expression.0.get(&vec![atom.clone()]))
+            .copied()
+            .unwrap_or(i128::MAX)
+    };
+    digits.sort_by(|left, right| {
+        right
+            .0
+            .len()
+            .cmp(&left.0.len())
+            .then_with(|| weight(left).cmp(&weight(right)))
+            .then(left.cmp(right))
+    });
     digits.dedup();
     bases.sort_by(|left, right| right.cmp(left));
     bases.dedup();
@@ -163,7 +207,7 @@ fn decompose(
 
 fn covers(atom: &Atom, facts: &[Fact], conditions: &mut Vec<Condition>) -> Option<BTreeSet<Atom>> {
     Some(match atom {
-        Atom::Thread(_) | Atom::Block(_) => BTreeSet::from([atom.clone()]),
+        Atom::Thread(_) | Atom::Block(_) | Atom::Iteration(..) => BTreeSet::from([atom.clone()]),
         Atom::Index => (0..3)
             .flat_map(|axis| [Atom::Thread(axis), Atom::Block(axis)])
             .collect(),
@@ -204,6 +248,7 @@ fn bound(expression: &Polynomial, facts: &[Fact]) -> Option<Polynomial> {
         Atom::Thread(axis) => Polynomial::atom(Atom::BlockDimension(*axis)),
         Atom::Block(axis) => Polynomial::atom(Atom::GridDimension(*axis)),
         Atom::Remainder(_, divisor) => Polynomial::constant(*divisor as i128),
+        Atom::Iteration(_, end) => Polynomial::constant(*end as i128),
         _ => return None,
     })
 }
@@ -232,7 +277,12 @@ fn pinned(expression: &Polynomial, facts: &[Fact]) -> bool {
 fn varying_atom(atom: &Atom) -> bool {
     matches!(
         atom,
-        Atom::Index | Atom::Thread(_) | Atom::Block(_) | Atom::Quotient(..) | Atom::Remainder(..)
+        Atom::Index
+            | Atom::Thread(_)
+            | Atom::Block(_)
+            | Atom::Iteration(..)
+            | Atom::Quotient(..)
+            | Atom::Remainder(..)
     )
 }
 

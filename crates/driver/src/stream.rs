@@ -1,10 +1,17 @@
-use std::ptr;
+use std::{
+    cell::{Cell, RefCell},
+    ptr,
+    rc::Rc,
+};
 
 use crate::ffi::{self, CUevent, CUstream};
 
 #[derive(Debug)]
 pub struct Stream {
     pub raw: CUstream,
+    pub submitted: Cell<u64>,
+    pub completed: Cell<u64>,
+    recorded: RefCell<Option<(u64, Rc<Event>)>>,
 }
 
 impl Stream {
@@ -16,7 +23,12 @@ impl Stream {
             unsafe { ffi::cuStreamCreate(&mut raw, ffi::CU_STREAM_NON_BLOCKING) },
             "cuStreamCreate",
         );
-        Stream { raw }
+        Stream {
+            raw,
+            submitted: Cell::new(0),
+            completed: Cell::new(0),
+            recorded: RefCell::default(),
+        }
     }
 
     pub fn wait(&self, event: &Event) {
@@ -33,6 +45,19 @@ impl Stream {
             unsafe { ffi::cuStreamSynchronize(self.raw) },
             "cuStreamSynchronize",
         );
+        self.completed.set(self.submitted.get());
+    }
+
+    pub fn event(&self) -> Rc<Event> {
+        let mut recorded = self.recorded.borrow_mut();
+        if let Some((sequence, event)) = &*recorded
+            && *sequence == self.submitted.get()
+        {
+            return event.clone();
+        }
+        let event = Rc::new(self.record());
+        *recorded = Some((self.submitted.get(), event.clone()));
+        event
     }
 
     /// Records a new event capturing all work submitted to this stream so far.

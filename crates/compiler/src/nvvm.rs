@@ -24,6 +24,12 @@ pub fn toolkit() -> Result<PathBuf, String> {
         .ok_or_else(|| "CUDA toolkit with libNVVM not found; set CUDA_PATH".to_owned())
 }
 
+pub fn infallible(ptx: &str, symbol: &str) -> bool {
+    ptx.split_once(&format!(".entry {symbol}("))
+        .and_then(|(_, body)| body.split_once("\n}"))
+        .is_some_and(|(body, _)| !body.contains("call") && !body.contains("trap;"))
+}
+
 /// Compiles NVVM IR text, linked lazily against libdevice, to PTX for `compute_XY`.
 pub fn ptx(toolkit: &Path, ir: &str, architecture: &str) -> Result<String, String> {
     // SAFETY: libNVVM is a C library whose entry points match the declared signatures.

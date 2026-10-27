@@ -48,6 +48,8 @@ pub const REGISTERS: [(&str, i64, i64); 13] = [
 pub struct ModuleBuilder<'tcx> {
     pub tcx: TyCtxt<'tcx>,
     pub cx: Cx<'tcx>,
+    pub checked: bool,
+    pub dimensions: FxHashMap<Instance<'tcx>, [Option<u64>; 6]>,
     functions: FxHashMap<Instance<'tcx>, String>,
     queue: Vec<Instance<'tcx>>,
     /// Copies of kernel bodies that skip the assertions in the proven blocks.
@@ -71,6 +73,8 @@ impl<'tcx> ModuleBuilder<'tcx> {
         ModuleBuilder {
             tcx,
             cx: Cx(tcx),
+            checked: true,
+            dimensions: FxHashMap::default(),
             functions: FxHashMap::default(),
             queue: Vec::new(),
             variants: Vec::new(),
@@ -148,7 +152,14 @@ impl<'tcx> ModuleBuilder<'tcx> {
             let text = FunctionBuilder::new(&mut self, instance).lower(&name);
             self.definitions.push_str(&text);
         }
-        let mut module = String::from(HEADER);
+        let mut module = if self.checked {
+            String::from(HEADER)
+        } else {
+            HEADER.replace(
+                "  %status = load i32*, i32* addrspace(3)* @gpurs.status, align 8\n  %previous = cmpxchg i32* %status, i32 0, i32 %code monotonic monotonic\n  call void asm sideeffect \"exit;\", \"\"()",
+                "  call void asm sideeffect \"trap;\", \"\"()",
+            )
+        };
         for declaration in &self.declarations {
             writeln!(module, "{declaration}").unwrap();
         }

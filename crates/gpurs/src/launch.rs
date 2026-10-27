@@ -2,8 +2,9 @@
 
 use std::{
     any, array,
+    cell::RefCell,
     mem::{self, MaybeUninit},
-    rc::Rc,
+    rc::{Rc, Weak},
     slice,
 };
 
@@ -25,30 +26,80 @@ pub struct KernelLaunch<'a, S: Launch> {
     stream: &'a S,
     kernel: Rc<LoadedKernel>,
     arguments: Vec<MaybeUninit<u8>>,
-    offsets: Vec<u64>,
     position: usize,
     lengths: Vec<u64>,
     accesses: Vec<Access>,
 }
 
-#[inline(never)]
+pub(crate) struct ValidatedLaunch {
+    config: LaunchConfig,
+    lengths: Vec<u64>,
+    threads: usize,
+    infallible: bool,
+    fast: bool,
+}
+
+#[derive(Default)]
+pub struct KernelCache {
+    loaded: RefCell<
+        Option<(
+            &'static str,
+            &'static str,
+            &'static str,
+            Weak<Device>,
+            Rc<LoadedKernel>,
+        )>,
+    >,
+}
+
+impl KernelCache {
+    pub const fn new() -> Self {
+        KernelCache {
+            loaded: RefCell::new(None),
+        }
+    }
+}
+
 /// Starts a launch of the kernel `module::tail` instantiated with the generic types `G`.
 #[track_caller]
-pub fn kernel<'a, S: Launch, G>(stream: &'a S, module: &str, tail: &str) -> KernelLaunch<'a, S> {
-    let key = match any::type_name::<G>() {
-        "()" => format!("{module}::{tail}"),
-        generics => format!("{module}::{tail}{generics}"),
+pub fn kernel<'a, S: Launch, G>(
+    stream: &'a S,
+    module: &'static str,
+    tail: &'static str,
+    cache: &KernelCache,
+) -> KernelLaunch<'a, S> {
+    let device = &stream.stream().device;
+    let generics = any::type_name::<G>();
+    let mut loaded = cache.loaded.borrow_mut();
+    let kernel = if let Some((previous_module, previous_tail, previous, owner, kernel)) = &*loaded
+        && std::ptr::eq(*previous_module, module)
+        && std::ptr::eq(*previous_tail, tail)
+        && *previous == generics
+        && owner.as_ptr() == Rc::as_ptr(device)
+    {
+        kernel.clone()
+    } else {
+        let kernel = device.kernel(module, tail, generics);
+        *loaded = Some((
+            module,
+            tail,
+            generics,
+            Rc::downgrade(device),
+            kernel.clone(),
+        ));
+        kernel
     };
-    let kernel = stream.stream().device.kernel(&key);
-    let (offsets, size) = artifact::parameter_offsets(&kernel.metadata.parameters);
+    let mut arguments = stream.stream().arguments.take();
+    arguments.resize(kernel.size, MaybeUninit::new(0));
+    let mut lengths = stream.stream().lengths.take();
+    lengths.resize(kernel.offsets.len(), 0);
     KernelLaunch {
         stream,
-        lengths: vec![0; offsets.len()],
-        arguments: vec![MaybeUninit::new(0); size as usize],
-        offsets,
+        lengths,
+        arguments,
         position: 0,
         kernel,
-        accesses: Vec::new(),
+        accesses: stream.stream().accesses.take(),
     }
 }
 
@@ -136,7 +187,7 @@ impl<S: Launch> KernelLaunch<'_, S> {
 
     fn next(&mut self) -> u64 {
         self.position += 1;
-        self.offsets[self.position - 1]
+        self.kernel.offsets[self.position - 1]
     }
 
     fn write_word(&mut self, offset: usize, word: u64) {
@@ -155,7 +206,8 @@ impl<S: Launch> KernelLaunch<'_, S> {
     fn submit<R>(mut self) -> Option<Buffer<R>> {
         let stream = self.stream.stream();
         let device = &stream.device;
-        let metadata = &self.kernel.metadata;
+        let kernel = self.kernel.clone();
+        let metadata = &kernel.metadata;
         let explicit = self.stream.config();
         let config = explicit.unwrap_or_else(|| match metadata.extent {
             Extent::Single => LaunchConfig {
@@ -180,11 +232,55 @@ impl<S: Launch> KernelLaunch<'_, S> {
                 metadata.name
             ),
         });
-        metadata
-            .conditions
-            .iter()
-            .for_each(|condition| self.check(condition, &config));
-        let threads = config.grid.iter().chain(&config.block).product::<usize>();
+        let validated = kernel
+            .validated
+            .borrow()
+            .as_ref()
+            .filter(|validated| validated.config == config && validated.lengths == self.lengths)
+            .map(|validated| (validated.threads, validated.infallible, validated.fast));
+        let (threads, infallible, fast) = validated.unwrap_or_else(|| {
+            metadata
+                .conditions
+                .iter()
+                .for_each(|condition| self.check(condition, &config));
+            let threads = config
+                .grid
+                .iter()
+                .chain(&config.block)
+                .try_fold(1usize, |count, value| count.checked_mul(*value))
+                .expect("GPU launch dimensions exceed the addressable thread count");
+            let leaf = |variable: &Variable| match *variable {
+                Variable::BlockDimension(axis) => config.block[axis] as i128,
+                Variable::GridDimension(axis) => config.grid[axis] as i128,
+                Variable::Length(parameter) => self.lengths[parameter] as i128,
+                Variable::Scalar(parameter) => {
+                    self.word(kernel.offsets[parameter] as usize) as i128
+                }
+                Variable::Quotient(..) => unreachable!("quotients are evaluated by the polynomial"),
+            };
+            let infallible = metadata
+                .infallible
+                .as_ref()
+                .is_some_and(|variant| variant.bounds.iter().all(|bound| bound.holds(&leaf)));
+            let fast = metadata
+                .fast
+                .as_ref()
+                .is_some_and(|variant| variant.bounds.iter().all(|bound| bound.holds(&leaf)));
+            if !metadata
+                .parameters
+                .iter()
+                .any(|parameter| matches!(parameter, Parameter::Value(_)))
+            {
+                *kernel.validated.borrow_mut() = Some(ValidatedLaunch {
+                    config,
+                    lengths: self.lengths.clone(),
+                    threads,
+                    infallible,
+                    fast,
+                });
+            }
+            (threads, infallible, fast)
+        });
         let result = metadata.result.map(|value| {
             assert_eq!(
                 value.size,
@@ -216,35 +312,30 @@ impl<S: Launch> KernelLaunch<'_, S> {
                 sources.len()
             );
         }
-        let status = device.status(&metadata.name);
-        self.write_word(STATUS_OFFSET as usize, status.pointer);
-        for (index, source) in sources.iter().enumerate() {
-            self.write_word(INPUTS_OFFSET as usize + 8 * index, source.pointer);
-        }
         let result_pointer = result
             .as_ref()
             .map_or(0, |buffer| buffer.allocation.pointer);
-        self.write_word(RESULT_OFFSET as usize, result_pointer);
         if threads == 0 {
             return result;
         }
         let dimensions = |values: [usize; 3]| values.map(|value| value as u32);
-        let leaf = |variable: &Variable| match *variable {
-            Variable::BlockDimension(axis) => config.block[axis] as i128,
-            Variable::GridDimension(axis) => config.grid[axis] as i128,
-            Variable::Length(parameter) => self.lengths[parameter] as i128,
-            Variable::Scalar(parameter) => self.word(self.offsets[parameter] as usize) as i128,
-            Variable::Quotient(..) => unreachable!("quotients are evaluated by the polynomial"),
-        };
-        let kernel = self.kernel.clone();
-        let function = match (&kernel.fast, &kernel.metadata.fast) {
-            (Some(fast), Some(variant))
-                if variant.bounds.iter().all(|bound| bound.holds(&leaf)) =>
-            {
-                fast
-            }
+        let infallible = sources.is_empty() && infallible;
+        let function = match (&kernel.infallible, &kernel.fast) {
+            (Some(function), _) if infallible => function,
+            (_, Some(function)) if fast => function,
             _ => &kernel.function,
         };
+        let status = (!infallible).then(|| device.status(&metadata.name));
+        if let Some(status) = &status {
+            self.arguments[..artifact::PARAMETERS_OFFSET as usize].fill(MaybeUninit::new(0));
+            self.write_word(STATUS_OFFSET as usize, status.pointer);
+            for (index, source) in sources.iter().enumerate() {
+                self.write_word(INPUTS_OFFSET as usize + 8 * index, source.pointer);
+            }
+        }
+        if result.is_some() {
+            self.write_word(RESULT_OFFSET as usize, result_pointer);
+        }
         // SAFETY: the argument block follows the kernel's verified parameter layout, and the
         // recorded accesses keep every referenced allocation alive until the launch completes.
         // The fast entry point is launched only when its proven bounds hold.
@@ -254,11 +345,21 @@ impl<S: Launch> KernelLaunch<'_, S> {
                 dimensions(config.block),
                 config.shared_bytes as u32,
                 &stream.raw,
-                &mut self.arguments,
+                &mut self.arguments[if infallible {
+                    kernel.infallible_offset
+                } else {
+                    0
+                }..],
             );
         }
-        tracking::complete(&stream.raw, &accesses, Some(status.clone()));
-        stream.launched.borrow_mut().push(status);
+        tracking::complete(&stream.raw, &accesses, status.clone());
+        if let Some(status) = status {
+            stream.launched.borrow_mut().push(status);
+        }
+        accesses.clear();
+        *stream.accesses.borrow_mut() = accesses;
+        *stream.arguments.borrow_mut() = self.arguments;
+        *stream.lengths.borrow_mut() = self.lengths;
         result
     }
 
@@ -270,7 +371,7 @@ impl<S: Launch> KernelLaunch<'_, S> {
             Expression::GridDimension(axis) => config.grid[axis] as u64,
             Expression::BlockThreads => config.block.iter().product::<usize>() as u64,
             Expression::Length(parameter) => self.lengths[parameter],
-            Expression::Scalar(parameter) => self.word(self.offsets[parameter] as usize),
+            Expression::Scalar(parameter) => self.word(self.kernel.offsets[parameter] as usize),
         };
         let (left, right) = (evaluate(&condition.left), evaluate(&condition.right));
         let holds = match condition.relation {

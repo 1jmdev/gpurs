@@ -27,6 +27,7 @@ pub struct Artifact {
 #[derive(Serialize, Deserialize, Debug, Default)]
 pub struct Module {
     pub cubin: Vec<u8>,
+    pub infallible: Vec<u8>,
     pub kernels: Vec<Kernel>,
 }
 
@@ -43,6 +44,7 @@ pub struct Kernel {
     /// Entry point without the runtime checks the compiler proved cannot fail when `bounds`
     /// hold for a launch.
     pub fast: Option<Variant>,
+    pub infallible: Option<Variant>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

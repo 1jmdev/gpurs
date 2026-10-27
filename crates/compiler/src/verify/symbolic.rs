@@ -14,6 +14,7 @@ pub enum Atom {
     GridDimension(usize),
     Scalar(usize),
     Length(usize),
+    Iteration(usize, u64),
     Quotient(Box<Polynomial>, u64),
     Remainder(Box<Polynomial>, u64),
 }

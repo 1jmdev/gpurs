@@ -236,7 +236,7 @@ fn download<T>(span: Span<'_>) -> Vec<T> {
         );
     }
     stream.synchronize();
-    sources.iter().for_each(|status| status.observe());
+    tracking::observe(&sources);
     // SAFETY: the copy initialized every element with bytes of a verified transfer type.
     unsafe { host.set_len(span.len) };
     host

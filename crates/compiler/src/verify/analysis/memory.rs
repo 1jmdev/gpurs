@@ -31,7 +31,10 @@ impl Analysis<'_, '_> {
                 diagnostic::error(
                     self.tcx,
                     access.span,
-                    "multiple GPU threads may write the same memory location",
+                    format!(
+                        "multiple GPU threads may write the same memory location in `{}`",
+                        self.instance
+                    ),
                     "use a distinct thread index for each write, an atomic operation, or a verified single-writer guard",
                 );
             }
@@ -47,10 +50,59 @@ impl Analysis<'_, '_> {
                     continue;
                 }
                 let shared = matches!(access.origin.region, Region::Shared(..));
+                if matches!(access.origin.region, Region::Parameter(_))
+                    && access.origin.region == other.origin.region
+                    && !access.atomic
+                    && !other.atomic
+                    && let (Some(left), Some(right)) = (&access.origin.index, &other.origin.index)
+                    && let Some(conditions) = proof::disjoint(left, right)
+                {
+                    self.conditions.extend(conditions);
+                    continue;
+                }
                 let separated = shared
                     && access.block != other.block
                     && !control::reachable(self.body, access.block, other.block, &self.barriers)
                     && !control::reachable(self.body, other.block, access.block, &self.barriers);
+                let warp = Polynomial::atom(Atom::Quotient(
+                    Box::new(Polynomial::atom(Atom::Thread(0))),
+                    32,
+                ));
+                let owner = |facts: &[Fact]| {
+                    facts.iter().find_map(|Fact(operation, left, right)| {
+                        (*operation == BinOp::Eq && *left == warp)
+                            .then(|| right.value())
+                            .flatten()
+                    })
+                };
+                let warp_barriers = self
+                    .barriers
+                    .iter()
+                    .copied()
+                    .chain(
+                        self.collectives
+                            .iter()
+                            .filter(|(_, permitted, _)| *permitted == 1)
+                            .map(|(block, _, _)| *block),
+                    )
+                    .collect();
+                let separated = separated
+                    || (shared
+                        && owner(&access.facts).is_some()
+                        && owner(&access.facts) == owner(&other.facts)
+                        && access.block != other.block
+                        && !control::reachable(
+                            self.body,
+                            access.block,
+                            other.block,
+                            &warp_barriers,
+                        )
+                        && !control::reachable(
+                            self.body,
+                            other.block,
+                            access.block,
+                            &warp_barriers,
+                        ));
                 if !separated
                     && (access.origin.index != other.origin.index || access.atomic != other.atomic)
                 {

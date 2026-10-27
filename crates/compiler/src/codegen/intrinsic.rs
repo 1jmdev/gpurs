@@ -21,6 +21,61 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
         destination: &Place<'tcx>,
     ) -> bool {
         let path = paths::path(self.tcx, instance.def_id());
+        if let Some((_, prefix)) = [
+            ("gpurs::gpu::thread::thread_id", "tid"),
+            ("gpurs::gpu::thread::block_id", "ctaid"),
+            ("gpurs::gpu::thread::block_dim", "ntid"),
+            ("gpurs::gpu::thread::grid_dim", "nctaid"),
+        ]
+        .into_iter()
+        .find(|(name, _)| path == *name)
+        {
+            for (axis, name) in ["x", "y", "z"].into_iter().enumerate() {
+                let register = self.special_register(&format!("{prefix}.{name}"));
+                let value = self.instruction(format!("zext i32 {register} to i64"));
+                let field = self.field(destination, axis.into());
+                self.store(
+                    &field,
+                    &Operand {
+                        value: Value::Scalar(value),
+                        layout: field.layout,
+                    },
+                );
+            }
+            return true;
+        }
+        if path == "gpurs::gpu::thread::index" {
+            let mut registers = Vec::new();
+            for name in [
+                "tid.x", "tid.y", "tid.z", "ctaid.x", "ctaid.y", "ctaid.z", "ntid.x", "ntid.y",
+                "ntid.z", "nctaid.x", "nctaid.y", "nctaid.z",
+            ] {
+                let register = self.special_register(name);
+                registers.push(self.instruction(format!("zext i32 {register} to i64")));
+            }
+            let block =
+                self.instruction(format!("mul nuw i64 {}, {}", registers[5], registers[10]));
+            let block = self.instruction(format!("add nuw i64 {block}, {}", registers[4]));
+            let block = self.instruction(format!("mul nuw i64 {block}, {}", registers[9]));
+            let block = self.instruction(format!("add nuw i64 {block}, {}", registers[3]));
+            let thread =
+                self.instruction(format!("mul nuw i64 {}, {}", registers[2], registers[7]));
+            let thread = self.instruction(format!("add nuw i64 {thread}, {}", registers[1]));
+            let thread = self.instruction(format!("mul nuw i64 {thread}, {}", registers[6]));
+            let thread = self.instruction(format!("add nuw i64 {thread}, {}", registers[0]));
+            let count = self.instruction(format!("mul nuw i64 {}, {}", registers[6], registers[7]));
+            let count = self.instruction(format!("mul nuw i64 {count}, {}", registers[8]));
+            let offset = self.instruction(format!("mul nuw i64 {block}, {count}"));
+            let value = self.instruction(format!("add nuw i64 {offset}, {thread}"));
+            self.store(
+                destination,
+                &Operand {
+                    value: Value::Scalar(value),
+                    layout: destination.layout,
+                },
+            );
+            return true;
+        }
         if let Some(name) = path.strip_prefix("gpurs::gpu::intrinsics::") {
             let value = match name {
                 "barrier" => {
@@ -28,15 +83,18 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
                     return true;
                 }
                 "shuffle_xor" => {
-                    let mask = self
-                        .instruction("call i32 asm sideeffect \"activemask.b32 $0;\", \"=r\"()");
-                    let complete = self.instruction(format!("icmp eq i32 {mask}, -1"));
-                    let ready = self.fresh_label("warp");
-                    let failed = self.fresh_label("warp");
-                    self.emit(format!("br i1 {complete}, label %{ready}, label %{failed}"));
-                    self.start_block(&failed);
-                    self.fail(Failure::Upstream);
-                    self.start_block(&ready);
+                    if self.module.checked {
+                        let mask = self.instruction(
+                            "call i32 asm sideeffect \"activemask.b32 $0;\", \"=r\"()",
+                        );
+                        let complete = self.instruction(format!("icmp eq i32 {mask}, -1"));
+                        let ready = self.fresh_label("warp");
+                        let failed = self.fresh_label("warp");
+                        self.emit(format!("br i1 {complete}, label %{ready}, label %{failed}"));
+                        self.start_block(&failed);
+                        self.fail(Failure::Upstream);
+                        self.start_block(&ready);
+                    }
                     self.module
                         .declare("declare i32 @llvm.nvvm.shfl.sync.bfly.i32(i32, i32, i32, i32)");
                     self.instruction(format!(
@@ -403,6 +461,22 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
             .unwrap();
         self.module
             .declare(format!("declare i32 @llvm.nvvm.read.ptx.sreg.{register}()"));
+        if range < 12
+            && let Some(value) = self
+                .module
+                .dimensions
+                .get(&self.instance)
+                .and_then(|dimensions| dimensions[range % 6])
+        {
+            let (low, high) = if range < 6 {
+                (0, value)
+            } else {
+                (value, value + 1)
+            };
+            return self.instruction(format!(
+                "call i32 @llvm.nvvm.read.ptx.sreg.{register}(), !range !{{i32 {low}, i32 {high}}}"
+            ));
+        }
         self.instruction(format!(
             "call i32 @llvm.nvvm.read.ptx.sreg.{register}(), !range !{range}"
         ))
@@ -413,6 +487,11 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
     /// arrivals than threads mean a failure. The predicated exit adds no control-flow edge,
     /// which keeps loops around barriers open to rotation and strength reduction.
     pub(super) fn barrier(&mut self) {
+        if !self.module.checked {
+            self.module.declare("declare void @llvm.nvvm.barrier0()");
+            self.emit("call void @llvm.nvvm.barrier0()");
+            return;
+        }
         self.module
             .declare("declare i32 @llvm.nvvm.barrier0.popc(i32)");
         let arrived = self.instruction("call i32 @llvm.nvvm.barrier0.popc(i32 1)");
