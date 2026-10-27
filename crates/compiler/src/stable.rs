@@ -15,7 +15,7 @@ pub use rustc_public::{
     CrateDef, DefId,
     abi::{
         FieldsShape, FloatLength, IntegerLength, LayoutShape, Primitive, Scalar, TagEncoding,
-        VariantsShape, WrappingRange,
+        VariantsShape,
     },
     mir::{
         AggregateKind, AssertMessage, BasicBlock, BinOp, Body, BorrowKind, CastKind, ConstOperand,

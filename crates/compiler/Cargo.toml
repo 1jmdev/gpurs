@@ -13,5 +13,6 @@ crate-type = ["dylib"]
 rustc_private = true
 
 [dependencies]
+bitflags.workspace = true
 gpurs-artifact.workspace = true
 libloading.workspace = true

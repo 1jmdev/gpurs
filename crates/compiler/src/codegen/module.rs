@@ -1,27 +1,15 @@
-use std::{collections::BTreeSet, fmt::Write, mem};
+use std::mem;
 
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 
 use super::{
     function::FunctionBuilder,
+    ir::{self, Access, Ordering, Type},
     layout::{self, PassMode, Shape},
 };
 use crate::stable::*;
 
-const HEADER: &str = r#"target datalayout = "e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-i128:128:128-f32:32:32-f64:64:64-v16:16:16-v32:32:32-v64:64:64-v128:128:128-n16:32:64"
-target triple = "nvptx64-nvidia-cuda"
-
-@gpurs.status = internal addrspace(3) global i32* undef, align 8
-
-define internal void @gpurs.fail(i32 %code) noinline cold {
-  %status = load i32*, i32* addrspace(3)* @gpurs.status, align 8
-  %previous = cmpxchg i32* %status, i32 0, i32 %code monotonic monotonic
-  call void asm sideeffect "exit;", ""()
-  unreachable
-}
-"#;
-
-/// Special registers with their hardware bounds, emitted as `!range` metadata `!0` onwards.
+/// Special registers with their hardware bounds, as half-open `!range`s of the `i32` value.
 pub const REGISTERS: [(&str, i64, i64); 13] = [
     ("tid.x", 0, 1024),
     ("tid.y", 0, 1024),
@@ -43,16 +31,14 @@ pub struct ModuleBuilder<'sess> {
     pub sess: Sess<'sess>,
     pub checked: bool,
     pub dimensions: FxHashMap<Instance, [Option<u64>; 6]>,
+    pub ir: ir::Module,
+    /// The block-shared slot holding the launch's failure status pointer.
+    pub status: ir::Value,
     functions: FxHashMap<Instance, String>,
     queue: Vec<Instance>,
     /// Copies of kernel bodies that skip the assertions in the proven blocks.
     variants: Vec<(Instance, String, FxHashSet<usize>)>,
-    pub(super) definitions: String,
-    declarations: BTreeSet<String>,
-    globals: String,
-    pub(super) allocations: FxHashMap<AllocId, (String, String)>,
-    pub(super) annotations: Vec<String>,
-    counter: usize,
+    pub(super) allocations: FxHashMap<AllocId, ir::Value>,
 }
 
 /// Device calling convention of one function instance.
@@ -63,19 +49,25 @@ pub struct Signature {
 
 impl<'sess> ModuleBuilder<'sess> {
     pub fn new(sess: Sess<'sess>) -> Self {
+        let mut ir = ir::Module::default();
+        let status_pointer = Type::I32.pointer();
+        let status = ir.global(
+            "gpurs.status",
+            3,
+            false,
+            ir::Value::undef(status_pointer),
+            8,
+        );
         ModuleBuilder {
             sess,
             checked: true,
             dimensions: FxHashMap::default(),
+            ir,
+            status,
             functions: FxHashMap::default(),
             queue: Vec::new(),
             variants: Vec::new(),
-            definitions: String::new(),
-            declarations: BTreeSet::new(),
-            globals: String::new(),
             allocations: FxHashMap::default(),
-            annotations: Vec::new(),
-            counter: 0,
         }
     }
 
@@ -84,7 +76,7 @@ impl<'sess> ModuleBuilder<'sess> {
         if let Some(name) = self.functions.get(&instance) {
             return name.clone();
         }
-        let name = format!("@gpurs.f{}", self.functions.len());
+        let name = format!("gpurs.f{}", self.functions.len());
         self.functions.insert(instance, name.clone());
         self.queue.push(instance);
         name
@@ -92,23 +84,9 @@ impl<'sess> ModuleBuilder<'sess> {
 
     /// Name of a copy of `instance` that omits the assertions ending the `skipped` blocks.
     pub fn variant(&mut self, instance: Instance, skipped: FxHashSet<usize>) -> String {
-        let name = format!("@gpurs.v{}", self.variants.len());
+        let name = format!("gpurs.v{}", self.variants.len());
         self.variants.push((instance, name.clone(), skipped));
         name
-    }
-
-    pub fn declare(&mut self, declaration: impl Into<String>) {
-        self.declarations.insert(declaration.into());
-    }
-
-    pub fn global(&mut self, definition: &str) {
-        self.globals.push_str(definition);
-        self.globals.push('\n');
-    }
-
-    pub fn unique(&mut self, prefix: &str) -> String {
-        self.counter += 1;
-        format!("{prefix}{}", self.counter)
     }
 
     pub fn signature(&self, instance: Instance) -> Signature {
@@ -134,97 +112,61 @@ impl<'sess> ModuleBuilder<'sess> {
         for (instance, name, skipped) in mem::take(&mut self.variants) {
             let mut builder = FunctionBuilder::new(&mut self, instance);
             builder.skipped = skipped;
-            let text = builder.lower(&name);
-            self.definitions.push_str(&text);
+            builder.lower(&name);
         }
         while let Some(instance) = self.queue.pop() {
             let name = self.functions[&instance].clone();
-            let text = FunctionBuilder::new(&mut self, instance).lower(&name);
-            self.definitions.push_str(&text);
+            FunctionBuilder::new(&mut self, instance).lower(&name);
         }
-        let mut module = if self.checked {
-            String::from(HEADER)
+        self.ir.define(self.failure());
+        self.ir.to_string()
+    }
+
+    /// `gpurs.fail(code)`: records the first failure of the launch and stops the thread, or
+    /// traps when the module is the proven, unchecked copy.
+    fn failure(&self) -> ir::Function {
+        let mut function = ir::Function::new("gpurs.fail", Type::Void, vec![Type::I32]);
+        function.cold = true;
+        if self.checked {
+            let status = function.load(Type::I32.pointer(), self.status.clone(), 8, Access::Plain);
+            let code = function.parameter(0);
+            function.compare_exchange(
+                status,
+                ir::Value::i32(0),
+                code,
+                (Ordering::Monotonic, Ordering::Monotonic),
+                false,
+            );
+            function.assembly("exit;", "", Type::Void, Vec::new());
         } else {
-            HEADER.replace(
-                "  %status = load i32*, i32* addrspace(3)* @gpurs.status, align 8\n  %previous = cmpxchg i32* %status, i32 0, i32 %code monotonic monotonic\n  call void asm sideeffect \"exit;\", \"\"()",
-                "  call void asm sideeffect \"trap;\", \"\"()",
-            )
-        };
-        for declaration in &self.declarations {
-            writeln!(module, "{declaration}").unwrap();
+            function.assembly("trap;", "", Type::Void, Vec::new());
         }
-        writeln!(
-            module,
-            "declare void @llvm.memcpy.p0i8.p0i8.i64(i8*, i8*, i64, i1)"
-        )
-        .unwrap();
-        writeln!(
-            module,
-            "declare void @llvm.memmove.p0i8.p0i8.i64(i8*, i8*, i64, i1)"
-        )
-        .unwrap();
-        writeln!(
-            module,
-            "declare void @llvm.memset.p0i8.i64(i8*, i8, i64, i1)"
-        )
-        .unwrap();
-        module.push_str(&self.globals);
-        module.push_str(&self.definitions);
-        for (index, (_, low, high)) in REGISTERS.iter().enumerate() {
-            writeln!(module, "!{index} = !{{i32 {low}, i32 {high}}}").unwrap();
-        }
-        let first = REGISTERS.len();
-        let annotations: Vec<String> = (first..first + self.annotations.len())
-            .map(|index| format!("!{index}"))
-            .collect();
-        writeln!(
-            module,
-            "!nvvm.annotations = !{{{}}}",
-            annotations.join(", ")
-        )
-        .unwrap();
-        for (index, annotation) in self.annotations.iter().enumerate() {
-            writeln!(module, "!{} = !{{{annotation}}}", first + index).unwrap();
-        }
-        let version = first + self.annotations.len();
-        writeln!(module, "!nvvmir.version = !{{!{version}}}").unwrap();
-        writeln!(module, "!{version} = !{{i32 2, i32 0, i32 3, i32 1}}").unwrap();
-        module
+        function.unreachable();
+        function
     }
 }
 
 impl Signature {
-    /// Parameter list of the definition, with `%a{index}` names.
-    pub fn parameters(&self) -> String {
-        let mut parameters = Vec::new();
-        if let PassMode::Indirect = self.result.0 {
-            parameters.push("i8* %result".to_owned());
-        }
-        for (index, (mode, _)) in self.arguments.iter().enumerate() {
-            match mode {
-                PassMode::Ignore => {}
-                PassMode::Direct(scalar) => {
-                    parameters.push(format!("{} %a{index}", layout::immediate_type(*scalar)))
-                }
-                PassMode::Pair(a, b) => {
-                    parameters.push(format!("{} %a{index}.0", layout::immediate_type(*a)));
-                    parameters.push(format!("{} %a{index}.1", layout::immediate_type(*b)));
-                }
-                PassMode::Indirect => parameters.push(format!("i8* %a{index}")),
-            }
-        }
-        parameters.join(", ")
+    /// IR parameter types: the indirect result pointer, then every passed argument.
+    pub fn parameters(&self) -> Vec<Type> {
+        let result = matches!(self.result.0, PassMode::Indirect).then(Type::byte_pointer);
+        result
+            .into_iter()
+            .chain(
+                self.arguments
+                    .iter()
+                    .flat_map(|(mode, _)| layout::parameter_types(*mode)),
+            )
+            .collect()
     }
 
-    pub fn return_type(&self) -> String {
+    pub fn return_type(&self) -> Type {
         match self.result.0 {
-            PassMode::Ignore | PassMode::Indirect => "void".to_owned(),
-            PassMode::Direct(scalar) => layout::immediate_type(scalar).to_owned(),
-            PassMode::Pair(a, b) => format!(
-                "{{ {}, {} }}",
-                layout::immediate_type(a),
-                layout::immediate_type(b)
-            ),
+            PassMode::Ignore | PassMode::Indirect => Type::Void,
+            mode => match layout::parameter_types(mode).as_slice() {
+                [ty] => ty.clone(),
+                types => Type::Struct(types.to_vec()),
+            },
         }
     }
 }

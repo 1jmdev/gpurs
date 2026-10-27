@@ -3,8 +3,8 @@ use proc_macro2::TokenStream as Tokens;
 use quote::quote;
 use serde_json::{Map, Value};
 use syn::{
-    Attribute, Block, Error, Expr, ExprLit, FnArg, Lit, MetaNameValue, Pat, Path, Result,
-    Signature, Token, Visibility,
+    Attribute, Block, Error, Expr, ExprLit, ExprUnary, FnArg, Lit, MetaNameValue, Pat, Path,
+    Result, Signature, Token, UnOp, Visibility,
     parse::{ParseStream, Parser},
     punctuated::Punctuated,
     spanned::Spanned,
@@ -83,6 +83,14 @@ fn value(expression: &Expr) -> Result<Value> {
             lit: Lit::Int(number),
             ..
         }) => number.base10_parse::<u64>()?.into(),
+        Expr::Unary(ExprUnary {
+            op: UnOp::Neg(_),
+            expr,
+            ..
+        }) => match value(expr)?.as_i64() {
+            Some(number) => (-number).into(),
+            None => return Err(Error::new(expr.span(), "expected an integer")),
+        },
         Expr::Array(array) => array.elems.iter().map(value).collect::<Result<_>>()?,
         Expr::Call(call) if call.args.len() == 1 => {
             let Expr::Path(function) = &*call.func else {

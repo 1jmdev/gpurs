@@ -1,14 +1,10 @@
-use std::cmp::Ordering;
-
 use super::{
-    function::{self, FunctionBuilder},
+    function::FunctionBuilder,
+    ir::{self, Binary, Conversion, Flags, Predicate, Type},
     layout::{self, Shape},
     place::{Operand, Place, Value},
 };
 use crate::{stable, stable::*};
-
-/// Floating-point flags for `#[gpu(fast_math)]`; NaN and infinity stay well defined.
-pub const FAST_FLAGS: &str = "reassoc nsz arcp contract afn ";
 
 impl<'sess> FunctionBuilder<'_, 'sess> {
     pub fn rvalue(&mut self, destination: &Place, rvalue: &Rvalue) {
@@ -94,34 +90,42 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
             return;
         }
         let (head, body, end) = (
-            self.fresh_label("repeat"),
-            self.fresh_label("repeat"),
-            self.fresh_label("repeat"),
+            self.ir.fresh_block("repeat"),
+            self.ir.fresh_block("repeat"),
+            self.ir.fresh_block("repeat"),
         );
-        let entry = self.label.clone();
-        let next = format!("%next.{body}");
-        self.emit(format!("br label %{head}"));
-        self.start_block(&head);
-        let index = self.instruction(format!("phi i64 [ 0, %{entry} ], [ {next}, %{body} ]"));
-        let done = self.instruction(format!("icmp eq i64 {index}, {count}"));
-        self.emit(format!("br i1 {done}, label %{end}, label %{body}"));
-        self.start_block(&body);
-        let element = self.index(destination, &index);
+        let entry = self.ir.current();
+        self.ir.branch(head);
+        self.ir.position(head);
+        let index = self.ir.phi(vec![(ir::Value::i64(0), entry)]);
+        let done = self
+            .ir
+            .compare(Predicate::Eq, index.clone(), ir::Value::i64(count));
+        self.ir.branch_if(done, end, body);
+        self.ir.position(body);
+        let element = self.index(destination, index.clone());
         self.store(&element, operand);
-        self.emit(format!("{next} = add i64 {index}, 1"));
-        self.emit(format!("br label %{head}"));
-        self.start_block(&end);
+        let next = self.ir.binary(
+            Binary::Add,
+            Flags::empty(),
+            index.clone(),
+            ir::Value::i64(1),
+        );
+        let latch = self.ir.current();
+        self.ir.incoming(&index, next, latch);
+        self.ir.branch(head);
+        self.ir.position(end);
     }
 
     fn aggregate(&mut self, destination: &Place, kind: &AggregateKind, operands: &[Operand]) {
         if let AggregateKind::RawPtr(..) = kind {
             let value = match &operands[1].value {
-                Value::Zst => Value::Scalar(operands[0].scalar().to_owned()),
+                Value::Zst => Value::Scalar(operands[0].scalar()),
                 meta => {
                     let Value::Scalar(meta) = meta else {
                         panic!("pointer metadata {meta:?}")
                     };
-                    Value::Pair(operands[0].scalar().to_owned(), meta.clone())
+                    Value::Pair(operands[0].scalar(), meta.clone())
                 }
             };
             return self.store(
@@ -145,7 +149,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
         };
         for (index, operand) in operands.iter().enumerate() {
             let place = match kind {
-                AggregateKind::Array(_) => self.index(&target, &index.to_string()),
+                AggregateKind::Array(_) => self.index(&target, ir::Value::i64(index as u64)),
                 _ => {
                     let field = active.unwrap_or(index);
                     self.field_place(&target, field)
@@ -179,94 +183,124 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
             return Operand::zst(result);
         };
         let ty = layout::immediate_type(scalar);
-        let (a, b) = (left.scalar().to_owned(), right.scalar().to_owned());
-        if checked && let Some(wrapping) = overflowing_to_wrapping(operation) {
-            let kind = match wrapping {
-                BinOp::Add => "add",
-                BinOp::Sub => "sub",
-                _ => "mul",
-            };
-            let sign = if layout::is_signed(scalar) { "s" } else { "u" };
-            let name = format!("llvm.{sign}{kind}.with.overflow.{ty}");
-            self.module
-                .declare(format!("declare {{{ty}, i1}} @{name}({ty}, {ty})"));
-            let pair = self.instruction(format!("call {{{ty}, i1}} @{name}({ty} {a}, {ty} {b})"));
+        let signed = layout::is_signed(scalar);
+        let (a, b) = (left.scalar(), right.scalar());
+        if checked && let Some((kind, binary)) = overflowing(operation) {
+            let sign = if signed { "s" } else { "u" };
+            let pair = self.ir.call(
+                format!("llvm.{sign}{kind}.with.overflow.{ty}"),
+                Type::Struct(vec![ty.clone(), Type::I1]),
+                vec![a.clone(), b.clone()],
+            );
             // The plain operation keeps the result visible to loop analysis and strength
             // reduction, which do not look through the overflow intrinsic.
-            let value = self.instruction(format!("{kind} {ty} {a}, {b}"));
-            let overflow = self.instruction(format!("extractvalue {{{ty}, i1}} {pair}, 1"));
+            let value = self.ir.binary(binary, Flags::empty(), a, b);
+            let overflow = self.ir.extract(pair, 1);
             return Operand {
                 value: Value::Pair(value, overflow),
                 shape: result,
             };
         }
-        let value = if layout::is_float(scalar) {
-            let flags = if self.fast_math { FAST_FLAGS } else { "" };
-            let instruction = match operation {
-                BinOp::Add => format!("fadd {flags}{ty} {a}, {b}"),
-                BinOp::Sub => format!("fsub {flags}{ty} {a}, {b}"),
-                BinOp::Mul => format!("fmul {flags}{ty} {a}, {b}"),
-                BinOp::Div if self.fast_math && ty == "float" => {
-                    self.module
-                        .declare("declare float @llvm.nvvm.div.approx.f(float, float)");
-                    format!("call float @llvm.nvvm.div.approx.f(float {a}, float {b})")
+        let value = if ty.is_float() {
+            let flags = if self.fast_math {
+                Flags::FAST
+            } else {
+                Flags::empty()
+            };
+            let (binary, predicate) = match operation {
+                BinOp::Add => (Some(Binary::FAdd), None),
+                BinOp::Sub => (Some(Binary::FSub), None),
+                BinOp::Mul => (Some(Binary::FMul), None),
+                BinOp::Div if self.fast_math && ty == Type::Float => {
+                    let value = self
+                        .ir
+                        .call("llvm.nvvm.div.approx.f", Type::Float, vec![a, b]);
+                    return Operand {
+                        value: Value::Scalar(value),
+                        shape: result,
+                    };
                 }
-                BinOp::Div => format!("fdiv {flags}{ty} {a}, {b}"),
-                BinOp::Rem => format!("frem {flags}{ty} {a}, {b}"),
-                BinOp::Eq => format!("fcmp oeq {ty} {a}, {b}"),
-                BinOp::Ne => format!("fcmp une {ty} {a}, {b}"),
-                BinOp::Lt => format!("fcmp olt {ty} {a}, {b}"),
-                BinOp::Le => format!("fcmp ole {ty} {a}, {b}"),
-                BinOp::Gt => format!("fcmp ogt {ty} {a}, {b}"),
-                BinOp::Ge => format!("fcmp oge {ty} {a}, {b}"),
-                BinOp::Cmp => {
-                    return self.compare(&a, &b, ty, "fcmp olt", "fcmp oeq", result);
-                }
+                BinOp::Div => (Some(Binary::FDiv), None),
+                BinOp::Rem => (Some(Binary::FRem), None),
+                BinOp::Eq => (None, Some(Predicate::Oeq)),
+                BinOp::Ne => (None, Some(Predicate::Une)),
+                BinOp::Lt => (None, Some(Predicate::Olt)),
+                BinOp::Le => (None, Some(Predicate::Ole)),
+                BinOp::Gt => (None, Some(Predicate::Ogt)),
+                BinOp::Ge => (None, Some(Predicate::Oge)),
+                BinOp::Cmp => return self.compare(a, b, Predicate::Olt, result),
                 operation => {
                     self.unsupported(&format!("floating-point `{operation:?}`"));
                     return Operand::zst(result);
                 }
             };
-            self.instruction(instruction)
+            match (binary, predicate) {
+                (Some(binary), _) => self.ir.binary(binary, flags, a, b),
+                (_, Some(predicate)) => self.ir.compare(predicate, a, b),
+                _ => unreachable!(),
+            }
         } else {
-            let signed = layout::is_signed(scalar);
-            let (division, remainder, shift, less) = if signed {
-                ("sdiv", "srem", "ashr", "slt")
+            let (division, remainder, shift) = if signed {
+                (Binary::SDiv, Binary::SRem, Binary::AShr)
             } else {
-                ("udiv", "urem", "lshr", "ult")
+                (Binary::UDiv, Binary::URem, Binary::LShr)
             };
-            let wrap = if signed { "nsw" } else { "nuw" };
-            let instruction = match operation {
-                BinOp::Add => format!("add {ty} {a}, {b}"),
-                BinOp::Sub => format!("sub {ty} {a}, {b}"),
-                BinOp::Mul => format!("mul {ty} {a}, {b}"),
-                // Overflow in the unchecked forms is undefined behavior, as in rustc.
-                BinOp::AddUnchecked => format!("add {wrap} {ty} {a}, {b}"),
-                BinOp::SubUnchecked => format!("sub {wrap} {ty} {a}, {b}"),
-                BinOp::MulUnchecked => format!("mul {wrap} {ty} {a}, {b}"),
-                BinOp::Div => format!("{division} {ty} {a}, {b}"),
-                BinOp::Rem => format!("{remainder} {ty} {a}, {b}"),
-                BinOp::BitXor => format!("xor {ty} {a}, {b}"),
-                BinOp::BitAnd => format!("and {ty} {a}, {b}"),
-                BinOp::BitOr => format!("or {ty} {a}, {b}"),
+            let [less, less_equal, greater, greater_equal] = if signed {
+                [
+                    Predicate::Slt,
+                    Predicate::Sle,
+                    Predicate::Sgt,
+                    Predicate::Sge,
+                ]
+            } else {
+                [
+                    Predicate::Ult,
+                    Predicate::Ule,
+                    Predicate::Ugt,
+                    Predicate::Uge,
+                ]
+            };
+            // Overflow in the unchecked forms is undefined behavior, as in rustc.
+            let wrap = if signed { Flags::NSW } else { Flags::NUW };
+            let (binary, flags) = match operation {
+                BinOp::Add => (Binary::Add, Flags::empty()),
+                BinOp::Sub => (Binary::Sub, Flags::empty()),
+                BinOp::Mul => (Binary::Mul, Flags::empty()),
+                BinOp::AddUnchecked => (Binary::Add, wrap),
+                BinOp::SubUnchecked => (Binary::Sub, wrap),
+                BinOp::MulUnchecked => (Binary::Mul, wrap),
+                BinOp::Div => (division, Flags::empty()),
+                BinOp::Rem => (remainder, Flags::empty()),
+                BinOp::BitXor => (Binary::Xor, Flags::empty()),
+                BinOp::BitAnd => (Binary::And, Flags::empty()),
+                BinOp::BitOr => (Binary::Or, Flags::empty()),
                 BinOp::Shl | BinOp::ShlUnchecked | BinOp::Shr | BinOp::ShrUnchecked => {
                     let amount = self.shift_amount(right, scalar, operation);
                     let kind = if matches!(operation, BinOp::Shl | BinOp::ShlUnchecked) {
-                        "shl"
+                        Binary::Shl
                     } else {
                         shift
                     };
-                    format!("{kind} {ty} {a}, {amount}")
+                    return Operand {
+                        value: Value::Scalar(self.ir.binary(kind, Flags::empty(), a, amount)),
+                        shape: result,
+                    };
                 }
-                BinOp::Eq => format!("icmp eq {ty} {a}, {b}"),
-                BinOp::Ne => format!("icmp ne {ty} {a}, {b}"),
-                BinOp::Lt => format!("icmp {less} {ty} {a}, {b}"),
-                BinOp::Le => format!("icmp {}le {ty} {a}, {b}", &less[..1]),
-                BinOp::Gt => format!("icmp {}gt {ty} {a}, {b}", &less[..1]),
-                BinOp::Ge => format!("icmp {}ge {ty} {a}, {b}", &less[..1]),
-                BinOp::Cmp => {
-                    return self.compare(&a, &b, ty, &format!("icmp {less}"), "icmp eq", result);
+                BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
+                    let predicate = match operation {
+                        BinOp::Eq => Predicate::Eq,
+                        BinOp::Ne => Predicate::Ne,
+                        BinOp::Lt => less,
+                        BinOp::Le => less_equal,
+                        BinOp::Gt => greater,
+                        _ => greater_equal,
+                    };
+                    return Operand {
+                        value: Value::Scalar(self.ir.compare(predicate, a, b)),
+                        shape: result,
+                    };
                 }
+                BinOp::Cmp => return self.compare(a, b, less, result),
                 BinOp::Offset => {
                     let pointee = left
                         .shape
@@ -274,12 +308,17 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                         .kind()
                         .builtin_deref(true)
                         .expect("pointer offset");
-                    let size = self.shape_of(pointee.ty).size().bytes();
-                    let bytes = self.instruction(format!("mul i64 {b}, {size}"));
-                    format!("getelementptr inbounds i8, i8* {a}, i64 {bytes}")
+                    let size = self.shape_of(pointee.ty).size().bytes() as u64;
+                    let bytes =
+                        self.ir
+                            .binary(Binary::Mul, Flags::empty(), b, ir::Value::i64(size));
+                    return Operand {
+                        value: Value::Scalar(self.ir.offset(a, bytes, true)),
+                        shape: result,
+                    };
                 }
             };
-            self.instruction(instruction)
+            self.ir.binary(binary, flags, a, b)
         };
         Operand {
             value: Value::Scalar(value),
@@ -288,33 +327,30 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
     }
 
     /// Shift amount cast to the shifted type; masked unless the shift is unchecked.
-    fn shift_amount(&mut self, right: &Operand, scalar: Scalar, operation: BinOp) -> String {
-        let ValueRepr::Scalar(amount_scalar) = right.shape.repr().clone() else {
-            unreachable!()
-        };
-        let amount = self.integer_cast(right.scalar(), amount_scalar, scalar, false);
+    fn shift_amount(&mut self, right: &Operand, scalar: Scalar, operation: BinOp) -> ir::Value {
+        let ty = layout::immediate_type(scalar);
+        let amount = self.ir.resize(right.scalar(), ty.clone(), false);
         match operation {
             BinOp::Shl | BinOp::Shr => {
-                let ty = layout::immediate_type(scalar);
-                self.instruction(format!("and {ty} {amount}, {}", layout::bits(scalar) - 1))
+                let mask = ir::Value::int(ty.clone(), ty.bits() as u128 - 1);
+                self.ir.binary(Binary::And, Flags::empty(), amount, mask)
             }
             _ => amount,
         }
     }
 
-    fn compare(
-        &mut self,
-        a: &str,
-        b: &str,
-        ty: &str,
-        less: &str,
-        equal: &str,
-        result: Shape,
-    ) -> Operand {
-        let is_less = self.instruction(format!("{less} {ty} {a}, {b}"));
-        let is_equal = self.instruction(format!("{equal} {ty} {a}, {b}"));
-        let not_less = self.instruction(format!("select i1 {is_equal}, i8 0, i8 1"));
-        let value = self.instruction(format!("select i1 {is_less}, i8 -1, i8 {not_less}"));
+    /// `Ordering` of `a` and `b` as `-1`, `0`, or `1`.
+    fn compare(&mut self, a: ir::Value, b: ir::Value, less: Predicate, result: Shape) -> Operand {
+        let equal = if a.ty.is_float() {
+            Predicate::Oeq
+        } else {
+            Predicate::Eq
+        };
+        let is_less = self.ir.compare(less, a.clone(), b.clone());
+        let is_equal = self.ir.compare(equal, a, b);
+        let byte = |value| ir::Value::int(Type::I8, value as u128);
+        let not_less = self.ir.select(is_equal, byte(0), byte(1));
+        let value = self.ir.select(is_less, byte(-1i8 as u8), not_less);
         Operand {
             value: Value::Scalar(value),
             shape: result,
@@ -326,17 +362,24 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
             (UnOp::PtrMetadata, Value::Pair(_, meta)) => meta.clone(),
             (UnOp::PtrMetadata, _) => return Operand::zst(result),
             (_, Value::Scalar(value)) => {
-                let ValueRepr::Scalar(scalar) = operand.shape.repr().clone() else {
-                    unreachable!()
-                };
-                let ty = layout::immediate_type(scalar);
+                let ty = value.ty.clone();
                 match operation {
-                    UnOp::Not if ty == "i1" => self.instruction(format!("xor i1 {value}, true")),
-                    UnOp::Not => self.instruction(format!("xor {ty} {value}, -1")),
-                    UnOp::Neg if layout::is_float(scalar) => {
-                        self.instruction(format!("fsub {ty} -0.0, {value}"))
+                    UnOp::Not => {
+                        let ones = ir::Value::int(ty, u128::MAX);
+                        self.ir
+                            .binary(Binary::Xor, Flags::empty(), value.clone(), ones)
                     }
-                    UnOp::Neg => self.instruction(format!("sub {ty} 0, {value}")),
+                    UnOp::Neg if ty.is_float() => self.ir.binary(
+                        Binary::FSub,
+                        Flags::empty(),
+                        ir::Value::float(ty, -0.0),
+                        value.clone(),
+                    ),
+                    UnOp::Neg => {
+                        let zero = ir::Value::int(ty, 0);
+                        self.ir
+                            .binary(Binary::Sub, Flags::empty(), zero, value.clone())
+                    }
                     UnOp::PtrMetadata => unreachable!(),
                 }
             }
@@ -348,25 +391,6 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
         }
     }
 
-    pub fn integer_cast(&mut self, value: &str, from: Scalar, to: Scalar, signed: bool) -> String {
-        let (from_type, to_type) = (layout::immediate_type(from), layout::immediate_type(to));
-        let (from_bits, to_bits) = (
-            if from_type == "i1" {
-                1
-            } else {
-                layout::bits(from)
-            },
-            if to_type == "i1" { 1 } else { layout::bits(to) },
-        );
-        let instruction = match from_bits.cmp(&to_bits) {
-            Ordering::Equal => return value.to_owned(),
-            Ordering::Greater => "trunc",
-            Ordering::Less if signed && from_type != "i1" => "sext",
-            Ordering::Less => "zext",
-        };
-        self.instruction(format!("{instruction} {from_type} {value} to {to_type}"))
-    }
-
     fn cast(&mut self, kind: CastKind, operand: &Operand, result: Shape) -> Operand {
         let scalars = match (operand.shape.repr(), result.repr()) {
             (ValueRepr::Scalar(from), ValueRepr::Scalar(to)) => Some((*from, *to)),
@@ -376,61 +400,62 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
             value: Value::Scalar(value),
             shape: result.clone(),
         };
+        let same = |value: &Value| Operand {
+            value: value.clone(),
+            shape: result.clone(),
+        };
         match kind {
             CastKind::IntToInt => {
                 let (from, to) = scalars.expect("integer cast");
-                let value = self.integer_cast(operand.scalar(), from, to, layout::is_signed(from));
-                scalar_value(value)
+                let to = layout::immediate_type(to);
+                scalar_value(
+                    self.ir
+                        .resize(operand.scalar(), to, layout::is_signed(from)),
+                )
             }
             CastKind::IntToFloat => {
                 let (from, to) = scalars.expect("integer to float cast");
-                let instruction = if layout::is_signed(from) {
-                    "sitofp"
+                let operation = if layout::is_signed(from) {
+                    Conversion::SIToFP
                 } else {
-                    "uitofp"
+                    Conversion::UIToFP
                 };
-                let from_type = layout::immediate_type(from);
-                let value = match from_type {
-                    "i1" => self.instruction(format!("zext i1 {} to i8", operand.scalar())),
-                    _ => operand.scalar().to_owned(),
+                let value = match operand.scalar() {
+                    value if value.ty == Type::I1 => {
+                        self.ir.cast(Conversion::ZExt, value, Type::I8)
+                    }
+                    value => value,
                 };
-                let from_type = if from_type == "i1" { "i8" } else { from_type };
-                scalar_value(self.instruction(format!(
-                    "{instruction} {from_type} {value} to {}",
-                    layout::immediate_type(to)
-                )))
+                scalar_value(self.ir.cast(operation, value, layout::immediate_type(to)))
             }
             CastKind::FloatToFloat => {
                 let (from, to) = scalars.expect("float cast");
-                let instruction = match layout::bits(from).cmp(&layout::bits(to)) {
-                    Ordering::Less => "fpext",
-                    Ordering::Greater => "fptrunc",
-                    Ordering::Equal => return scalar_value(operand.scalar().to_owned()),
+                let (from, to) = (layout::immediate_type(from), layout::immediate_type(to));
+                let operation = if from.bits() < to.bits() {
+                    Conversion::FPExt
+                } else {
+                    Conversion::FPTrunc
                 };
-                scalar_value(self.instruction(format!(
-                    "{instruction} {} {} to {}",
-                    layout::immediate_type(from),
-                    operand.scalar(),
-                    layout::immediate_type(to)
-                )))
+                scalar_value(self.ir.cast(operation, operand.scalar(), to))
             }
             CastKind::FloatToInt => {
-                let (from, to) = scalars.expect("float to integer cast");
-                scalar_value(self.saturating_float_to_int(operand.scalar(), from, to))
+                let (_, to) = scalars.expect("float to integer cast");
+                scalar_value(self.saturating_float_to_int(operand.scalar(), to))
             }
             CastKind::PtrToPtr | CastKind::FnPtrToPtr => match (&operand.value, result.repr()) {
                 (Value::Pair(pointer, _), ValueRepr::Scalar(_)) => scalar_value(pointer.clone()),
-                (value, _) => Operand {
-                    value: value.clone(),
-                    shape: result.clone(),
-                },
+                (value, _) => same(value),
             },
-            CastKind::PointerExposeAddress => {
-                scalar_value(self.instruction(format!("ptrtoint i8* {} to i64", operand.scalar())))
-            }
-            CastKind::PointerWithExposedProvenance => {
-                scalar_value(self.instruction(format!("inttoptr i64 {} to i8*", operand.scalar())))
-            }
+            CastKind::PointerExposeAddress => scalar_value(self.ir.cast(
+                Conversion::PtrToInt,
+                operand.scalar(),
+                Type::I64,
+            )),
+            CastKind::PointerWithExposedProvenance => scalar_value(self.ir.cast(
+                Conversion::IntToPtr,
+                operand.scalar(),
+                Type::byte_pointer(),
+            )),
             CastKind::PointerCoercion(PointerCoercion::Unsize) => {
                 let source = operand
                     .shape
@@ -440,17 +465,13 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                     .map(|ty| self.sess.struct_tail(ty.ty).kind());
                 match source {
                     Some(TyKind::RigidTy(RigidTy::Array(_, length))) => {
-                        let length = length.eval_target_usize().unwrap_or(0);
-                        let value = Value::Pair(operand.scalar().to_owned(), length.to_string());
+                        let length = ir::Value::i64(length.eval_target_usize().unwrap_or(0));
                         Operand {
-                            value,
+                            value: Value::Pair(operand.scalar(), length),
                             shape: result.clone(),
                         }
                     }
-                    Some(TyKind::RigidTy(RigidTy::Slice(_) | RigidTy::Str)) => Operand {
-                        value: operand.value.clone(),
-                        shape: result.clone(),
-                    },
+                    Some(TyKind::RigidTy(RigidTy::Slice(_) | RigidTy::Str)) => same(&operand.value),
                     _ => {
                         self.unsupported("unsizing to trait objects (dynamic dispatch)");
                         Operand::zst(result)
@@ -459,10 +480,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
             }
             CastKind::PointerCoercion(
                 PointerCoercion::MutToConstPointer | PointerCoercion::ArrayToPointer,
-            ) => Operand {
-                value: operand.value.clone(),
-                shape: result.clone(),
-            },
+            ) => same(&operand.value),
             CastKind::PointerCoercion(..) => {
                 self.unsupported("function pointers");
                 Operand::zst(result)
@@ -474,126 +492,93 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
     }
 
     /// Rust `as` semantics: NaN becomes zero and out-of-range values saturate.
-    fn saturating_float_to_int(&mut self, value: &str, from: Scalar, to: Scalar) -> String {
-        let (float, integer) = (layout::immediate_type(from), layout::immediate_type(to));
+    fn saturating_float_to_int(&mut self, value: ir::Value, to: Scalar) -> ir::Value {
+        let float = value.ty.clone();
+        let integer = layout::immediate_type(to);
         let signed = layout::is_signed(to);
-        let width = layout::bits(to) as u32;
+        let width = integer.bits();
         let (minimum, maximum): (i128, u128) = if signed {
             (i128::MIN >> (128 - width), (1u128 << (width - 1)) - 1)
         } else {
-            (
-                0,
-                if width == 128 {
-                    u128::MAX
-                } else {
-                    (1u128 << width) - 1
-                },
-            )
+            (0, u128::MAX >> (128 - width))
         };
-        let literal = |value: f64| float_text(value, float);
-        let (low, high) = (literal(minimum as f64), literal(maximum as f64));
-        let convert = if signed { "fptosi" } else { "fptoui" };
-        let raw = self.instruction(format!("{convert} {float} {value} to {integer}"));
-        let below = self.instruction(format!("fcmp olt {float} {value}, {low}"));
-        let above = self.instruction(format!("fcmp oge {float} {value}, {high}"));
-        let is_nan = self.instruction(format!("fcmp uno {float} {value}, {value}"));
-        let low_value = function::integer_text(minimum as u128, integer, width as u64);
-        let high_value = function::integer_text(maximum, integer, width as u64);
-        let clamped = self.instruction(format!(
-            "select i1 {below}, {integer} {low_value}, {integer} {raw}"
-        ));
-        let clamped = self.instruction(format!(
-            "select i1 {above}, {integer} {high_value}, {integer} {clamped}"
-        ));
-        self.instruction(format!(
-            "select i1 {is_nan}, {integer} 0, {integer} {clamped}"
-        ))
+        let (low, high) = (
+            ir::Value::float(float.clone(), minimum as f64),
+            ir::Value::float(float, maximum as f64),
+        );
+        let convert = if signed {
+            Conversion::FPToSI
+        } else {
+            Conversion::FPToUI
+        };
+        let raw = self.ir.cast(convert, value.clone(), integer.clone());
+        let below = self.ir.compare(Predicate::Olt, value.clone(), low);
+        let above = self.ir.compare(Predicate::Oge, value.clone(), high);
+        let is_nan = self.ir.compare(Predicate::Uno, value.clone(), value);
+        let clamped = self
+            .ir
+            .select(below, ir::Value::int(integer.clone(), minimum as u128), raw);
+        let clamped = self
+            .ir
+            .select(above, ir::Value::int(integer.clone(), maximum), clamped);
+        self.ir.select(is_nan, ir::Value::int(integer, 0), clamped)
     }
 
     pub fn set_discriminant(&mut self, place: &Place, variant: VariantIdx) {
-        let shape = place.shape.clone();
-        if matches!(shape.layout.variants, VariantsShape::Empty) {
+        let shape = &place.shape;
+        let VariantsShape::Multiple {
+            tag,
+            tag_field,
+            tag_encoding,
+            ..
+        } = &shape.layout.variants
+        else {
             return;
-        }
-        match &shape.layout.variants {
-            VariantsShape::Empty | VariantsShape::Single { .. } => {}
-            VariantsShape::Multiple {
-                tag,
-                tag_field,
-                tag_encoding: TagEncoding::Direct,
-                ..
+        };
+        let value = match tag_encoding {
+            TagEncoding::Direct => discriminant_value(shape, variant)
+                .unwrap_or_else(|| variant_position(shape, variant).unwrap_or(0) as u128),
+            TagEncoding::Niche {
+                untagged_variant,
+                niche_variants,
+                niche_start,
             } => {
-                let field = *tag_field;
-                let scalar = *tag;
-                let tag = self.tag_place(place, field, scalar);
-                let value = discriminant_value(&shape, variant)
-                    .unwrap_or_else(|| variant_position(&shape, variant).unwrap_or(0) as u128);
-                let size = tag.shape.size();
-                self.store_tag(&tag, truncate(value, size));
-            }
-            VariantsShape::Multiple {
-                tag,
-                tag_field,
-                tag_encoding:
-                    TagEncoding::Niche {
-                        untagged_variant,
-                        niche_variants,
-                        niche_start,
-                    },
-                ..
-            } => {
-                if variant != *untagged_variant {
-                    let field = *tag_field;
-                    let scalar = *tag;
-                    let tag = self.tag_place(place, field, scalar);
-                    let start = variant_position(&shape, *niche_variants.start()).unwrap_or(0);
-                    let index = variant_position(&shape, variant).unwrap_or(start);
-                    let value = (index.saturating_sub(start)) as u128;
-                    let size = tag.shape.size();
-                    self.store_tag(&tag, truncate(value.wrapping_add(*niche_start), size));
+                if variant == *untagged_variant {
+                    return;
                 }
-            }
-        }
-    }
-
-    fn store_tag(&mut self, tag: &Place, value: u128) {
-        let ValueRepr::Scalar(scalar) = tag.shape.repr().clone() else {
-            unreachable!()
-        };
-        let text = match layout::primitive(scalar) {
-            Primitive::Pointer(_) if value == 0 => "null".to_owned(),
-            Primitive::Pointer(_) => format!("inttoptr (i64 {value} to i8*)"),
-            _ => {
-                function::integer_text(value, layout::immediate_type(scalar), layout::bits(scalar))
+                let start = variant_position(shape, *niche_variants.start()).unwrap_or(0);
+                let index = variant_position(shape, variant).unwrap_or(start);
+                (index.saturating_sub(start) as u128).wrapping_add(*niche_start)
             }
         };
-        let operand = Operand {
-            value: Value::Scalar(text),
-            shape: tag.shape.clone(),
+        let (scalar, field) = (*tag, *tag_field);
+        let (pointer, align) = self.tag_address(place, field);
+        let value = match layout::immediate_type(scalar) {
+            ty if ty.is_pointer() => ir::Value::address(value as u64),
+            ty => ir::Value::int(ty, value),
         };
-        self.store(tag, &operand);
+        self.store_scalar(pointer, value, scalar, align);
     }
 
     fn discriminant(&mut self, place: &Place, result: Shape) -> Operand {
-        let shape = place.shape.clone();
+        let shape = &place.shape;
         let ValueRepr::Scalar(target) = result.repr().clone() else {
             unreachable!()
         };
         let target_type = layout::immediate_type(target);
-        let constant =
-            |value: u128| function::integer_text(value, target_type, layout::bits(target));
+        let constant = |value: u128| ir::Value::int(target_type.clone(), value);
         let (tag_scalar, tag_field, encoding) = match &shape.layout.variants {
             VariantsShape::Empty => {
                 return Operand {
-                    value: Value::Scalar("undef".into()),
+                    value: Value::Scalar(ir::Value::undef(target_type)),
                     shape: result,
                 };
             }
             VariantsShape::Single { index } => {
-                let value = discriminant_value(&shape, *index)
-                    .unwrap_or_else(|| variant_position(&shape, *index).unwrap_or(0) as u128);
+                let value = discriminant_value(shape, *index)
+                    .unwrap_or_else(|| variant_position(shape, *index).unwrap_or(0) as u128);
                 return Operand {
-                    value: Value::Scalar(constant(truncate(value, result.size()))),
+                    value: Value::Scalar(constant(value)),
                     shape: result,
                 };
             }
@@ -604,48 +589,34 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                 ..
             } => (*tag, *tag_field, tag_encoding.clone()),
         };
-        let tag_place = self.tag_place(place, tag_field, tag_scalar);
-        let tag = self.load(&tag_place).scalar().to_owned();
-        let tag = match layout::primitive(tag_scalar) {
-            Primitive::Pointer(_) => self.instruction(format!("ptrtoint i8* {tag} to i64")),
-            _ => tag,
+        let (pointer, align) = self.tag_address(place, tag_field);
+        let tag = self.load_scalar(pointer, tag_scalar, align);
+        let tag = match tag {
+            tag if tag.ty.is_pointer() => self.ir.cast(Conversion::PtrToInt, tag, Type::I64),
+            tag => tag,
         };
-        let tag_scalar = match layout::primitive(tag_scalar) {
-            Primitive::Pointer(_) => Scalar::Initialized {
-                value: Primitive::Int {
-                    length: IntegerLength::I64,
-                    signed: false,
-                },
-                valid_range: full_range(MachineSize::from_bits(64)),
-            },
-            _ => tag_scalar,
-        };
-        let tag_type = layout::immediate_type(tag_scalar);
         let value = match encoding {
-            TagEncoding::Direct => {
-                self.integer_cast(&tag, tag_scalar, target, layout::is_signed(tag_scalar))
-            }
+            TagEncoding::Direct => self
+                .ir
+                .resize(tag, target_type, layout::is_signed(tag_scalar)),
             TagEncoding::Niche {
                 untagged_variant,
                 niche_variants,
                 niche_start,
             } => {
-                let start_index = variant_position(&shape, *niche_variants.start()).unwrap_or(0);
-                let last_index = variant_position(&shape, *niche_variants.end()).unwrap_or(0);
-                let relative_max = (last_index - start_index) as u128;
-                let start = function::integer_text(niche_start, tag_type, layout::bits(tag_scalar));
-                let relative = self.instruction(format!("sub {tag_type} {tag}, {start}"));
-                let limit =
-                    function::integer_text(relative_max, tag_type, layout::bits(tag_scalar));
-                let is_niche = self.instruction(format!("icmp ule {tag_type} {relative}, {limit}"));
-                let relative = self.integer_cast(&relative, tag_scalar, target, false);
+                let start_index = variant_position(shape, *niche_variants.start()).unwrap_or(0);
+                let last_index = variant_position(shape, *niche_variants.end()).unwrap_or(0);
+                let tag_type = tag.ty.clone();
+                let start = ir::Value::int(tag_type.clone(), niche_start);
+                let relative = self.ir.binary(Binary::Sub, Flags::empty(), tag, start);
+                let limit = ir::Value::int(tag_type, (last_index - start_index) as u128);
+                let is_niche = self.ir.compare(Predicate::Ule, relative.clone(), limit);
+                let relative = self.ir.resize(relative, target_type.clone(), false);
                 let first = constant(start_index as u128);
-                let tagged = self.instruction(format!("add {target_type} {relative}, {first}"));
+                let tagged = self.ir.binary(Binary::Add, Flags::empty(), relative, first);
                 let untagged =
-                    constant(variant_position(&shape, untagged_variant).unwrap_or(0) as u128);
-                self.instruction(format!(
-                    "select i1 {is_niche}, {target_type} {tagged}, {target_type} {untagged}"
-                ))
+                    constant(variant_position(shape, untagged_variant).unwrap_or(0) as u128);
+                self.ir.select(is_niche, tagged, untagged)
             }
         };
         Operand {
@@ -670,35 +641,12 @@ pub fn variant_position(shape: &Shape, variant: VariantIdx) -> Option<usize> {
         .position(|candidate| *candidate == variant)
 }
 
-pub fn truncate(value: u128, size: MachineSize) -> u128 {
-    let bits = size.bits();
-    if bits >= 128 {
-        value
-    } else {
-        value & ((1u128 << bits) - 1)
-    }
-}
-
-fn full_range(size: MachineSize) -> WrappingRange {
-    WrappingRange {
-        start: 0,
-        end: size.unsigned_int_max().unwrap_or(u128::MAX),
-    }
-}
-
-fn overflowing_to_wrapping(operation: BinOp) -> Option<BinOp> {
+/// The LLVM operation of a checked `BinOp` and its plain form.
+fn overflowing(operation: BinOp) -> Option<(&'static str, Binary)> {
     match operation {
-        BinOp::Add => Some(BinOp::Add),
-        BinOp::Sub => Some(BinOp::Sub),
-        BinOp::Mul => Some(BinOp::Mul),
+        BinOp::Add => Some(("add", Binary::Add)),
+        BinOp::Sub => Some(("sub", Binary::Sub)),
+        BinOp::Mul => Some(("mul", Binary::Mul)),
         _ => None,
-    }
-}
-
-/// Exact LLVM literal for a floating-point value of type `ty`.
-pub fn float_text(value: f64, ty: &str) -> String {
-    match ty {
-        "float" => format!("0x{:016X}", (value as f32 as f64).to_bits()),
-        _ => format!("0x{:016X}", value.to_bits()),
     }
 }

@@ -1,5 +1,6 @@
 use super::{
     function::FunctionBuilder,
+    ir::{self, Access, Binary, Conversion, Flags, Transfer, Type},
     layout::{self, Shape},
 };
 use crate::{stable, stable::*};
@@ -8,9 +9,9 @@ use crate::{stable, stable::*};
 #[derive(Clone, Debug)]
 pub enum Value {
     Zst,
-    Scalar(String),
-    Pair(String, String),
-    Memory(String, u64),
+    Scalar(ir::Value),
+    Pair(ir::Value, ir::Value),
+    Memory(ir::Value, u64),
 }
 
 #[derive(Clone, Debug)]
@@ -22,8 +23,8 @@ pub struct Operand {
 /// Memory location of a MIR place; `meta` holds the length of unsized slices.
 #[derive(Clone, Debug)]
 pub struct Place {
-    pub pointer: String,
-    pub meta: Option<String>,
+    pub pointer: ir::Value,
+    pub meta: Option<ir::Value>,
     pub shape: Shape,
     pub align: u64,
 }
@@ -36,9 +37,9 @@ impl Operand {
         }
     }
 
-    pub fn scalar(&self) -> &str {
+    pub fn scalar(&self) -> ir::Value {
         match &self.value {
-            Value::Scalar(value) => value,
+            Value::Scalar(value) => value.clone(),
             value => panic!(
                 "expected a scalar operand of `{:?}`, found {value:?}",
                 self.shape.ty.kind()
@@ -46,9 +47,9 @@ impl Operand {
         }
     }
 
-    pub fn pair(&self) -> (&str, &str) {
+    pub fn pair(&self) -> (ir::Value, ir::Value) {
         match &self.value {
-            Value::Pair(a, b) => (a, b),
+            Value::Pair(a, b) => (a.clone(), b.clone()),
             value => panic!(
                 "expected a pair operand of `{:?}`, found {value:?}",
                 self.shape.ty.kind()
@@ -58,7 +59,7 @@ impl Operand {
 }
 
 impl Place {
-    pub fn new(pointer: String, shape: Shape) -> Self {
+    pub fn new(pointer: ir::Value, shape: Shape) -> Self {
         let align = shape.align();
         Place {
             pointer,
@@ -70,7 +71,7 @@ impl Place {
 }
 
 impl<'sess> FunctionBuilder<'_, 'sess> {
-    pub fn place(&mut self, place: crate::stable::Place) -> super::place::Place {
+    pub fn place(&mut self, place: crate::stable::Place) -> Place {
         let mut current = self.locals[place.local].clone();
         for element in place.projection {
             current = self.project(current, element);
@@ -103,10 +104,9 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
             ProjectionElem::Field(field, ty) => {
                 let offset = place.shape.offset(field);
                 let shape = self.shape_of(ty);
-                let pointer = self.offset(&place.pointer, offset.bytes() as u64);
                 let meta = place.meta.clone().filter(|_| shape.is_unsized());
                 Place {
-                    pointer,
+                    pointer: self.offset(place.pointer, offset.bytes() as u64),
                     meta,
                     shape,
                     align: layout::restrict_align(place.align, offset),
@@ -121,18 +121,25 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
             } => {
                 let index = if from_end {
                     let length = self.length(&place);
-                    self.instruction(format!("sub i64 {length}, {offset}"))
+                    self.ir
+                        .binary(Binary::Sub, Flags::empty(), length, ir::Value::i64(offset))
                 } else {
-                    offset.to_string()
+                    ir::Value::i64(offset)
                 };
-                self.index(&place, &index)
+                self.index(&place, index)
             }
             ProjectionElem::Subslice { from, to, from_end } => {
                 let element = place.shape.field(self.sess, 0);
-                let pointer = self.offset(&place.pointer, from * element.size().bytes() as u64);
+                let pointer =
+                    self.offset(place.pointer.clone(), from * element.size().bytes() as u64);
                 if from_end {
                     let length = self.length(&place);
-                    let length = self.instruction(format!("sub i64 {length}, {}", from + to));
+                    let length = self.ir.binary(
+                        Binary::Sub,
+                        Flags::empty(),
+                        length,
+                        ir::Value::i64(from + to),
+                    );
                     Place {
                         pointer,
                         meta: Some(length),
@@ -171,10 +178,9 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
     pub fn field(&mut self, place: &Place, field: usize, ty: Ty) -> Place {
         let offset = place.shape.offset(field);
         let shape = self.shape_of(ty);
-        let pointer = self.offset(&place.pointer, offset.bytes() as u64);
         let meta = place.meta.clone().filter(|_| shape.is_unsized());
         Place {
-            pointer,
+            pointer: self.offset(place.pointer.clone(), offset.bytes() as u64),
             meta,
             align: layout::restrict_align(place.align, offset),
             shape,
@@ -188,19 +194,20 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
         }
     }
 
-    pub fn index(&mut self, place: &Place, index: &str) -> Place {
+    pub fn index(&mut self, place: &Place, index: ir::Value) -> Place {
         let element = self.element_shape(place);
         let stride = match &place.shape.layout.fields {
             FieldsShape::Array { stride, .. } => *stride,
             _ => element.size(),
         };
-        let bytes = self.instruction(format!("mul i64 {index}, {}", stride.bytes()));
-        let pointer = self.instruction(format!(
-            "getelementptr inbounds i8, i8* {}, i64 {bytes}",
-            place.pointer
-        ));
+        let bytes = self.ir.binary(
+            Binary::Mul,
+            Flags::empty(),
+            index,
+            ir::Value::i64(stride.bytes() as u64),
+        );
         Place {
-            pointer,
+            pointer: self.ir.offset(place.pointer.clone(), bytes, true),
             meta: None,
             align: layout::restrict_align(place.align, stride),
             shape: element,
@@ -208,23 +215,18 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
     }
 
     /// Number of elements of an array or slice place.
-    pub fn length(&mut self, place: &Place) -> String {
+    pub fn length(&mut self, place: &Place) -> ir::Value {
         match (place.shape.ty.kind(), &place.meta) {
             (TyKind::RigidTy(RigidTy::Array(_, length)), _) => {
-                length.eval_target_usize().unwrap_or(0).to_string()
+                ir::Value::i64(length.eval_target_usize().unwrap_or(0))
             }
             (_, Some(meta)) => meta.clone(),
             _ => panic!("length of `{:?}`", place.shape.ty.kind()),
         }
     }
 
-    pub fn offset(&mut self, pointer: &str, bytes: u64) -> String {
-        match bytes {
-            0 => pointer.to_owned(),
-            bytes => self.instruction(format!(
-                "getelementptr inbounds i8, i8* {pointer}, i64 {bytes}"
-            )),
-        }
+    pub fn offset(&mut self, pointer: ir::Value, bytes: u64) -> ir::Value {
+        self.ir.offset(pointer, ir::Value::i64(bytes), true)
     }
 
     /// Pointer (and length for unsized places) produced by `&place`.
@@ -242,17 +244,14 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
         } else {
             match shape.repr() {
                 ValueRepr::Scalar(scalar) => {
-                    Value::Scalar(self.load_scalar(&place.pointer, *scalar, place.align))
+                    Value::Scalar(self.load_scalar(place.pointer.clone(), *scalar, place.align))
                 }
                 ValueRepr::ScalarPair { a, b, b_offset } => {
                     let (a, b, b_offset) = (*a, *b, *b_offset);
-                    let first = self.load_scalar(&place.pointer, a, place.align);
-                    let pointer = self.offset(&place.pointer, b_offset.bytes() as u64);
-                    let second = self.load_scalar(
-                        &pointer,
-                        b,
-                        layout::restrict_align(place.align, b_offset),
-                    );
+                    let first = self.load_scalar(place.pointer.clone(), a, place.align);
+                    let pointer = self.offset(place.pointer.clone(), b_offset.bytes() as u64);
+                    let second =
+                        self.load_scalar(pointer, b, layout::restrict_align(place.align, b_offset));
                     Value::Pair(first, second)
                 }
                 _ => Value::Memory(place.pointer.clone(), place.align),
@@ -265,7 +264,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
         match (&operand.value, operand.shape.repr()) {
             (Value::Zst, _) => {}
             (Value::Scalar(value), ValueRepr::Scalar(scalar)) => {
-                self.store_scalar(&place.pointer, value, *scalar, place.align)
+                self.store_scalar(place.pointer.clone(), value.clone(), *scalar, place.align)
             }
             (
                 Value::Pair(a, b),
@@ -276,11 +275,11 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                 },
             ) => {
                 let (first, second, b_offset) = (*first, *second, *b_offset);
-                self.store_scalar(&place.pointer, a, first, place.align);
-                let pointer = self.offset(&place.pointer, b_offset.bytes() as u64);
+                self.store_scalar(place.pointer.clone(), a.clone(), first, place.align);
+                let pointer = self.offset(place.pointer.clone(), b_offset.bytes() as u64);
                 self.store_scalar(
-                    &pointer,
-                    b,
+                    pointer,
+                    b.clone(),
                     second,
                     layout::restrict_align(place.align, b_offset),
                 );
@@ -298,8 +297,8 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                 let typed = matches!(stable::rigid(shape.ty), RigidTy::Array(element, _)
                     if matches!(stable::rigid(element), RigidTy::Float(FloatTy::F32 | FloatTy::F64) | RigidTy::Int(_) | RigidTy::Uint(_)));
                 self.copy(
-                    &place.pointer,
-                    source,
+                    place.pointer.clone(),
+                    source.clone(),
                     operand.shape.size(),
                     place.align,
                     *align,
@@ -314,57 +313,58 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
         }
     }
 
-    pub fn load_scalar(&mut self, pointer: &str, scalar: Scalar, align: u64) -> String {
+    pub fn load_scalar(&mut self, pointer: ir::Value, scalar: Scalar, align: u64) -> ir::Value {
         let ty = layout::memory_type(layout::primitive(scalar));
-        let typed = self.instruction(format!("bitcast i8* {pointer} to {ty}*"));
-        let value = self.instruction(format!("load {ty}, {ty}* {typed}, align {align}"));
+        let value = self.ir.load(ty, pointer, align, Access::Plain);
         match layout::is_bool(scalar) {
-            true => self.instruction(format!("trunc i8 {value} to i1")),
+            true => self.ir.cast(Conversion::Trunc, value, Type::I1),
             false => value,
         }
     }
 
-    pub fn store_scalar(&mut self, pointer: &str, value: &str, scalar: Scalar, align: u64) {
-        let ty = layout::memory_type(layout::primitive(scalar));
+    pub fn store_scalar(
+        &mut self,
+        pointer: ir::Value,
+        value: ir::Value,
+        scalar: Scalar,
+        align: u64,
+    ) {
         let value = match layout::is_bool(scalar) {
-            true => self.instruction(format!("zext i1 {value} to i8")),
-            false => value.to_owned(),
+            true => self.ir.cast(Conversion::ZExt, value, Type::I8),
+            false => value,
         };
-        let typed = self.instruction(format!("bitcast i8* {pointer} to {ty}*"));
-        self.emit(format!("store {ty} {value}, {ty}* {typed}, align {align}"));
+        self.ir.store(value, pointer, align, Access::Plain);
     }
 
     pub fn copy(
         &mut self,
-        destination: &str,
-        source: &str,
+        destination: ir::Value,
+        source: ir::Value,
         size: MachineSize,
         destination_align: u64,
         source_align: u64,
         typed: bool,
     ) {
+        let bytes = size.bytes() as u64;
         if typed
-            && size.bytes() > 0
-            && size.bytes().is_multiple_of(4)
+            && bytes > 0
+            && bytes.is_multiple_of(4)
             && destination_align >= 4
             && source_align >= 4
         {
-            let ty = format!("<{} x i32>", size.bytes() / 4);
-            let source = self.instruction(format!("bitcast i8* {source} to {ty}*"));
-            let value =
-                self.instruction(format!("load {ty}, {ty}* {source}, align {source_align}"));
-            let destination = self.instruction(format!("bitcast i8* {destination} to {ty}*"));
-            self.emit(format!(
-                "store {ty} {value}, {ty}* {destination}, align {destination_align}"
-            ));
-            return;
-        }
-        if size.bytes() > 0 {
-            self.emit(format!(
-                "call void @llvm.memcpy.p0i8.p0i8.i64(i8* align {align} {destination}, i8* align {align} {source}, i64 {size}, i1 false)",
-                align = destination_align.min(source_align),
-                size = size.bytes()
-            ));
+            let ty = Type::Vector(bytes / 4, Box::new(Type::I32));
+            let value = self.ir.load(ty, source, source_align, Access::Plain);
+            self.ir
+                .store(value, destination, destination_align, Access::Plain);
+        } else if bytes > 0 {
+            self.ir.transfer(
+                Transfer::Copy,
+                destination,
+                source,
+                ir::Value::i64(bytes),
+                destination_align.min(source_align),
+                false,
+            );
         }
     }
 
@@ -380,24 +380,16 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
         if let (ValueRepr::Scalar(from), ValueRepr::Scalar(to), Value::Scalar(value)) =
             (operand.shape.repr(), shape.repr(), &operand.value)
         {
-            let (from, to) = (*from, *to);
-            let (from_type, to_type) = (layout::immediate_type(from), layout::immediate_type(to));
-            let instruction = match (from_type, to_type) {
-                (from, to) if from == to => None,
-                ("i8*", _) => Some("ptrtoint"),
-                (_, "i8*") => Some("inttoptr"),
-                ("i1", _) => Some("zext"),
-                (_, "i1") => Some("trunc"),
-                _ => Some("bitcast"),
-            };
-            let value = match instruction {
-                Some(instruction) => {
-                    self.instruction(format!("{instruction} {from_type} {value} to {to_type}"))
-                }
-                None => value.clone(),
+            let (from, to) = (layout::immediate_type(*from), layout::immediate_type(*to));
+            let operation = match (&from, &to) {
+                (from, _) if from.is_pointer() => Conversion::PtrToInt,
+                (_, to) if to.is_pointer() => Conversion::IntToPtr,
+                (&Type::I1, _) => Conversion::ZExt,
+                (_, &Type::I1) => Conversion::Trunc,
+                _ => Conversion::BitCast,
             };
             return Operand {
-                value: Value::Scalar(value),
+                value: Value::Scalar(self.ir.cast(operation, value.clone(), to)),
                 shape,
             };
         }

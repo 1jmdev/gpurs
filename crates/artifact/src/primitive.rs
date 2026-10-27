@@ -37,8 +37,7 @@ pub enum Lowering {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum Operand {
     Argument(usize),
-    /// Typed NVVM constant such as `i32 -1`.
-    Constant(String),
+    I32(i32),
 }
 
 /// Threads that must reach the operation together.

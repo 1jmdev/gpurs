@@ -9,6 +9,7 @@ license = "MIT"
 repository = "https://github.com/1jmdev/gpurs"
 
 [workspace.dependencies]
+bitflags = "2.13.2"
 gpurs = { path = "crates/gpurs" }
 gpurs-artifact = { path = "crates/artifact" }
 gpurs-build = { path = "crates/build" }

@@ -5,7 +5,7 @@ use gpurs_macros::primitive;
 #[primitive(
     lowering = Call {
         symbol: "llvm.nvvm.shfl.sync.bfly.i32",
-        operands: [Constant("i32 -1"), Argument(0), Argument(1), Constant("i32 31")],
+        operands: [I32(-1), Argument(0), Argument(1), I32(31)],
     },
     architecture = 30,
     convergence = Warp,

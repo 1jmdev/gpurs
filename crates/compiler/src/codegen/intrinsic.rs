@@ -1,10 +1,11 @@
 use gpurs_artifact::{Convergence, Failure, Lowering, Operand as CallOperand, Primitive};
 
 use super::{
-    function::{self, FunctionBuilder},
-    layout,
-    layout::Shape,
-    module,
+    function::FunctionBuilder,
+    ir::{
+        self, Access, Binary, Conversion, Flags, Modification, Ordering, Predicate, Transfer, Type,
+    },
+    layout, module,
     place::{Operand, Place, Value},
 };
 use crate::{attributes, paths, stable::*};
@@ -64,7 +65,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
             "black_box" | "likely" | "unlikely" | "read_via_copy" => {
                 if name == "read_via_copy" {
                     self.load(&Place::new(
-                        arguments[0].scalar().to_owned(),
+                        arguments[0].scalar(),
                         destination.shape.clone(),
                     ))
                     .value
@@ -74,7 +75,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
             }
             "write_via_move" => {
                 self.store(
-                    &Place::new(arguments[0].scalar().to_owned(), arguments[1].shape.clone()),
+                    &Place::new(arguments[0].scalar(), arguments[1].shape.clone()),
                     &arguments[1],
                 );
                 return true;
@@ -84,69 +85,58 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                 let layout = self.shape_of(ty);
                 let size = match ty.kind() {
                     TyKind::RigidTy(RigidTy::Slice(element)) => {
-                        self.shape_of(element).size().bytes()
+                        self.shape_of(element).size().bytes() as u64
                     }
                     TyKind::RigidTy(RigidTy::Str) => 1,
-                    _ => layout.size().bytes(),
+                    _ => layout.size().bytes() as u64,
                 };
                 let value = if name != "size_of_val" {
-                    layout.align().to_string()
+                    ir::Value::i64(layout.align())
                 } else if layout.is_unsized() {
-                    self.instruction(format!("mul i64 {}, {size}", arguments[0].pair().1))
+                    let length = arguments[0].pair().1;
+                    self.ir
+                        .binary(Binary::Mul, Flags::empty(), length, ir::Value::i64(size))
                 } else {
-                    size.to_string()
+                    ir::Value::i64(size)
                 };
                 Value::Scalar(value)
             }
             "ctpop" | "ctlz" | "ctlz_nonzero" | "cttz" | "cttz_nonzero" | "bswap"
             | "bitreverse" => {
-                let ValueRepr::Scalar(scalar) = arguments[0].shape.repr().clone() else {
-                    unreachable!()
-                };
-                let ty = layout::immediate_type(scalar);
+                let value = arguments[0].scalar();
+                let ty = value.ty.clone();
                 let operation = name.trim_end_matches("_nonzero");
-                let extra = if matches!(operation, "ctlz" | "cttz") {
-                    ", i1"
-                } else {
-                    ""
-                };
-                self.module
-                    .declare(format!("declare {ty} @llvm.{operation}.{ty}({ty}{extra})"));
-                let extra = if extra.is_empty() { "" } else { ", i1 false" };
-                let value = self.instruction(format!(
-                    "call {ty} @llvm.{operation}.{ty}({ty} {}{extra})",
-                    arguments[0].scalar()
-                ));
+                let mut operands = vec![value];
+                if matches!(operation, "ctlz" | "cttz") {
+                    operands.push(ir::Value::bool(false));
+                }
+                let value = self.ir.call(format!("llvm.{operation}.{ty}"), ty, operands);
                 let ValueRepr::Scalar(result) = destination.shape.repr().clone() else {
                     unreachable!()
                 };
-                Value::Scalar(self.integer_cast(&value, scalar, result, false))
+                Value::Scalar(self.ir.resize(value, layout::immediate_type(result), false))
             }
             "rotate_left" | "rotate_right" => {
-                let ValueRepr::Scalar(scalar) = arguments[0].shape.repr().clone() else {
-                    unreachable!()
-                };
-                let ValueRepr::Scalar(shift) = arguments[1].shape.repr().clone() else {
-                    unreachable!()
-                };
-                let ty = layout::immediate_type(scalar);
-                let shift = self.integer_cast(arguments[1].scalar(), shift, scalar, false);
-                let width = layout::bits(scalar);
-                let shift = self.instruction(format!("and {ty} {shift}, {}", width - 1));
-                let reverse = self.instruction(format!("sub {ty} 0, {shift}"));
-                let reverse = self.instruction(format!("and {ty} {reverse}, {}", width - 1));
+                let value = arguments[0].scalar();
+                let ty = value.ty.clone();
+                let mask = ir::Value::int(ty.clone(), ty.bits() as u128 - 1);
+                let shift = self.ir.resize(arguments[1].scalar(), ty.clone(), false);
+                let shift = self
+                    .ir
+                    .binary(Binary::And, Flags::empty(), shift, mask.clone());
+                let zero = ir::Value::int(ty, 0);
+                let reverse = self
+                    .ir
+                    .binary(Binary::Sub, Flags::empty(), zero, shift.clone());
+                let reverse = self.ir.binary(Binary::And, Flags::empty(), reverse, mask);
                 let (first, second) = if name == "rotate_left" {
-                    ("shl", "lshr")
+                    (Binary::Shl, Binary::LShr)
                 } else {
-                    ("lshr", "shl")
+                    (Binary::LShr, Binary::Shl)
                 };
-                let first =
-                    self.instruction(format!("{first} {ty} {}, {shift}", arguments[0].scalar()));
-                let second = self.instruction(format!(
-                    "{second} {ty} {}, {reverse}",
-                    arguments[0].scalar()
-                ));
-                Value::Scalar(self.instruction(format!("or {ty} {first}, {second}")))
+                let first = self.ir.binary(first, Flags::empty(), value.clone(), shift);
+                let second = self.ir.binary(second, Flags::empty(), value, reverse);
+                Value::Scalar(self.ir.binary(Binary::Or, Flags::empty(), first, second))
             }
             "saturating_add" | "saturating_sub" => {
                 let ValueRepr::Scalar(scalar) = arguments[0].shape.repr().clone() else {
@@ -167,75 +157,83 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                 );
                 let (value, overflow) = pair.pair();
                 let limit = if layout::is_signed(scalar) {
-                    let negative =
-                        self.instruction(format!("icmp slt {ty} {}, 0", arguments[0].scalar()));
-                    let minimum = 1u128 << (layout::bits(scalar) - 1);
-                    let low = function::integer_text(minimum, ty, layout::bits(scalar));
-                    let high = function::integer_text(minimum - 1, ty, layout::bits(scalar));
-                    self.instruction(format!("select i1 {negative}, {ty} {low}, {ty} {high}"))
+                    let zero = ir::Value::int(ty.clone(), 0);
+                    let negative = self.ir.compare(Predicate::Slt, arguments[0].scalar(), zero);
+                    let minimum = 1u128 << (ty.bits() - 1);
+                    let low = ir::Value::int(ty.clone(), minimum);
+                    let high = ir::Value::int(ty.clone(), minimum - 1);
+                    self.ir.select(negative, low, high)
                 } else if name == "saturating_sub" {
-                    "0".to_owned()
+                    ir::Value::int(ty, 0)
                 } else {
-                    "-1".to_owned()
+                    ir::Value::int(ty, u128::MAX)
                 };
-                Value::Scalar(
-                    self.instruction(format!("select i1 {overflow}, {ty} {limit}, {ty} {value}")),
-                )
+                Value::Scalar(self.ir.select(overflow, limit, value))
             }
             "exact_div" | "unchecked_div" | "unchecked_rem" => {
                 let ValueRepr::Scalar(scalar) = arguments[0].shape.repr().clone() else {
                     unreachable!()
                 };
-                let ty = layout::immediate_type(scalar);
-                let sign = if layout::is_signed(scalar) { "s" } else { "u" };
-                let operation = if name == "unchecked_rem" {
-                    "rem"
-                } else {
-                    "div"
+                let operation = match (name, layout::is_signed(scalar)) {
+                    ("unchecked_rem", true) => Binary::SRem,
+                    ("unchecked_rem", false) => Binary::URem,
+                    (_, true) => Binary::SDiv,
+                    (_, false) => Binary::UDiv,
                 };
-                let exact = if name == "exact_div" { "exact " } else { "" };
-                Value::Scalar(self.instruction(format!(
-                    "{sign}{operation} {exact}{ty} {}, {}",
+                let flags = if name == "exact_div" {
+                    Flags::EXACT
+                } else {
+                    Flags::empty()
+                };
+                Value::Scalar(self.ir.binary(
+                    operation,
+                    flags,
                     arguments[0].scalar(),
-                    arguments[1].scalar()
-                )))
+                    arguments[1].scalar(),
+                ))
             }
             "offset" | "arith_offset" => {
-                let size = self
-                    .shape_of(instance.args().0[0].ty().copied().unwrap())
-                    .size()
-                    .bytes();
-                let offset = self.instruction(format!("mul i64 {}, {size}", arguments[1].scalar()));
-                Value::Scalar(self.instruction(format!(
-                    "getelementptr i8, i8* {}, i64 {offset}",
-                    arguments[0].scalar()
-                )))
+                let size = self.element_size(instance);
+                let offset = self.ir.binary(
+                    Binary::Mul,
+                    Flags::empty(),
+                    arguments[1].scalar(),
+                    ir::Value::i64(size),
+                );
+                Value::Scalar(self.ir.offset(arguments[0].scalar(), offset, false))
             }
             "ptr_offset_from" | "ptr_offset_from_unsigned" => {
-                let size = self
-                    .shape_of(instance.args().0[0].ty().copied().unwrap())
-                    .size()
-                    .bytes();
-                let left =
-                    self.instruction(format!("ptrtoint i8* {} to i64", arguments[0].scalar()));
-                let right =
-                    self.instruction(format!("ptrtoint i8* {} to i64", arguments[1].scalar()));
-                let difference = self.instruction(format!("sub i64 {left}, {right}"));
+                let size = self.element_size(instance);
+                let left = self
+                    .ir
+                    .cast(Conversion::PtrToInt, arguments[0].scalar(), Type::I64);
+                let right = self
+                    .ir
+                    .cast(Conversion::PtrToInt, arguments[1].scalar(), Type::I64);
+                let difference = self.ir.binary(Binary::Sub, Flags::empty(), left, right);
                 let division = if name.ends_with("unsigned") {
-                    "udiv"
+                    Binary::UDiv
                 } else {
-                    "sdiv"
+                    Binary::SDiv
                 };
-                Value::Scalar(
-                    self.instruction(format!("{division} exact i64 {difference}, {size}")),
-                )
+                Value::Scalar(self.ir.binary(
+                    division,
+                    Flags::EXACT,
+                    difference,
+                    ir::Value::i64(size),
+                ))
             }
             "ptr_mask" => {
+                let pointer = self
+                    .ir
+                    .cast(Conversion::PtrToInt, arguments[0].scalar(), Type::I64);
                 let pointer =
-                    self.instruction(format!("ptrtoint i8* {} to i64", arguments[0].scalar()));
-                let pointer =
-                    self.instruction(format!("and i64 {pointer}, {}", arguments[1].scalar()));
-                Value::Scalar(self.instruction(format!("inttoptr i64 {pointer} to i8*")))
+                    self.ir
+                        .binary(Binary::And, Flags::empty(), pointer, arguments[1].scalar());
+                Value::Scalar(
+                    self.ir
+                        .cast(Conversion::IntToPtr, pointer, Type::byte_pointer()),
+                )
             }
             "copy"
             | "copy_nonoverlapping"
@@ -243,34 +241,33 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
             | "volatile_copy_memory"
             | "volatile_copy_nonoverlapping_memory"
             | "volatile_set_memory" => {
-                let size = self
-                    .shape_of(instance.args().0[0].ty().copied().unwrap())
-                    .size()
-                    .bytes();
-                let bytes = self.instruction(format!("mul i64 {}, {size}", arguments[2].scalar()));
-                let volatile = name.starts_with("volatile");
+                let size = self.element_size(instance);
+                let bytes = self.ir.binary(
+                    Binary::Mul,
+                    Flags::empty(),
+                    arguments[2].scalar(),
+                    ir::Value::i64(size),
+                );
                 let operation = match name {
-                    "write_bytes" | "volatile_set_memory" => "memset.p0i8.i64",
-                    "copy" | "volatile_copy_memory" => "memmove.p0i8.p0i8.i64",
-                    _ => "memcpy.p0i8.p0i8.i64",
+                    "write_bytes" | "volatile_set_memory" => Transfer::Set,
+                    "copy" | "volatile_copy_memory" => Transfer::Move,
+                    _ => Transfer::Copy,
                 };
-                let (destination, source) = if operation.starts_with("memset") {
-                    (
-                        arguments[0].scalar(),
-                        format!("i8 {}", arguments[1].scalar()),
-                    )
-                } else if volatile {
-                    (
-                        arguments[0].scalar(),
-                        format!("i8* {}", arguments[1].scalar()),
-                    )
-                } else {
-                    (
-                        arguments[1].scalar(),
-                        format!("i8* {}", arguments[0].scalar()),
-                    )
+                // `copy` and `copy_nonoverlapping` take the source first.
+                let (destination, source) = match (operation, name.starts_with("volatile")) {
+                    (Transfer::Set, _) | (_, true) => {
+                        (arguments[0].scalar(), arguments[1].scalar())
+                    }
+                    _ => (arguments[1].scalar(), arguments[0].scalar()),
                 };
-                self.emit(format!("call void @llvm.{operation}(i8* {destination}, {source}, i64 {bytes}, i1 {volatile})"));
+                self.ir.transfer(
+                    operation,
+                    destination,
+                    source,
+                    bytes,
+                    1,
+                    name.starts_with("volatile"),
+                );
                 return true;
             }
             "volatile_load" | "volatile_store" => {
@@ -280,42 +277,43 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                     return true;
                 };
                 let ty = layout::memory_type(layout::primitive(scalar));
-                let pointer =
-                    self.instruction(format!("bitcast i8* {} to {ty}*", arguments[0].scalar()));
                 if name == "volatile_store" {
-                    self.emit(format!(
-                        "store volatile {ty} {}, {ty}* {pointer}, align {}",
+                    self.ir.store(
                         arguments[1].scalar(),
-                        layout.align()
-                    ));
+                        arguments[0].scalar(),
+                        layout.align(),
+                        Access::Volatile,
+                    );
                     return true;
                 }
-                Value::Scalar(self.instruction(format!(
-                    "load volatile {ty}, {ty}* {pointer}, align {}",
-                    layout.align()
-                )))
+                Value::Scalar(self.ir.load(
+                    ty,
+                    arguments[0].scalar(),
+                    layout.align(),
+                    Access::Volatile,
+                ))
             }
             "select_unpredictable" => {
                 let first = self.spill(&arguments[1]);
                 let second = self.spill(&arguments[2]);
-                let pointer = self.instruction(format!(
-                    "select i1 {}, i8* {}, i8* {}",
-                    arguments[0].scalar(),
-                    first.pointer,
-                    second.pointer
-                ));
+                let pointer = self
+                    .ir
+                    .select(arguments[0].scalar(), first.pointer, second.pointer);
                 self.load(&Place::new(pointer, destination.shape.clone()))
                     .value
             }
             "caller_location" => {
                 let layout =
                     self.shape_of(destination.shape.ty.kind().builtin_deref(true).unwrap().ty);
-                let name = self.module.unique("@gpurs.location");
                 let size = layout.size().bytes();
-                self.module.global(&format!("{name} = internal addrspace(1) constant [{size} x i8] zeroinitializer, align {}", layout.align()));
-                Value::Scalar(format!(
-                    "addrspacecast (i8 addrspace(1)* bitcast ([{size} x i8] addrspace(1)* {name} to i8 addrspace(1)*) to i8*)"
-                ))
+                let location = self.module.ir.global(
+                    "gpurs.location",
+                    1,
+                    true,
+                    ir::Value::bytes(vec![0; size]),
+                    layout.align(),
+                );
+                Value::Scalar(location.generic())
             }
             name => {
                 if let Some(value) = self.math(name, arguments) {
@@ -343,14 +341,16 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
         destination: &Place,
     ) {
         if self.module.checked && primitive.convergence == Convergence::Warp {
-            let mask = self.instruction("call i32 asm sideeffect \"activemask.b32 $0;\", \"=r\"()");
-            let complete = self.instruction(format!("icmp eq i32 {mask}, -1"));
-            let ready = self.fresh_label("warp");
-            let failed = self.fresh_label("warp");
-            self.emit(format!("br i1 {complete}, label %{ready}, label %{failed}"));
-            self.start_block(&failed);
+            let mask = self
+                .ir
+                .assembly("activemask.b32 $0;", "=r", Type::I32, Vec::new());
+            let complete = self.ir.compare(Predicate::Eq, mask, ir::Value::i32(-1));
+            let ready = self.ir.fresh_block("warp");
+            let failed = self.ir.fresh_block("warp");
+            self.ir.branch_if(complete, ready, failed);
+            self.ir.position(failed);
             self.fail(Failure::Upstream);
-            self.start_block(&ready);
+            self.ir.position(ready);
         }
         let value = match primitive.lowering {
             Lowering::Dimensions(prefix) => {
@@ -369,45 +369,27 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
             }
             Lowering::Register(register) => self.extended_register(&register),
             Lowering::Index => {
-                let [tx, ty, tz, bx, by, bz, nx, ny, nz, gx, gy, _] = [
+                let registers = [
                     "tid.x", "tid.y", "tid.z", "ctaid.x", "ctaid.y", "ctaid.z", "ntid.x", "ntid.y",
                     "ntid.z", "nctaid.x", "nctaid.y", "nctaid.z",
                 ]
                 .map(|name| self.extended_register(name));
-                let block = self.instruction(format!("mul nuw i64 {bz}, {gy}"));
-                let block = self.instruction(format!("add nuw i64 {block}, {by}"));
-                let block = self.instruction(format!("mul nuw i64 {block}, {gx}"));
-                let block = self.instruction(format!("add nuw i64 {block}, {bx}"));
-                let thread = self.instruction(format!("mul nuw i64 {tz}, {ny}"));
-                let thread = self.instruction(format!("add nuw i64 {thread}, {ty}"));
-                let thread = self.instruction(format!("mul nuw i64 {thread}, {nx}"));
-                let thread = self.instruction(format!("add nuw i64 {thread}, {tx}"));
-                let count = self.instruction(format!("mul nuw i64 {nx}, {ny}"));
-                let count = self.instruction(format!("mul nuw i64 {count}, {nz}"));
-                let offset = self.instruction(format!("mul nuw i64 {block}, {count}"));
-                self.instruction(format!("add nuw i64 {offset}, {thread}"))
+                self.linear_index(&registers, Flags::NUW)
             }
             Lowering::Barrier => return self.barrier(),
             Lowering::Call { symbol, operands } => {
-                let operands: Vec<_> = operands
+                let operands = operands
                     .iter()
                     .map(|operand| match operand {
-                        CallOperand::Argument(index) => format!(
-                            "{} {}",
-                            scalar_type(&arguments[*index].shape),
-                            arguments[*index].scalar()
-                        ),
-                        CallOperand::Constant(text) => text.clone(),
+                        CallOperand::Argument(index) => arguments[*index].scalar(),
+                        CallOperand::I32(value) => ir::Value::i32(*value),
                     })
                     .collect();
-                let types: Vec<_> = operands
-                    .iter()
-                    .map(|operand| operand.split_once(' ').unwrap().0)
-                    .collect();
-                let result = scalar_type(&destination.shape);
-                self.module
-                    .declare(format!("declare {result} @{symbol}({})", types.join(", ")));
-                self.instruction(format!("call {result} @{symbol}({})", operands.join(", ")))
+                let ValueRepr::Scalar(result) = destination.shape.repr().clone() else {
+                    unreachable!()
+                };
+                self.ir
+                    .call(symbol, layout::immediate_type(result), operands)
             }
             Lowering::SharedArray => {
                 let element = instance.args().0[0].ty().copied().unwrap();
@@ -416,15 +398,16 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                     .eval_target_usize()
                     .unwrap();
                 let layout = self.shape_of(Ty::try_new_array(element, length).unwrap());
-                let name = self.module.unique("@gpurs.shared");
-                let size = layout.size().bytes().max(1);
-                self.module.global(&format!(
-                    "{name} = internal addrspace(3) global [{size} x i8] undef, align {}",
-                    layout.align()
-                ));
-                self.instruction(format!(
-                    "addrspacecast [{size} x i8] addrspace(3)* {name} to i8*"
-                ))
+                let size = layout.size().bytes().max(1) as u64;
+                let shared = self.module.ir.global(
+                    "gpurs.shared",
+                    3,
+                    false,
+                    ir::Value::undef(Type::bytes(size)),
+                    layout.align(),
+                );
+                self.ir
+                    .cast(Conversion::AddrSpaceCast, shared, Type::byte_pointer())
             }
             Lowering::Body => unreachable!(),
         };
@@ -437,37 +420,54 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
         );
     }
 
-    fn extended_register(&mut self, register: &str) -> String {
-        let value = self.special_register(register);
-        self.instruction(format!("zext i32 {value} to i64"))
+    /// The linear thread index from the twelve geometry registers, in `tid`, `ctaid`, `ntid`,
+    /// `nctaid` order.
+    pub(super) fn linear_index(&mut self, registers: &[ir::Value; 12], flags: Flags) -> ir::Value {
+        let [tx, ty, tz, bx, by, bz, nx, ny, nz, gx, gy, _] = registers.clone();
+        let mut multiply_add = |product: ir::Value, factor, addend| {
+            let product = self.ir.binary(Binary::Mul, flags, product, factor);
+            self.ir.binary(Binary::Add, flags, product, addend)
+        };
+        let block = multiply_add(bz, gy, by);
+        let block = multiply_add(block, gx, bx);
+        let thread = multiply_add(tz, ny.clone(), ty);
+        let thread = multiply_add(thread, nx.clone(), tx);
+        let count = self.ir.binary(Binary::Mul, flags, nx, ny);
+        let count = self.ir.binary(Binary::Mul, flags, count, nz);
+        let offset = self.ir.binary(Binary::Mul, flags, block, count);
+        self.ir.binary(Binary::Add, flags, offset, thread)
     }
 
-    pub(super) fn special_register(&mut self, register: &str) -> String {
-        let range = module::REGISTERS
+    fn extended_register(&mut self, register: &str) -> ir::Value {
+        let value = self.special_register(register);
+        self.ir.cast(Conversion::ZExt, value, Type::I64)
+    }
+
+    pub(super) fn special_register(&mut self, register: &str) -> ir::Value {
+        let index = module::REGISTERS
             .iter()
             .position(|(name, ..)| *name == register)
             .unwrap();
-        self.module
-            .declare(format!("declare i32 @llvm.nvvm.read.ptx.sreg.{register}()"));
-        if range < 12
+        let (_, mut low, mut high) = module::REGISTERS[index];
+        if index < 12
             && let Some(value) = self
                 .module
                 .dimensions
                 .get(&self.instance)
-                .and_then(|dimensions| dimensions[range % 6])
+                .and_then(|dimensions| dimensions[index % 6])
         {
-            let (low, high) = if range < 6 {
-                (0, value)
+            (low, high) = if index < 6 {
+                (0, value as i64)
             } else {
-                (value, value + 1)
+                (value as i64, value as i64 + 1)
             };
-            return self.instruction(format!(
-                "call i32 @llvm.nvvm.read.ptx.sreg.{register}(), !range !{{i32 {low}, i32 {high}}}"
-            ));
         }
-        self.instruction(format!(
-            "call i32 @llvm.nvvm.read.ptx.sreg.{register}(), !range !{range}"
-        ))
+        self.ir.call_ranged(
+            format!("llvm.nvvm.read.ptx.sreg.{register}"),
+            Type::I32,
+            Vec::new(),
+            Some((low, high)),
+        )
     }
 
     /// Block barrier that stops every thread once a thread of the block has failed. Verified
@@ -476,29 +476,29 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
     /// which keeps loops around barriers open to rotation and strength reduction.
     pub(super) fn barrier(&mut self) {
         if !self.module.checked {
-            self.module.declare("declare void @llvm.nvvm.barrier0()");
-            self.emit("call void @llvm.nvvm.barrier0()");
+            self.ir.call("llvm.nvvm.barrier0", Type::Void, Vec::new());
             return;
         }
-        self.module
-            .declare("declare i32 @llvm.nvvm.barrier0.popc(i32)");
-        let arrived = self.instruction("call i32 @llvm.nvvm.barrier0.popc(i32 1)");
+        let arrived = self.ir.call(
+            "llvm.nvvm.barrier0.popc",
+            Type::I32,
+            vec![ir::Value::i32(1)],
+        );
         let x = self.special_register("ntid.x");
         let y = self.special_register("ntid.y");
         let z = self.special_register("ntid.z");
-        let threads = self.instruction(format!("mul nuw i32 {x}, {y}"));
-        let threads = self.instruction(format!("mul nuw i32 {threads}, {z}"));
-        let failed = self.instruction(format!("icmp ult i32 {arrived}, {threads}"));
-        self.emit(format!(
-            "call void asm sideeffect \"@$0 exit;\", \"b,~{{memory}}\"(i1 {failed})"
-        ));
+        let threads = self.ir.binary(Binary::Mul, Flags::NUW, x, y);
+        let threads = self.ir.binary(Binary::Mul, Flags::NUW, threads, z);
+        let failed = self.ir.compare(Predicate::Ult, arrived, threads);
+        self.ir
+            .assembly("@$0 exit;", "b,~{memory}", Type::Void, vec![failed]);
     }
 
     fn math(&mut self, name: &str, arguments: &[Operand]) -> Option<Value> {
         let (operation, suffix, ty) = if let Some(operation) = name.strip_suffix("f32") {
-            (operation, "f32", "float")
+            (operation, "f32", Type::Float)
         } else {
-            (name.strip_suffix("f64")?, "f64", "double")
+            (name.strip_suffix("f64")?, "f64", Type::Double)
         };
         let operation = operation.trim_end_matches('_');
         let llvm = match operation {
@@ -534,24 +534,8 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                 if suffix == "f32" { "f" } else { "" }
             )
         };
-        let parameters: Vec<_> = arguments
-            .iter()
-            .map(|argument| {
-                let ValueRepr::Scalar(scalar) = argument.shape.repr().clone() else {
-                    unreachable!()
-                };
-                layout::immediate_type(scalar)
-            })
-            .collect();
-        self.module
-            .declare(format!("declare {ty} @{name}({})", parameters.join(", ")));
-        let arguments: Vec<_> = arguments
-            .iter()
-            .zip(&parameters)
-            .map(|(argument, ty)| format!("{ty} {}", argument.scalar()))
-            .collect();
-        let value = self.instruction(format!("call {ty} @{name}({})", arguments.join(", ")));
-        Some(Value::Scalar(value))
+        let arguments = arguments.iter().map(Operand::scalar).collect();
+        Some(Value::Scalar(self.ir.call(name, ty, arguments)))
     }
 
     fn atomic(
@@ -566,112 +550,92 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
             .0
             .iter()
             .filter_map(|argument| match argument {
-                GenericArgKind::Const(value) => Some(const_uint(value)),
+                GenericArgKind::Const(value) => Some(ordering(const_uint(value))),
                 _ => None,
             })
-            .collect::<Vec<_>>();
-        let order = ordering(orders.first().copied().unwrap_or(0));
+            .collect();
+        let order = orders.first().copied().unwrap_or(Ordering::Monotonic);
         if name.ends_with("fence") {
-            let scope = if name == "atomic_singlethreadfence" {
-                "singlethread "
-            } else {
-                ""
-            };
-            self.emit(format!("fence {scope}{order}"));
-            return;
+            return self.ir.fence(order, name == "atomic_singlethreadfence");
         }
         let layout = self.shape_of(instance.args().0[0].ty().copied().unwrap());
         let ValueRepr::Scalar(scalar) = layout.repr().clone() else {
             unreachable!()
         };
-        let pointer_value = matches!(
-            layout::primitive(scalar),
-            crate::stable::Primitive::Pointer(_)
-        );
-        let ty = if pointer_value {
-            "i64"
-        } else {
-            layout::memory_type(layout::primitive(scalar))
-        };
-        let pointer = self.instruction(format!("bitcast i8* {} to {ty}*", arguments[0].scalar()));
+        // Atomics on pointers operate on their address bits.
+        let pointer_value = layout::immediate_type(scalar).is_pointer();
         let values: Vec<_> = arguments[1..]
             .iter()
-            .map(|argument| {
-                if pointer_value {
-                    self.instruction(format!("ptrtoint i8* {} to i64", argument.scalar()))
-                } else {
-                    argument.scalar().to_owned()
-                }
+            .map(|argument| match pointer_value {
+                true => self
+                    .ir
+                    .cast(Conversion::PtrToInt, argument.scalar(), Type::I64),
+                false => argument.scalar(),
             })
             .collect();
+        let ty = match pointer_value {
+            true => Type::I64,
+            false => layout::memory_type(layout::primitive(scalar)),
+        };
+        let pointer = arguments[0].scalar();
         let value = match name {
             "atomic_store" => {
-                self.emit(format!(
-                    "store atomic {ty} {}, {ty}* {pointer} {order}, align {}",
-                    values[0],
-                    layout.align()
-                ));
-                return;
+                let value = values[0].clone();
+                return self
+                    .ir
+                    .store(value, pointer, layout.align(), Access::Atomic(order));
             }
-            "atomic_load" => self.instruction(format!(
-                "load atomic {ty}, {ty}* {pointer} {order}, align {}",
-                layout.align()
-            )),
+            "atomic_load" => self
+                .ir
+                .load(ty, pointer, layout.align(), Access::Atomic(order)),
             "atomic_cxchg" | "atomic_cxchgweak" => {
-                let weak = if name == "atomic_cxchgweak" {
-                    "weak "
-                } else {
-                    ""
+                let failure = orders.get(1).copied().unwrap_or(Ordering::Monotonic);
+                let result = self.ir.compare_exchange(
+                    pointer,
+                    values[0].clone(),
+                    values[1].clone(),
+                    (order, failure),
+                    name == "atomic_cxchgweak",
+                );
+                let value = self.ir.extract(result.clone(), 0);
+                let value = match pointer_value {
+                    true => self
+                        .ir
+                        .cast(Conversion::IntToPtr, value, Type::byte_pointer()),
+                    false => value,
                 };
-                let failure = ordering(orders.get(1).copied().unwrap_or(0));
-                let result = self.instruction(format!(
-                    "cmpxchg {weak}{ty}* {pointer}, {ty} {}, {ty} {} {order} {failure}",
-                    values[0], values[1]
-                ));
-                let value = self.instruction(format!("extractvalue {{{ty}, i1}} {result}, 0"));
-                let value = if pointer_value {
-                    self.instruction(format!("inttoptr i64 {value} to i8*"))
-                } else {
-                    value
-                };
-                let success = self.instruction(format!("extractvalue {{{ty}, i1}} {result}, 1"));
-                self.store(
+                let success = self.ir.extract(result, 1);
+                return self.store(
                     destination,
                     &Operand {
                         value: Value::Pair(value, success),
                         shape: destination.shape.clone(),
                     },
                 );
-                return;
             }
             name => {
                 let operation = match name {
-                    "atomic_xadd" => "add",
-                    "atomic_xsub" => "sub",
-                    "atomic_xchg" => "xchg",
-                    "atomic_and" => "and",
-                    "atomic_nand" => "nand",
-                    "atomic_or" => "or",
-                    "atomic_xor" => "xor",
-                    "atomic_max" => "max",
-                    "atomic_min" => "min",
-                    "atomic_umax" => "umax",
-                    "atomic_umin" => "umin",
-                    _ => {
-                        self.unsupported(&format!("intrinsic `{name}`"));
-                        return;
-                    }
+                    "atomic_xadd" => Modification::Add,
+                    "atomic_xsub" => Modification::Sub,
+                    "atomic_xchg" => Modification::Xchg,
+                    "atomic_and" => Modification::And,
+                    "atomic_nand" => Modification::Nand,
+                    "atomic_or" => Modification::Or,
+                    "atomic_xor" => Modification::Xor,
+                    "atomic_max" => Modification::Max,
+                    "atomic_min" => Modification::Min,
+                    "atomic_umax" => Modification::UMax,
+                    "atomic_umin" => Modification::UMin,
+                    _ => return self.unsupported(&format!("intrinsic `{name}`")),
                 };
-                self.instruction(format!(
-                    "atomicrmw {operation} {ty}* {pointer}, {ty} {} {order}",
-                    values[0]
-                ))
+                self.ir.modify(operation, pointer, values[0].clone(), order)
             }
         };
-        let value = if pointer_value {
-            self.instruction(format!("inttoptr i64 {value} to i8*"))
-        } else {
-            value
+        let value = match pointer_value {
+            true => self
+                .ir
+                .cast(Conversion::IntToPtr, value, Type::byte_pointer()),
+            false => value,
         };
         self.store(
             destination,
@@ -681,23 +645,22 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
             },
         );
     }
-}
 
-fn ordering(value: u64) -> &'static str {
-    match value {
-        0 => "monotonic",
-        1 => "release",
-        2 => "acquire",
-        3 => "acq_rel",
-        4 => "seq_cst",
-        _ => unreachable!("atomic ordering {value}"),
+    /// Size of the pointee type, the first generic argument of a pointer intrinsic.
+    fn element_size(&self, instance: Instance) -> u64 {
+        let ty = instance.args().0[0].ty().copied().unwrap();
+        self.shape_of(ty).size().bytes() as u64
     }
 }
 
-fn scalar_type(shape: &Shape) -> &'static str {
-    match shape.repr() {
-        ValueRepr::Scalar(scalar) => layout::immediate_type(*scalar),
-        _ => unreachable!(),
+fn ordering(value: u64) -> Ordering {
+    match value {
+        0 => Ordering::Monotonic,
+        1 => Ordering::Release,
+        2 => Ordering::Acquire,
+        3 => Ordering::AcquireRelease,
+        4 => Ordering::SequentiallyConsistent,
+        _ => unreachable!("atomic ordering {value}"),
     }
 }
 

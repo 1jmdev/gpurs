@@ -1,3 +1,4 @@
+use super::ir::Type;
 use crate::stable::*;
 
 /// The layout of one fully monomorphized value, in the form the backend consumes.
@@ -105,46 +106,6 @@ impl Shape {
     }
 }
 
-/// The type of a scalar with the given representation.
-pub fn scalar_ty(scalar: Scalar) -> Ty {
-    match primitive(scalar) {
-        Primitive::Int {
-            length,
-            signed: true,
-        } => Ty::signed_ty(match length {
-            IntegerLength::I8 => IntTy::I8,
-            IntegerLength::I16 => IntTy::I16,
-            IntegerLength::I32 => IntTy::I32,
-            IntegerLength::I64 => IntTy::I64,
-            IntegerLength::I128 => IntTy::I128,
-        }),
-        Primitive::Int {
-            length,
-            signed: false,
-        } => Ty::unsigned_ty(match length {
-            IntegerLength::I8 => UintTy::U8,
-            IntegerLength::I16 => UintTy::U16,
-            IntegerLength::I32 => UintTy::U32,
-            IntegerLength::I64 => UintTy::U64,
-            IntegerLength::I128 => UintTy::U128,
-        }),
-        Primitive::Float { length } => Ty::from_rigid_kind(RigidTy::Float(match length {
-            FloatLength::F16 => FloatTy::F16,
-            FloatLength::F32 => FloatTy::F32,
-            FloatLength::F64 => FloatTy::F64,
-            FloatLength::F128 => FloatTy::F128,
-            #[cfg(gpurs_api_float_extended)]
-            FloatLength::F16B => FloatTy::F16,
-            #[cfg(gpurs_api_float_extended)]
-            FloatLength::PpcF128 => FloatTy::F128,
-        })),
-        Primitive::Pointer(_) => Ty::new_ptr(
-            Ty::from_rigid_kind(RigidTy::Tuple(Vec::new())),
-            Mutability::Not,
-        ),
-    }
-}
-
 /// How a value of some layout crosses a device function boundary.
 #[derive(Clone, Copy, Debug)]
 pub enum PassMode {
@@ -185,76 +146,48 @@ pub fn is_bool(scalar: Scalar) -> bool {
     }
 }
 
-pub fn is_float(scalar: Scalar) -> bool {
-    matches!(primitive(scalar), Primitive::Float { .. })
-}
-
 pub fn is_signed(scalar: Scalar) -> bool {
     matches!(primitive(scalar), Primitive::Int { signed: true, .. })
 }
 
-pub fn bits(scalar: Scalar) -> u64 {
-    match primitive(scalar) {
-        Primitive::Int { length, .. } => length.bits() as u64,
-        Primitive::Float { length } => length.bits() as u64,
-        Primitive::Pointer(_) => 64,
-    }
-}
-
-/// LLVM type of a scalar stored in memory.
-pub fn memory_type(primitive: Primitive) -> &'static str {
+/// IR type of a scalar stored in memory.
+pub fn memory_type(primitive: Primitive) -> Type {
     match primitive {
-        Primitive::Int {
-            length: IntegerLength::I8,
-            ..
-        } => "i8",
-        Primitive::Int {
-            length: IntegerLength::I16,
-            ..
-        } => "i16",
-        Primitive::Int {
-            length: IntegerLength::I32,
-            ..
-        } => "i32",
-        Primitive::Int {
-            length: IntegerLength::I64,
-            ..
-        } => "i64",
-        Primitive::Int {
-            length: IntegerLength::I128,
-            ..
-        } => "i128",
+        Primitive::Int { length, .. } => Type::Integer(length.bits() as u32),
         Primitive::Float {
             length: FloatLength::F16,
-        } => "half",
+        } => Type::Half,
         #[cfg(gpurs_api_float_extended)]
         Primitive::Float {
             length: FloatLength::F16B,
-        } => "i16",
+        } => Type::Integer(16),
         Primitive::Float {
             length: FloatLength::F32,
-        } => "float",
+        } => Type::Float,
         Primitive::Float {
             length: FloatLength::F64,
-        } => "double",
-        #[cfg(gpurs_api_float_extended)]
-        Primitive::Float {
-            length: FloatLength::F128 | FloatLength::PpcF128,
-        } => "fp128",
-        #[cfg(not(gpurs_api_float_extended))]
-        Primitive::Float {
-            length: FloatLength::F128,
-        } => "fp128",
-        Primitive::Pointer(_) => "i8*",
+        } => Type::Double,
+        Primitive::Float { .. } => Type::Fp128,
+        Primitive::Pointer(_) => Type::byte_pointer(),
     }
 }
 
-/// LLVM type of a scalar held in a register; `bool` is `i1` there and `i8` in memory.
-pub fn immediate_type(scalar: Scalar) -> &'static str {
+/// IR type of a scalar held in a register; `bool` is `i1` there and `i8` in memory.
+pub fn immediate_type(scalar: Scalar) -> Type {
     if is_bool(scalar) {
-        "i1"
+        Type::I1
     } else {
         memory_type(primitive(scalar))
+    }
+}
+
+/// IR types of the parameters a value passed in `mode` occupies.
+pub fn parameter_types(mode: PassMode) -> Vec<Type> {
+    match mode {
+        PassMode::Ignore => Vec::new(),
+        PassMode::Direct(scalar) => vec![immediate_type(scalar)],
+        PassMode::Pair(a, b) => vec![immediate_type(a), immediate_type(b)],
+        PassMode::Indirect => vec![Type::byte_pointer()],
     }
 }
 

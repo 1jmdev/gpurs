@@ -2,7 +2,7 @@ use gpurs_artifact::Failure;
 
 use super::{
     function::FunctionBuilder,
-    layout::{self, PassMode},
+    layout::PassMode,
     place::{Operand, Place, Value},
 };
 use crate::stable::*;
@@ -91,7 +91,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
         let result = match signature.result.0 {
             PassMode::Indirect => {
                 let result = self.temporary(destination.shape.clone());
-                parameters.push(format!("i8* {}", result.pointer));
+                parameters.push(result.pointer.clone());
                 Some(result)
             }
             _ => None,
@@ -99,41 +99,21 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
         for (argument, (mode, _)) in arguments.iter().zip(&signature.arguments) {
             match mode {
                 PassMode::Ignore => {}
-                PassMode::Direct(scalar) => {
-                    parameters.push(format!(
-                        "{} {}",
-                        layout::immediate_type(*scalar),
-                        argument.scalar()
-                    ));
-                }
-                PassMode::Pair(a, b) => {
+                PassMode::Direct(_) => parameters.push(argument.scalar()),
+                PassMode::Pair(..) => {
                     let (first, second) = argument.pair();
-                    parameters.push(format!("{} {first}", layout::immediate_type(*a)));
-                    parameters.push(format!("{} {second}", layout::immediate_type(*b)));
+                    parameters.extend([first, second]);
                 }
-                PassMode::Indirect => {
-                    let place = self.spill(argument);
-                    parameters.push(format!("i8* {}", place.pointer));
-                }
+                PassMode::Indirect => parameters.push(self.spill(argument).pointer),
             }
         }
-        let ty = signature.return_type();
-        let call = format!("call {ty} {name}({})", parameters.join(", "));
+        let call = self.ir.call(name, signature.return_type(), parameters);
         let value = match signature.result.0 {
-            PassMode::Ignore => {
-                self.emit(call);
-                return;
-            }
-            PassMode::Indirect => {
-                self.emit(call);
-                self.load(&result.unwrap()).value
-            }
-            PassMode::Direct(_) => Value::Scalar(self.instruction(call)),
+            PassMode::Ignore => return,
+            PassMode::Indirect => self.load(&result.unwrap()).value,
+            PassMode::Direct(_) => Value::Scalar(call),
             PassMode::Pair(..) => {
-                let result = self.instruction(call);
-                let first = self.instruction(format!("extractvalue {ty} {result}, 0"));
-                let second = self.instruction(format!("extractvalue {ty} {result}, 1"));
-                Value::Pair(first, second)
+                Value::Pair(self.ir.extract(call.clone(), 0), self.ir.extract(call, 1))
             }
         };
         self.store(

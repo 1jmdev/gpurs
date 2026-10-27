@@ -1,9 +1,9 @@
 use super::{
-    function::{self, FunctionBuilder},
+    function::FunctionBuilder,
+    ir::{self, Type},
     layout::{self, Shape},
     module::ModuleBuilder,
     place::{Operand, Place, Value},
-    rvalue,
 };
 use crate::stable::*;
 
@@ -32,33 +32,27 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
 
     fn allocation_value(&mut self, allocation: &Allocation, shape: &Shape) -> Value {
         match shape.repr() {
-            ValueRepr::Scalar(scalar) => {
-                let scalar = *scalar;
-                Value::Scalar(self.scalar_text(allocation, 0, scalar))
-            }
+            ValueRepr::Scalar(scalar) => Value::Scalar(self.module.scalar(allocation, 0, *scalar)),
             ValueRepr::ScalarPair { a, b, b_offset } => {
-                let (a, b, b_offset) = (*a, *b, *b_offset);
-                let first = self.scalar_text(allocation, 0, a);
-                let second = self.scalar_text(allocation, b_offset.bytes(), b);
+                let first = self.module.scalar(allocation, 0, *a);
+                let second = self.module.scalar(allocation, b_offset.bytes(), *b);
                 Value::Pair(first, second)
             }
             _ => {
-                let pointer = self.module.constant_pointer(allocation);
+                let pointer = self.module.allocation(allocation);
                 self.load(&Place::new(pointer, shape.clone())).value
             }
         }
     }
+}
 
-    fn scalar_text(&mut self, allocation: &Allocation, offset: usize, scalar: Scalar) -> String {
-        let bytes = allocation_bytes(allocation);
-        let pointer = allocation
-            .provenance
-            .ptrs
-            .iter()
-            .find(|(start, _)| *start == offset)
-            .map(|(_, provenance)| *provenance);
-        let width = (layout::bits(scalar) / 8) as usize;
-        let value = bytes
+impl ModuleBuilder<'_> {
+    /// The scalar stored at `offset` of `allocation`, pointing into a global when it carries
+    /// provenance.
+    fn scalar(&mut self, allocation: &Allocation, offset: usize, scalar: Scalar) -> ir::Value {
+        let ty = layout::immediate_type(scalar);
+        let width = (ty.bits() as usize).div_ceil(8);
+        let value = allocation_bytes(allocation)
             .get(offset..offset + width)
             .map(|slice| {
                 let mut buffer = [0u8; 16];
@@ -66,106 +60,62 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                 u128::from_le_bytes(buffer)
             })
             .unwrap_or(0);
-        if let Some(provenance) = pointer {
-            return self
-                .module
-                .allocation_pointer(provenance.0, MachineSize::from_bits((value as usize) * 8));
+        let provenance = allocation
+            .provenance
+            .ptrs
+            .iter()
+            .find(|(start, _)| *start == offset);
+        if let Some((_, provenance)) = provenance {
+            return self.global_pointer(provenance.0, value as u64);
         }
-        match layout::primitive(scalar) {
-            Primitive::Float {
-                length: FloatLength::F32,
-            } => rvalue::float_text(f32::from_bits(value as u32) as f64, "float"),
-            Primitive::Float {
-                length: FloatLength::F64,
-            } => rvalue::float_text(f64::from_bits(value as u64), "double"),
-            Primitive::Pointer(_) => format!("inttoptr (i64 {value} to i8*)"),
-            _ => {
-                function::integer_text(value, layout::immediate_type(scalar), layout::bits(scalar))
-            }
+        match ty {
+            Type::Float => ir::Value::float(ty, f32::from_bits(value as u32) as f64),
+            Type::Double => ir::Value::float(ty, f64::from_bits(value as u64)),
+            ty if ty.is_pointer() => ir::Value::address(value as u64),
+            ty => ir::Value::int(ty, value),
         }
     }
-}
 
-impl ModuleBuilder<'_> {
-    pub fn allocation_pointer(&mut self, alloc_id: AllocId, offset: MachineSize) -> String {
+    /// The generic address `offset` bytes into the global holding `alloc_id`.
+    pub fn global_pointer(&mut self, alloc_id: AllocId, offset: u64) -> ir::Value {
         if !self.allocations.contains_key(&alloc_id) {
             let GlobalAlloc::Memory(allocation) = GlobalAlloc::from(alloc_id) else {
                 self.sess
                     .err("static storage and function pointers are not supported in GPU constants");
-                return "inttoptr (i64 0 to i8*)".to_owned();
+                return ir::Value::address(0);
             };
-            let bytes = allocation_bytes(&allocation);
-            let mut fields = Vec::new();
-            let mut types = Vec::new();
-            let mut position = 0;
-            let name = self.unique("@gpurs.constant");
-            for &(offset, _) in &allocation.provenance.ptrs {
-                if offset > position {
-                    let length = offset - position;
-                    types.push(format!("[{length} x i8]"));
-                }
-                types.push("i8*".to_owned());
-                position = offset + 8;
-            }
-            if position < bytes.len() || types.is_empty() {
-                types.push(format!("[{} x i8]", bytes.len() - position));
-            }
-            let ty = format!("<{{ {} }}>", types.join(", "));
-            self.allocations
-                .insert(alloc_id, (name.clone(), ty.clone()));
-            position = 0;
-            for &(offset, provenance) in &allocation.provenance.ptrs {
-                if offset > position {
-                    fields.push(byte_string(&bytes[position..offset]));
-                }
-                let inner = u64::from_le_bytes(
-                    bytes
-                        .get(offset..offset + 8)
-                        .and_then(|slice| slice.try_into().ok())
-                        .unwrap_or([0; 8]),
-                );
-                let pointer = self
-                    .allocation_pointer(provenance.0, MachineSize::from_bits((inner as usize) * 8));
-                fields.push(format!("i8* {pointer}"));
-                position = offset + 8;
-            }
-            if position < bytes.len() || fields.is_empty() {
-                fields.push(byte_string(&bytes[position..]));
-            }
-            self.global(&format!(
-                "{name} = internal addrspace(1) constant {ty} <{{ {} }}>, align {}",
-                fields.join(", "),
-                allocation.align
-            ));
+            let pointer = self.allocation(&allocation);
+            self.allocations.insert(alloc_id, pointer);
         }
-        let (name, ty) = &self.allocations[&alloc_id];
-        let pointer = format!(
-            "addrspacecast (i8 addrspace(1)* bitcast ({ty} addrspace(1)* {name} to i8 addrspace(1)*) to i8*)"
-        );
-        match offset.bytes() {
-            0 => pointer,
-            offset => format!("getelementptr (i8, i8* {pointer}, i64 {offset})"),
-        }
+        self.allocations[&alloc_id].clone().offset(offset)
     }
 
-    /// A private global for an aggregate constant.
-    pub fn constant_pointer(&mut self, allocation: &Allocation) -> String {
+    /// A constant global holding `allocation`, with its pointers relocated to their own
+    /// globals.
+    pub fn allocation(&mut self, allocation: &Allocation) -> ir::Value {
         let bytes = allocation_bytes(allocation);
-        let name = self.unique("@gpurs.aggregate");
-        let text: String = bytes.iter().map(|byte| format!("\\{byte:02X}")).collect();
-        self.global(&format!(
-            "{name} = internal addrspace(1) constant [{} x i8] c\"{text}\", align {}",
-            bytes.len(),
-            allocation.align
-        ));
-        format!(
-            "addrspacecast (i8 addrspace(1)* bitcast ([{} x i8] addrspace(1)* {name} to i8 addrspace(1)*) to i8*)",
-            bytes.len()
-        )
+        let mut fields = Vec::new();
+        let mut position = 0;
+        for &(offset, provenance) in &allocation.provenance.ptrs {
+            if offset > position {
+                fields.push(ir::Value::bytes(bytes[position..offset].to_vec()));
+            }
+            let inner = bytes
+                .get(offset..offset + 8)
+                .and_then(|slice| slice.try_into().ok())
+                .map_or(0, u64::from_le_bytes);
+            fields.push(self.global_pointer(provenance.0, inner));
+            position = offset + 8;
+        }
+        if position < bytes.len() || fields.is_empty() {
+            fields.push(ir::Value::bytes(bytes[position..].to_vec()));
+        }
+        let initializer = match <[_; 1]>::try_from(fields) {
+            Ok([bytes]) => bytes,
+            Err(fields) => ir::Value::packed(fields),
+        };
+        self.ir
+            .global("gpurs.constant", 1, true, initializer, allocation.align)
+            .generic()
     }
-}
-
-fn byte_string(bytes: &[u8]) -> String {
-    let text: String = bytes.iter().map(|byte| format!("\\{byte:02X}")).collect();
-    format!("[{} x i8] c\"{text}\"", bytes.len())
 }

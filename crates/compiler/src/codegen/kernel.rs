@@ -1,11 +1,15 @@
-use std::fmt::Write;
-
 use gpurs_artifact::{
     Bound, Condition, Expression, Extent, Failure, INPUT_CAPACITY, INPUTS_OFFSET, Kernel,
     PARAMETERS_OFFSET, Parameter, RESULT_OFFSET, Relation, Value, Variant, parameter_offsets,
 };
 
-use super::{function::FunctionBuilder, layout::Shape, module::ModuleBuilder, place::Place};
+use super::{
+    function::FunctionBuilder,
+    ir::{self, Access, Binary, Conversion, Flags, Ordering, Predicate, Type},
+    layout::Shape,
+    module::ModuleBuilder,
+    place::Place,
+};
 use crate::{stable, stable::*};
 
 #[derive(Clone)]
@@ -120,18 +124,21 @@ impl<'sess> ModuleBuilder<'sess> {
         };
         let size = size - argument_offset;
         let mut function = FunctionBuilder::new(self, plan.instance);
-        let arguments = function.instruction(format!("bitcast [{size} x i8]* %arguments to i8*"));
-        let raw: Vec<_> = [
+        function.ir = ir::Function::new(symbol, Type::Void, vec![Type::bytes(size).pointer()]);
+        function.ir.internal = false;
+        function.ir.byval(0, align);
+        let arguments = function.ir.parameter(0);
+        let arguments = function
+            .ir
+            .cast(Conversion::BitCast, arguments, Type::byte_pointer());
+        let raw = [
             "tid.x", "tid.y", "tid.z", "ctaid.x", "ctaid.y", "ctaid.z", "ntid.x", "ntid.y",
             "ntid.z", "nctaid.x", "nctaid.y", "nctaid.z",
         ]
-        .into_iter()
-        .map(|register| function.special_register(register))
-        .collect();
-        let registers: Vec<_> = raw
-            .iter()
-            .map(|value| function.instruction(format!("zext i32 {value} to i64")))
-            .collect();
+        .map(|register| function.special_register(register));
+        let registers = raw
+            .clone()
+            .map(|value| function.ir.cast(Conversion::ZExt, value, Type::I64));
         let pinned = |dimension: fn(usize) -> Expression, axis| {
             plan.conditions.iter().find_map(|condition| {
                 (condition.left == dimension(axis) && condition.relation == Relation::Equal)
@@ -142,7 +149,6 @@ impl<'sess> ModuleBuilder<'sess> {
                     })
             })
         };
-        function.module.declare("declare void @llvm.assume(i1)");
         for axis in 0..3 {
             for (dimension, index, count) in [
                 (
@@ -153,47 +159,67 @@ impl<'sess> ModuleBuilder<'sess> {
                 (Expression::GridDimension, axis + 3, axis + 9),
             ] {
                 if let Some(value) = pinned(dimension, axis) {
-                    for (register, relation) in [(index, "ult"), (count, "eq")] {
-                        let holds = function
-                            .instruction(format!("icmp {relation} i32 {}, {value}", raw[register]));
-                        function.emit(format!("call void @llvm.assume(i1 {holds})"));
+                    for (register, predicate) in [(index, Predicate::Ult), (count, Predicate::Eq)] {
+                        let value = ir::Value::i32(value as i32);
+                        let holds = function.ir.compare(predicate, raw[register].clone(), value);
+                        function.ir.call("llvm.assume", Type::Void, vec![holds]);
                     }
                 }
             }
         }
-        let first = function.instruction(format!("or i64 {}, {}", registers[0], registers[1]));
-        let first = function.instruction(format!("or i64 {first}, {}", registers[2]));
-        let first = function.instruction(format!("icmp eq i64 {first}, 0"));
+        let failed = function.ir.block("failed");
         if function.module.checked {
-            let status = function.instruction(format!("bitcast i8* {arguments} to i32**"));
-            let status = function.instruction(format!("load i32*, i32** {status}, align 8"));
-            function.emit(format!("br i1 {first}, label %status, label %ready"));
-            function.start_block("status");
-            function.emit(format!(
-                "store i32* {status}, i32* addrspace(3)* @gpurs.status, align 8"
-            ));
+            let first = function.ir.binary(
+                Binary::Or,
+                Flags::empty(),
+                registers[0].clone(),
+                registers[1].clone(),
+            );
+            let first = function
+                .ir
+                .binary(Binary::Or, Flags::empty(), first, registers[2].clone());
+            let first = function.ir.compare(Predicate::Eq, first, ir::Value::i64(0));
+            let status_pointer = Type::I32.pointer();
+            let status =
+                function
+                    .ir
+                    .load(status_pointer.clone(), arguments.clone(), 8, Access::Plain);
+            let (status_block, ready) = (function.ir.block("status"), function.ir.block("ready"));
+            function.ir.branch_if(first, status_block, ready);
+            function.ir.position(status_block);
+            let slot = function.module.status.clone();
+            function.ir.store(status, slot, 8, Access::Plain);
             // The first thread checks the failure sources once for its block; when one failed, it
             // fails with `Upstream`, and the barrier then stops the rest of the block.
+            let inputs = function.ir.block("inputs");
             for index in 0..INPUT_CAPACITY {
-                let pointer = function.offset(&arguments, INPUTS_OFFSET + index as u64 * 8);
-                let pointer = function.instruction(format!("bitcast i8* {pointer} to i32**"));
-                let pointer = function.instruction(format!("load i32*, i32** {pointer}, align 8"));
-                let present = function.instruction(format!("icmp ne i32* {pointer}, null"));
-                function.emit(format!(
-                    "br i1 {present}, label %input{index}, label %inputs"
-                ));
-                function.start_block(&format!("input{index}"));
-                let value = function.instruction(format!(
-                    "load atomic i32, i32* {pointer} monotonic, align 4"
-                ));
-                let failed = function.instruction(format!("icmp ne i32 {value}, 0"));
-                function.emit(format!("br i1 {failed}, label %failed, label %next{index}"));
-                function.start_block(&format!("next{index}"));
+                let pointer = function.offset(arguments.clone(), INPUTS_OFFSET + index as u64 * 8);
+                let pointer = function
+                    .ir
+                    .load(status_pointer.clone(), pointer, 8, Access::Plain);
+                let present = function.ir.compare(
+                    Predicate::Ne,
+                    pointer.clone(),
+                    ir::Value::null(status_pointer.clone()),
+                );
+                let (input, next) = (
+                    function.ir.block(format!("input{index}")),
+                    function.ir.block(format!("next{index}")),
+                );
+                function.ir.branch_if(present, input, inputs);
+                function.ir.position(input);
+                let value =
+                    function
+                        .ir
+                        .load(Type::I32, pointer, 4, Access::Atomic(Ordering::Monotonic));
+                let failure = function.ir.compare(Predicate::Ne, value, ir::Value::i32(0));
+                function.ir.branch_if(failure, failed, next);
+                function.ir.position(next);
             }
-            function.emit("br label %inputs");
-            function.start_block("inputs");
-            function.emit("br label %ready");
-            function.start_block("ready");
+            function.ir.branch(inputs);
+            function.ir.position(inputs);
+            function.ir.branch(ready);
+            function.ir.position(ready);
             function.barrier();
         }
         let operands: Vec<_> = plan
@@ -201,62 +227,41 @@ impl<'sess> ModuleBuilder<'sess> {
             .iter()
             .zip(offsets)
             .map(|(parameter, offset)| {
-                let pointer = function.offset(&arguments, offset - argument_offset);
+                let pointer = function.offset(arguments.clone(), offset - argument_offset);
                 function.load(&Place::new(pointer, parameter.layout.clone()))
             })
             .collect();
         let destination = function.temporary(signature.result.1.clone());
         function.invoke_named(&root, plan.instance, &operands, &destination);
         if let Some(result) = result {
-            let mut block =
-                function.instruction(format!("mul i64 {}, {}", registers[5], registers[10]));
-            block = function.instruction(format!("add i64 {block}, {}", registers[4]));
-            block = function.instruction(format!("mul i64 {block}, {}", registers[9]));
-            block = function.instruction(format!("add i64 {block}, {}", registers[3]));
-            let mut thread =
-                function.instruction(format!("mul i64 {}, {}", registers[2], registers[7]));
-            thread = function.instruction(format!("add i64 {thread}, {}", registers[1]));
-            thread = function.instruction(format!("mul i64 {thread}, {}", registers[6]));
-            thread = function.instruction(format!("add i64 {thread}, {}", registers[0]));
-            let threads =
-                function.instruction(format!("mul i64 {}, {}", registers[6], registers[7]));
-            let threads = function.instruction(format!("mul i64 {threads}, {}", registers[8]));
-            let index = function.instruction(format!("mul i64 {block}, {threads}"));
-            let index = function.instruction(format!("add i64 {index}, {thread}"));
-            let offset = function.instruction(format!("mul i64 {index}, {}", result.size));
-            let pointer = function.offset(&arguments, RESULT_OFFSET - argument_offset);
-            let pointer = function.instruction(format!("bitcast i8* {pointer} to i8**"));
-            let pointer = function.instruction(format!("load i8*, i8** {pointer}, align 8"));
-            let pointer = function.instruction(format!(
-                "getelementptr inbounds i8, i8* {pointer}, i64 {offset}"
-            ));
+            let index = function.linear_index(&registers, Flags::empty());
+            let offset = function.ir.binary(
+                Binary::Mul,
+                Flags::empty(),
+                index,
+                ir::Value::i64(result.size),
+            );
+            let pointer = function.offset(arguments, RESULT_OFFSET - argument_offset);
+            let pointer = function
+                .ir
+                .load(Type::byte_pointer(), pointer, 8, Access::Plain);
+            let pointer = function.ir.offset(pointer, offset, true);
             let value = function.load(&destination);
             function.store(&Place::new(pointer, destination.shape.clone()), &value);
         }
-        function.emit("ret void");
-        function.start_block("failed");
+        function.ir.ret(None);
+        function.ir.position(failed);
         function.fail(Failure::Upstream);
-        let mut definition = format!(
-            "define void @{symbol}([{size} x i8]* byval align {align} %arguments) {{\nstart:\n"
-        );
-        definition.push_str(&function.allocas);
-        definition.push_str(&function.code);
-        writeln!(definition, "}}\n").unwrap();
-        function.module.definitions.push_str(&definition);
-        let kernel = format!("void ([{size} x i8]*)* @{symbol}");
+        function.ir.annotations.push(("kernel", 1));
         let block: Option<Vec<_>> = (0..3)
             .map(|axis| pinned(Expression::BlockDimension, axis))
             .collect();
-        function
-            .module
-            .annotations
-            .push(format!("{kernel}, !\"kernel\", i32 1"));
         for (axis, value) in block.into_iter().flatten().enumerate() {
-            function.module.annotations.push(format!(
-                "{kernel}, !\"reqntid{}\", i32 {value}",
-                ["x", "y", "z"][axis]
-            ));
+            let key = ["reqntidx", "reqntidy", "reqntidz"][axis];
+            function.ir.annotations.push((key, value as u32));
         }
+        let FunctionBuilder { module, ir, .. } = function;
+        module.ir.define(ir);
     }
 }
 
