@@ -40,6 +40,69 @@ pub struct Kernel {
     pub extent: Extent,
     pub result: Option<Value>,
     pub conditions: Vec<Condition>,
+    /// Entry point without the runtime checks the compiler proved cannot fail when `bounds`
+    /// hold for a launch.
+    pub fast: Option<Variant>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Variant {
+    pub symbol: String,
+    pub bounds: Vec<Bound>,
+}
+
+/// Holds when any of `values` is below `limit` for the launch geometry, lengths, and scalars
+/// of a launch. Each value bounds the checked quantity on its own.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct Bound {
+    pub values: Vec<Polynomial>,
+    pub limit: Polynomial,
+}
+
+/// Sum of coefficient-weighted products of launch variables.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct Polynomial(pub Vec<(i128, Vec<Variable>)>);
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum Variable {
+    BlockDimension(usize),
+    GridDimension(usize),
+    Length(usize),
+    Scalar(usize),
+    /// Floor of the polynomial divided by the constant.
+    Quotient(Polynomial, u64),
+}
+
+impl Polynomial {
+    /// The value with `leaf` supplying dimensions, lengths, and scalars; `None` on overflow.
+    pub fn evaluate(&self, leaf: &impl Fn(&Variable) -> i128) -> Option<i128> {
+        self.0
+            .iter()
+            .try_fold(0i128, |sum, (coefficient, variables)| {
+                let product = variables
+                    .iter()
+                    .try_fold(*coefficient, |product, variable| {
+                        let value = match variable {
+                            Variable::Quotient(polynomial, divisor) => {
+                                polynomial.evaluate(leaf)?.div_euclid(*divisor as i128)
+                            }
+                            variable => leaf(variable),
+                        };
+                        product.checked_mul(value)
+                    })?;
+                sum.checked_add(product)
+            })
+    }
+}
+
+impl Bound {
+    pub fn holds(&self, leaf: &impl Fn(&Variable) -> i128) -> bool {
+        self.limit.evaluate(leaf).is_some_and(|limit| {
+            self.values
+                .iter()
+                .any(|value| value.evaluate(leaf).is_some_and(|value| value < limit))
+        })
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]

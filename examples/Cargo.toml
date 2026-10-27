@@ -49,3 +49,7 @@ path = "parallel_reduction.rs"
 [[example]]
 name = "stream_dependencies"
 path = "stream_dependencies.rs"
+
+[[example]]
+name = "launch_variants"
+path = "launch_variants.rs"

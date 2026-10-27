@@ -38,8 +38,11 @@ impl<'tcx> Analysis<'_, 'tcx> {
                         || (target.is_signed()
                             && !source.is_signed()
                             && layout(target).size == layout(source).size)
+                        // Negative values wrap to large unsigned ones.
+                        || (source.is_signed() && !target.is_signed())
                     {
                         value.expression = None;
+                        value.maximum = None;
                     }
                 }
                 value
@@ -75,7 +78,9 @@ impl<'tcx> Analysis<'_, 'tcx> {
                     .as_ref()
                     .zip(right.expression.as_ref())
                     .and_then(|(left, right)| {
+                        // Plain arithmetic is the explicitly wrapping kind, so it is not exact.
                         match operation.overflowing_to_wrapping().unwrap_or(*operation) {
+                            _ if matches!(operation, BinOp::Add | BinOp::Sub | BinOp::Mul) => None,
                             BinOp::Add | BinOp::AddUnchecked => Some(left.add(right, 1)),
                             BinOp::Sub | BinOp::SubUnchecked => Some(left.add(right, -1)),
                             BinOp::Mul | BinOp::MulUnchecked => Some(left.multiply(right)),
@@ -93,6 +98,12 @@ impl<'tcx> Analysis<'_, 'tcx> {
                             _ => None,
                         }
                     });
+                let maximum = self.arithmetic_maximum(
+                    *operation,
+                    &left,
+                    &right,
+                    operands.0.ty(self.body, self.tcx),
+                );
                 let comparison = if matches!(
                     operation,
                     BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
@@ -114,6 +125,7 @@ impl<'tcx> Analysis<'_, 'tcx> {
                 };
                 let value = Value {
                     expression,
+                    maximum,
                     comparison,
                     variance,
                     ..Value::default()
@@ -178,6 +190,9 @@ impl<'tcx> Analysis<'_, 'tcx> {
 
     fn place(&mut self, place: mir::Place<'tcx>, state: &State) -> Value {
         let mut value = state.locals[place.local.as_usize()].clone();
+        if self.escaped.contains(&place.local.as_usize()) {
+            value.forget();
+        }
         for projection in place.projection {
             match projection {
                 ProjectionElem::Field(field, _) if !value.fields.is_empty() => {

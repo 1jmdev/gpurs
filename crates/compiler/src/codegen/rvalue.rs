@@ -177,7 +177,9 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
             self.module
                 .declare(format!("declare {{{ty}, i1}} @{name}({ty}, {ty})"));
             let pair = self.instruction(format!("call {{{ty}, i1}} @{name}({ty} {a}, {ty} {b})"));
-            let value = self.instruction(format!("extractvalue {{{ty}, i1}} {pair}, 0"));
+            // The plain operation keeps the result visible to loop analysis and strength
+            // reduction, which do not look through the overflow intrinsic.
+            let value = self.instruction(format!("{kind} {ty} {a}, {b}"));
             let overflow = self.instruction(format!("extractvalue {{{ty}, i1}} {pair}, 1"));
             return Operand {
                 value: Value::Pair(value, overflow),
@@ -217,10 +219,15 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
             } else {
                 ("udiv", "urem", "lshr", "ult")
             };
+            let wrap = if signed { "nsw" } else { "nuw" };
             let instruction = match operation {
-                BinOp::Add | BinOp::AddUnchecked => format!("add {ty} {a}, {b}"),
-                BinOp::Sub | BinOp::SubUnchecked => format!("sub {ty} {a}, {b}"),
-                BinOp::Mul | BinOp::MulUnchecked => format!("mul {ty} {a}, {b}"),
+                BinOp::Add => format!("add {ty} {a}, {b}"),
+                BinOp::Sub => format!("sub {ty} {a}, {b}"),
+                BinOp::Mul => format!("mul {ty} {a}, {b}"),
+                // Overflow in the unchecked forms is undefined behavior, as in rustc.
+                BinOp::AddUnchecked => format!("add {wrap} {ty} {a}, {b}"),
+                BinOp::SubUnchecked => format!("sub {wrap} {ty} {a}, {b}"),
+                BinOp::MulUnchecked => format!("mul {wrap} {ty} {a}, {b}"),
                 BinOp::Div => format!("{division} {ty} {a}, {b}"),
                 BinOp::Rem => format!("{remainder} {ty} {a}, {b}"),
                 BinOp::BitXor => format!("xor {ty} {a}, {b}"),

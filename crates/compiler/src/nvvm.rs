@@ -63,7 +63,7 @@ pub fn ptx(toolkit: &Path, ir: &str, architecture: &str) -> Result<String, Strin
         let options: [&CStr; 6] = [
             CStr::from_bytes_with_nul(architecture.as_bytes()).expect("NUL-terminated"),
             c"-opt=3",
-            c"-fma=0",
+            c"-fma=1",
             c"-prec-div=1",
             c"-prec-sqrt=1",
             c"-ftz=0",

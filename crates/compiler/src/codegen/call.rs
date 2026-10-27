@@ -68,6 +68,18 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
         arguments: &[Operand<'tcx>],
         destination: &Place<'tcx>,
     ) {
+        let name = self.module.function(instance);
+        self.invoke_named(&name, instance, arguments, destination);
+    }
+
+    /// Calls the lowered function `name`, which implements `instance`.
+    pub fn invoke_named(
+        &mut self,
+        name: &str,
+        instance: Instance<'tcx>,
+        arguments: &[Operand<'tcx>],
+        destination: &Place<'tcx>,
+    ) {
         let signature = self.module.signature(instance);
         let mut arguments = arguments.to_vec();
         if self.tcx.instance_mir(instance.def).spread_arg.is_none()
@@ -87,7 +99,6 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
                 arguments.push(self.load(&field));
             }
         }
-        let name = self.module.function(instance);
         let mut parameters = Vec::new();
         let result = match signature.result.0 {
             PassMode::Indirect => {

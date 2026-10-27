@@ -68,7 +68,7 @@ impl DeviceView {
                     }
                 });
             let instance = Instance::new_raw(def_id.to_def_id(), args);
-            if let Some((parameters, extent, conditions)) =
+            if let Some((parameters, extent, conditions, proofs)) =
                 verify::kernel(tcx, instance, launch.configured)
             {
                 kernels.push(module.kernel(KernelPlan {
@@ -78,6 +78,7 @@ impl DeviceView {
                     parameters,
                     extent,
                     conditions,
+                    proofs,
                 }));
             }
         }

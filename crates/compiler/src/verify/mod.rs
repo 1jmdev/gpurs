@@ -3,7 +3,7 @@ mod policy;
 mod proof;
 mod symbolic;
 
-use gpurs_artifact::{Access, Condition, Extent, Parameter, Value};
+use gpurs_artifact::{Access, Bound, Condition, Extent, Parameter, Value};
 use rustc_middle::ty::{self, Instance, TyCtxt, TypingEnv};
 
 use crate::{
@@ -15,7 +15,12 @@ pub fn kernel<'tcx>(
     tcx: TyCtxt<'tcx>,
     instance: Instance<'tcx>,
     configured: bool,
-) -> Option<(Vec<KernelParameter<'tcx>>, Extent, Vec<Condition>)> {
+) -> Option<(
+    Vec<KernelParameter<'tcx>>,
+    Extent,
+    Vec<Condition>,
+    Vec<(usize, Bound)>,
+)> {
     let functions = policy::verify(tcx, instance);
     let module = ModuleBuilder::new(tcx);
     let signature = module.signature(instance);
@@ -65,7 +70,7 @@ pub fn kernel<'tcx>(
         tcx.dcx().span_err(tcx.def_span(instance.def_id()), message);
         return None;
     }
-    let (extent, conditions) = analysis::verify(
+    let (extent, conditions, proofs) = analysis::verify(
         tcx,
         instance,
         &parameters,
@@ -73,5 +78,5 @@ pub fn kernel<'tcx>(
         configured,
         !result.ty.is_unit(),
     );
-    Some((parameters, extent, conditions))
+    Some((parameters, extent, conditions, proofs))
 }

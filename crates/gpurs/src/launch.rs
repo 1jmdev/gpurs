@@ -9,7 +9,7 @@ use std::{
 
 use gpurs_artifact::{
     self as artifact, Access as Effect, Condition, Expression, Extent, INPUT_CAPACITY,
-    INPUTS_OFFSET, Parameter, RESULT_OFFSET, Relation, STATUS_OFFSET, TransferType,
+    INPUTS_OFFSET, Parameter, RESULT_OFFSET, Relation, STATUS_OFFSET, TransferType, Variable,
 };
 use gpurs_driver as driver;
 
@@ -229,10 +229,27 @@ impl<S: Launch> KernelLaunch<'_, S> {
             return result;
         }
         let dimensions = |values: [usize; 3]| values.map(|value| value as u32);
+        let leaf = |variable: &Variable| match *variable {
+            Variable::BlockDimension(axis) => config.block[axis] as i128,
+            Variable::GridDimension(axis) => config.grid[axis] as i128,
+            Variable::Length(parameter) => self.lengths[parameter] as i128,
+            Variable::Scalar(parameter) => self.word(self.offsets[parameter] as usize) as i128,
+            Variable::Quotient(..) => unreachable!("quotients are evaluated by the polynomial"),
+        };
+        let kernel = self.kernel.clone();
+        let function = match (&kernel.fast, &kernel.metadata.fast) {
+            (Some(fast), Some(variant))
+                if variant.bounds.iter().all(|bound| bound.holds(&leaf)) =>
+            {
+                fast
+            }
+            _ => &kernel.function,
+        };
         // SAFETY: the argument block follows the kernel's verified parameter layout, and the
         // recorded accesses keep every referenced allocation alive until the launch completes.
+        // The fast entry point is launched only when its proven bounds hold.
         unsafe {
-            self.kernel.function.launch(
+            function.launch(
                 dimensions(config.grid),
                 dimensions(config.block),
                 config.shared_bytes as u32,

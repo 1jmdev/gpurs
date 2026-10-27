@@ -2,11 +2,13 @@ use std::fmt::Write;
 
 use gpurs_artifact::Failure;
 use rustc_abi::BackendRepr;
+use rustc_data_structures::fx::FxHashSet;
 use rustc_index::IndexVec;
 use rustc_middle::{
     mir::{
-        self, AssertKind, BasicBlock, Body, Local, NonDivergingIntrinsic, StatementKind,
-        TerminatorKind, traversal,
+        self, AssertKind, BasicBlock, BinOp, Body, Local, LocalKind, NonDivergingIntrinsic,
+        ProjectionElem, Rvalue, StatementKind, TerminatorKind, traversal,
+        visit::{PlaceContext, Visitor},
     },
     ty::{
         EarlyBinder, Instance, Ty, TyCtxt, TypeFoldable, TypingEnv,
@@ -34,6 +36,9 @@ pub struct FunctionBuilder<'m, 'tcx> {
     pub(super) code: String,
     pub(super) allocas: String,
     pub label: String,
+    /// Blocks whose assertion is proven for this copy of the body and is omitted.
+    pub skipped: FxHashSet<BasicBlock>,
+    block: BasicBlock,
     counter: usize,
 }
 
@@ -52,6 +57,8 @@ impl<'m, 'tcx> FunctionBuilder<'m, 'tcx> {
             code: String::new(),
             allocas: String::new(),
             label: "start".to_owned(),
+            skipped: FxHashSet::default(),
+            block: mir::START_BLOCK,
             counter: 0,
         }
     }
@@ -171,6 +178,7 @@ impl<'m, 'tcx> FunctionBuilder<'m, 'tcx> {
             if data.is_cleanup {
                 continue;
             }
+            self.block = block;
             self.start_block(&format!("bb{}", block.as_usize()));
             if !reachable.contains(block) {
                 self.emit("unreachable");
@@ -243,6 +251,44 @@ impl<'m, 'tcx> FunctionBuilder<'m, 'tcx> {
             TerminatorKind::FalseEdge { real_target, .. }
             | TerminatorKind::FalseUnwind { real_target, .. } => self.branch(*real_target),
             TerminatorKind::SwitchInt { discr, targets } => {
+                if let [(value, mut target)] = targets.iter().collect::<Vec<_>>()[..] {
+                    // Fuse `a && b` and `a || b` into one branch, as nvcc does, when `b` is
+                    // computed by a block that cannot fail or touch memory.
+                    let mut matches = self.matches(discr, value);
+                    let mut otherwise = self.forward(targets.otherwise());
+                    target = self.forward(target);
+                    for _ in 0..4 {
+                        let Some(((discr, value, case, default), disjunction)) = self
+                            .speculatable(otherwise)
+                            .filter(|(.., case, _)| *case == target)
+                            .map(|fused| (fused, true))
+                            .or_else(|| {
+                                self.speculatable(target)
+                                    .filter(|(.., default)| *default == otherwise)
+                                    .map(|fused| (fused, false))
+                            })
+                        else {
+                            break;
+                        };
+                        let block = if disjunction { otherwise } else { target };
+                        for statement in &self.body.basic_blocks[block].statements {
+                            self.statement(&statement.kind);
+                        }
+                        let next = self.matches(discr, value);
+                        matches = if disjunction {
+                            otherwise = default;
+                            self.instruction(format!("select i1 {matches}, i1 true, i1 {next}"))
+                        } else {
+                            target = case;
+                            self.instruction(format!("select i1 {matches}, i1 {next}, i1 false"))
+                        };
+                    }
+                    return self.emit(format!(
+                        "br i1 {matches}, label %bb{}, label %bb{}",
+                        target.as_usize(),
+                        otherwise.as_usize()
+                    ));
+                }
                 let discriminant = self.operand(discr);
                 let BackendRepr::Scalar(scalar) = discriminant.layout.backend_repr else {
                     unreachable!("switch on a non-scalar `{}`", discriminant.layout.ty)
@@ -304,7 +350,9 @@ impl<'m, 'tcx> FunctionBuilder<'m, 'tcx> {
                 target,
                 ..
             } => {
-                if !self.tcx.sess.overflow_checks() && msg.is_optional_overflow_check() {
+                if self.skipped.contains(&self.block)
+                    || (!self.tcx.sess.overflow_checks() && msg.is_optional_overflow_check())
+                {
                     return self.branch(*target);
                 }
                 let condition = self.operand(cond);
@@ -372,6 +420,110 @@ impl<'m, 'tcx> FunctionBuilder<'m, 'tcx> {
         self.emit(format!("br label %bb{}", target.as_usize()));
     }
 
+    fn matches(&mut self, discr: &mir::Operand<'tcx>, value: u128) -> String {
+        let discriminant = self.operand(discr);
+        let BackendRepr::Scalar(scalar) = discriminant.layout.backend_repr else {
+            unreachable!("switch on a non-scalar `{}`", discriminant.layout.ty)
+        };
+        let ty = layout::immediate_type(scalar);
+        let value = integer_text(value, ty, layout::bits(scalar));
+        self.instruction(format!("icmp eq {ty} {}, {value}", discriminant.scalar()))
+    }
+
+    /// The two-way switch ending `block` when the block only computes temporaries used nowhere
+    /// else, so evaluating it early cannot fail, touch memory, or change an observable value.
+    fn speculatable(
+        &self,
+        block: BasicBlock,
+    ) -> Option<(&'tcx mir::Operand<'tcx>, u128, BasicBlock, BasicBlock)> {
+        let data = &self.body.basic_blocks[block];
+        let TerminatorKind::SwitchInt { discr, targets } = &data.terminator().kind else {
+            return None;
+        };
+        let [(value, case)] = targets.iter().collect::<Vec<_>>()[..] else {
+            return None;
+        };
+        let pure = |operand: &mir::Operand<'tcx>| match operand {
+            mir::Operand::Copy(place) | mir::Operand::Move(place) => place
+                .projection
+                .iter()
+                .all(|element| matches!(element, ProjectionElem::Field(..))),
+            mir::Operand::Constant(_) => true,
+            mir::Operand::RuntimeChecks(_) => false,
+        };
+        let mut assigned = Vec::new();
+        for statement in &data.statements {
+            match &statement.kind {
+                StatementKind::StorageLive(_)
+                | StatementKind::StorageDead(_)
+                | StatementKind::Nop => {}
+                StatementKind::Assign(assign) => {
+                    let (place, rvalue) = &**assign;
+                    let simple = match rvalue {
+                        Rvalue::Use(operand, ..)
+                        | Rvalue::UnaryOp(_, operand)
+                        | Rvalue::Cast(_, operand, _) => pure(operand),
+                        Rvalue::BinaryOp(operation, operands) => {
+                            !matches!(operation, BinOp::Div | BinOp::Rem)
+                                && pure(&operands.0)
+                                && pure(&operands.1)
+                        }
+                        _ => false,
+                    };
+                    if !simple
+                        || !place.projection.is_empty()
+                        || self.body.local_kind(place.local) != LocalKind::Temp
+                    {
+                        return None;
+                    }
+                    assigned.push(place.local);
+                }
+                _ => return None,
+            }
+        }
+        if assigned.len() > 16 {
+            return None;
+        }
+        let mut mentions = Mentions {
+            locals: &assigned,
+            found: false,
+        };
+        for (other, data) in self.body.basic_blocks.iter_enumerated() {
+            if other != block {
+                mentions.visit_basic_block_data(other, data);
+            }
+        }
+        (!mentions.found).then_some((
+            discr,
+            value,
+            self.forward(case),
+            self.forward(targets.otherwise()),
+        ))
+    }
+
+    /// The first block reached from `block` through blocks that only end storage and jump.
+    fn forward(&self, mut block: BasicBlock) -> BasicBlock {
+        for _ in 0..8 {
+            let data = &self.body.basic_blocks[block];
+            match data.terminator().kind {
+                TerminatorKind::Goto { target, .. }
+                    if data.statements.iter().all(|statement| {
+                        matches!(
+                            statement.kind,
+                            StatementKind::StorageLive(_)
+                                | StatementKind::StorageDead(_)
+                                | StatementKind::Nop
+                        )
+                    }) =>
+                {
+                    block = target
+                }
+                _ => break,
+            }
+        }
+        block
+    }
+
     pub fn operand(&mut self, operand: &mir::Operand<'tcx>) -> Operand<'tcx> {
         match operand {
             mir::Operand::Copy(place) | mir::Operand::Move(place) => {
@@ -400,4 +552,16 @@ pub fn integer_text(value: u128, ty: &str, bits: u64) -> String {
     }
     let shift = 128 - bits as u32;
     (((value << shift) as i128) >> shift).to_string()
+}
+
+/// Whether any of `locals` is used, not merely declared live or dead, in the visited code.
+struct Mentions<'a> {
+    locals: &'a [Local],
+    found: bool,
+}
+
+impl<'tcx> Visitor<'tcx> for Mentions<'_> {
+    fn visit_local(&mut self, local: Local, context: PlaceContext, _: mir::Location) {
+        self.found |= context.is_use() && self.locals.contains(&local);
+    }
 }

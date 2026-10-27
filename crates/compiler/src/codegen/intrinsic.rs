@@ -8,7 +8,7 @@ use rustc_middle::{
 
 use super::{
     function::{self, FunctionBuilder},
-    layout,
+    layout, module,
     place::{Operand, Place, Value},
 };
 use crate::paths;
@@ -24,9 +24,7 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
         if let Some(name) = path.strip_prefix("gpurs::gpu::intrinsics::") {
             let value = match name {
                 "barrier" => {
-                    self.module.declare("declare void @llvm.nvvm.barrier0()");
-                    self.emit("call void @llvm.nvvm.barrier0()");
-                    self.check_status();
+                    self.barrier();
                     return true;
                 }
                 "shuffle_xor" => {
@@ -64,9 +62,7 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
                         "lane_id" => "laneid",
                         _ => return false,
                     };
-                    self.module
-                        .declare(format!("declare i32 @llvm.nvvm.read.ptx.sreg.{register}()"));
-                    self.instruction(format!("call i32 @llvm.nvvm.read.ptx.sreg.{register}()"))
+                    self.special_register(register)
                 }
             };
             self.store(
@@ -400,18 +396,35 @@ impl<'tcx> FunctionBuilder<'_, 'tcx> {
         true
     }
 
-    pub(super) fn check_status(&mut self) {
-        let pointer = self.instruction("load i32*, i32* addrspace(3)* @gpurs.status, align 8");
-        let status = self.instruction(format!(
-            "load atomic i32, i32* {pointer} monotonic, align 4"
+    pub(super) fn special_register(&mut self, register: &str) -> String {
+        let range = module::REGISTERS
+            .iter()
+            .position(|(name, ..)| *name == register)
+            .unwrap();
+        self.module
+            .declare(format!("declare i32 @llvm.nvvm.read.ptx.sreg.{register}()"));
+        self.instruction(format!(
+            "call i32 @llvm.nvvm.read.ptx.sreg.{register}(), !range !{range}"
+        ))
+    }
+
+    /// Block barrier that stops every thread once a thread of the block has failed. Verified
+    /// kernels reach each barrier with every thread, and a failed thread has exited, so fewer
+    /// arrivals than threads mean a failure. The predicated exit adds no control-flow edge,
+    /// which keeps loops around barriers open to rotation and strength reduction.
+    pub(super) fn barrier(&mut self) {
+        self.module
+            .declare("declare i32 @llvm.nvvm.barrier0.popc(i32)");
+        let arrived = self.instruction("call i32 @llvm.nvvm.barrier0.popc(i32 1)");
+        let x = self.special_register("ntid.x");
+        let y = self.special_register("ntid.y");
+        let z = self.special_register("ntid.z");
+        let threads = self.instruction(format!("mul nuw i32 {x}, {y}"));
+        let threads = self.instruction(format!("mul nuw i32 {threads}, {z}"));
+        let failed = self.instruction(format!("icmp ult i32 {arrived}, {threads}"));
+        self.emit(format!(
+            "call void asm sideeffect \"@$0 exit;\", \"b,~{{memory}}\"(i1 {failed})"
         ));
-        let success = self.instruction(format!("icmp eq i32 {status}, 0"));
-        let ready = self.fresh_label("barrier");
-        let failed = self.fresh_label("barrier");
-        self.emit(format!("br i1 {success}, label %{ready}, label %{failed}"));
-        self.start_block(&failed);
-        self.fail(Failure::Upstream);
-        self.start_block(&ready);
     }
 
     fn math(&mut self, name: &str, arguments: &[Operand<'tcx>]) -> Option<Value> {

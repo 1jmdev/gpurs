@@ -38,6 +38,7 @@ pub(crate) struct Device {
 
 pub(crate) struct LoadedKernel {
     pub function: Function,
+    pub fast: Option<Function>,
     pub metadata: Kernel,
     pub block_size: OnceCell<u32>,
 }
@@ -152,6 +153,10 @@ impl Device {
             self.modules[index].get_or_init(|| Module::load(&self.artifact.modules[index].cubin));
         let kernel = Rc::new(LoadedKernel {
             function: module.function(&metadata.symbol),
+            fast: metadata
+                .fast
+                .as_ref()
+                .map(|fast| module.function(&fast.symbol)),
             metadata: metadata.clone(),
             block_size: OnceCell::new(),
         });

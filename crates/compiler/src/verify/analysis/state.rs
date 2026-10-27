@@ -1,4 +1,4 @@
-use gpurs_artifact::Condition;
+use gpurs_artifact::{Bound, Condition};
 use rustc_data_structures::fx::FxHashSet;
 use rustc_middle::{
     mir::Body,
@@ -27,6 +27,8 @@ pub(super) struct Origin {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct Value {
     pub expression: Option<Polynomial>,
+    /// Inclusive upper bound in launch variables when the exact expression is unknown.
+    pub maximum: Option<Polynomial>,
     pub origin: Option<Origin>,
     pub fields: Vec<Value>,
     pub comparison: Option<Fact>,
@@ -59,6 +61,10 @@ pub(super) struct Analysis<'a, 'tcx> {
     pub controls: Vec<Vec<(usize, usize)>>,
     pub comparisons: Vec<Option<Fact>>,
     pub conditions: Vec<Condition>,
+    /// Runtime checks of the kernel body, by block, that cannot fail when the bound holds.
+    pub proofs: Vec<(usize, Bound)>,
+    /// Locals whose address escapes, so their values are unknown after any call.
+    pub escaped: FxHashSet<usize>,
     pub uses_index: bool,
     pub geometry: bool,
     pub collect: bool,
@@ -75,9 +81,20 @@ impl Value {
         }
     }
 
+    /// Drops numeric knowledge, which code holding the value's address may have changed.
+    pub(super) fn forget(&mut self) {
+        self.expression = None;
+        self.maximum = None;
+        self.comparison = None;
+        self.fields.iter_mut().for_each(Value::forget);
+    }
+
     pub(super) fn join(&mut self, other: &Self) {
         if self.expression != other.expression {
             self.expression = None;
+        }
+        if self.maximum != other.maximum {
+            self.maximum = None;
         }
         if self.origin != other.origin {
             self.origin = match (&self.origin, &other.origin) {

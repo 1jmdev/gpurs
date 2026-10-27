@@ -1,36 +1,64 @@
 use std::iter;
 
 use rustc_data_structures::fx::FxHashSet;
-use rustc_middle::mir::{self, BinOp, Body, TerminatorKind};
+use rustc_middle::{
+    mir::{self, BinOp, Body, TerminatorKind},
+    ty,
+};
 
 use super::state::{Analysis, Region, State};
-use crate::{diagnostic, verify::symbolic::Fact};
+use crate::{
+    diagnostic,
+    verify::symbolic::{Fact, Polynomial},
+};
 
 impl Analysis<'_, '_> {
     pub(super) fn successors(&mut self, block: usize, state: &State) -> Vec<(usize, Option<Fact>)> {
         let terminator = self.body.basic_blocks[mir::BasicBlock::from_usize(block)].terminator();
         if let TerminatorKind::SwitchInt { discr, targets } = &terminator.kind {
             let value = self.operand(discr, state);
+            // Optimized MIR switches on `x` directly for `x == constant`; only unsigned values
+            // are taken literally so that case bit patterns compare as the same integers.
+            let integer = value
+                .expression
+                .clone()
+                .filter(|_| value.comparison.is_none())
+                .filter(|_| matches!(discr.ty(self.body, self.tcx).kind(), ty::Uint(_)));
+            let single = targets.iter().count() == 1;
             return targets
                 .iter()
                 .map(|(constant, target)| {
-                    (
-                        target.as_usize(),
-                        value
+                    let fact = match &integer {
+                        Some(expression) => Some(Fact(
+                            BinOp::Eq,
+                            expression.clone(),
+                            Polynomial::constant(constant as i128),
+                        )),
+                        None => value
                             .comparison
                             .clone()
                             .map(|fact| if constant == 0 { negate(fact) } else { fact }),
-                    )
+                    };
+                    (target.as_usize(), fact)
                 })
                 .chain(iter::once((
                     targets.otherwise().as_usize(),
-                    value.comparison.clone().map(|fact| {
-                        if targets.iter().any(|(value, _)| value == 0) {
-                            fact
-                        } else {
-                            negate(fact)
-                        }
-                    }),
+                    match &integer {
+                        Some(expression) => single.then(|| {
+                            Fact(
+                                BinOp::Ne,
+                                expression.clone(),
+                                Polynomial::constant(targets.iter().next().unwrap().0 as i128),
+                            )
+                        }),
+                        None => value.comparison.clone().map(|fact| {
+                            if targets.iter().any(|(value, _)| value == 0) {
+                                fact
+                            } else {
+                                negate(fact)
+                            }
+                        }),
+                    },
                 )))
                 .collect();
         }
@@ -91,11 +119,25 @@ impl Analysis<'_, '_> {
             let Some(state) = state else { continue };
             let terminator =
                 self.body.basic_blocks[mir::BasicBlock::from_usize(block)].terminator();
-            let value = match &terminator.kind {
-                TerminatorKind::SwitchInt { discr, .. } => self.operand(discr, state),
-                _ => continue,
+            let TerminatorKind::SwitchInt { discr, targets } = &terminator.kind else {
+                continue;
             };
-            self.comparisons[block] = value.comparison;
+            let value = self.operand(discr, state);
+            self.comparisons[block] = value.comparison.or_else(|| {
+                let [(constant, _)] = targets.iter().collect::<Vec<_>>()[..] else {
+                    return None;
+                };
+                value
+                    .expression
+                    .filter(|_| matches!(discr.ty(self.body, self.tcx).kind(), ty::Uint(_)))
+                    .map(|expression| {
+                        Fact(
+                            BinOp::Eq,
+                            expression,
+                            Polynomial::constant(constant as i128),
+                        )
+                    })
+            });
             let mut reconvergence = postdominators[block].clone();
             reconvergence.remove(&block);
             for successor in normal_successors(self.body, block) {

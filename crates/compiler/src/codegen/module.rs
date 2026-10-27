@@ -1,8 +1,8 @@
-use std::{collections::BTreeSet, fmt::Write};
+use std::{collections::BTreeSet, fmt::Write, mem};
 
-use rustc_data_structures::fx::FxHashMap;
+use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_middle::{
-    mir::interpret::AllocId,
+    mir::{BasicBlock, interpret::AllocId},
     ty::{
         EarlyBinder, Instance, TyCtxt, TypingEnv,
         layout::{LayoutOf, TyAndLayout},
@@ -27,17 +27,36 @@ define internal void @gpurs.fail(i32 %code) noinline cold {
 }
 "#;
 
+/// Special registers with their hardware bounds, emitted as `!range` metadata `!0` onwards.
+pub const REGISTERS: [(&str, i64, i64); 13] = [
+    ("tid.x", 0, 1024),
+    ("tid.y", 0, 1024),
+    ("tid.z", 0, 64),
+    ("ctaid.x", 0, i32::MAX as i64),
+    ("ctaid.y", 0, 65535),
+    ("ctaid.z", 0, 65535),
+    ("ntid.x", 1, 1025),
+    ("ntid.y", 1, 1025),
+    ("ntid.z", 1, 65),
+    ("nctaid.x", 1, i32::MIN as i64),
+    ("nctaid.y", 1, 65536),
+    ("nctaid.z", 1, 65536),
+    ("laneid", 0, 32),
+];
+
 /// One NVVM IR module holding every device function reachable from the requested kernels.
 pub struct ModuleBuilder<'tcx> {
     pub tcx: TyCtxt<'tcx>,
     pub cx: Cx<'tcx>,
     functions: FxHashMap<Instance<'tcx>, String>,
     queue: Vec<Instance<'tcx>>,
+    /// Copies of kernel bodies that skip the assertions in the proven blocks.
+    variants: Vec<(Instance<'tcx>, String, FxHashSet<BasicBlock>)>,
     pub(super) definitions: String,
     declarations: BTreeSet<String>,
     globals: String,
     pub(super) allocations: FxHashMap<AllocId, (String, String)>,
-    pub(super) kernels: Vec<String>,
+    pub(super) annotations: Vec<String>,
     counter: usize,
 }
 
@@ -54,11 +73,12 @@ impl<'tcx> ModuleBuilder<'tcx> {
             cx: Cx(tcx),
             functions: FxHashMap::default(),
             queue: Vec::new(),
+            variants: Vec::new(),
             definitions: String::new(),
             declarations: BTreeSet::new(),
             globals: String::new(),
             allocations: FxHashMap::default(),
-            kernels: Vec::new(),
+            annotations: Vec::new(),
             counter: 0,
         }
     }
@@ -71,6 +91,13 @@ impl<'tcx> ModuleBuilder<'tcx> {
         let name = format!("@gpurs.f{}", self.functions.len());
         self.functions.insert(instance, name.clone());
         self.queue.push(instance);
+        name
+    }
+
+    /// Name of a copy of `instance` that omits the assertions ending the `skipped` blocks.
+    pub fn variant(&mut self, instance: Instance<'tcx>, skipped: FxHashSet<BasicBlock>) -> String {
+        let name = format!("@gpurs.v{}", self.variants.len());
+        self.variants.push((instance, name.clone(), skipped));
         name
     }
 
@@ -110,6 +137,12 @@ impl<'tcx> ModuleBuilder<'tcx> {
 
     /// Lowers every queued function and renders the module.
     pub fn finish(mut self) -> String {
+        for (instance, name, skipped) in mem::take(&mut self.variants) {
+            let mut builder = FunctionBuilder::new(&mut self, instance);
+            builder.skipped = skipped;
+            let text = builder.lower(&name);
+            self.definitions.push_str(&text);
+        }
         while let Some(instance) = self.queue.pop() {
             let name = self.functions[&instance].clone();
             let text = FunctionBuilder::new(&mut self, instance).lower(&name);
@@ -136,7 +169,11 @@ impl<'tcx> ModuleBuilder<'tcx> {
         .unwrap();
         module.push_str(&self.globals);
         module.push_str(&self.definitions);
-        let annotations: Vec<String> = (0..self.kernels.len())
+        for (index, (_, low, high)) in REGISTERS.iter().enumerate() {
+            writeln!(module, "!{index} = !{{i32 {low}, i32 {high}}}").unwrap();
+        }
+        let first = REGISTERS.len();
+        let annotations: Vec<String> = (first..first + self.annotations.len())
             .map(|index| format!("!{index}"))
             .collect();
         writeln!(
@@ -145,10 +182,10 @@ impl<'tcx> ModuleBuilder<'tcx> {
             annotations.join(", ")
         )
         .unwrap();
-        for (index, kernel) in self.kernels.iter().enumerate() {
-            writeln!(module, "!{index} = !{{{kernel}, !\"kernel\", i32 1}}").unwrap();
+        for (index, annotation) in self.annotations.iter().enumerate() {
+            writeln!(module, "!{} = !{{{annotation}}}", first + index).unwrap();
         }
-        let version = self.kernels.len();
+        let version = first + self.annotations.len();
         writeln!(module, "!nvvmir.version = !{{!{version}}}").unwrap();
         writeln!(module, "!{version} = !{{i32 2, i32 0, i32 3, i32 1}}").unwrap();
         module

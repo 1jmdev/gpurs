@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 
 use gpurs_artifact::{
-    Access as ParameterAccess, Condition, Expression, Extent, Parameter, Relation,
+    Access as ParameterAccess, Bound, Condition, Expression, Extent, Parameter, Relation,
 };
 use rustc_data_structures::fx::FxHashSet;
 use rustc_middle::{
@@ -9,7 +9,10 @@ use rustc_middle::{
     ty::{self, EarlyBinder, Instance, TyCtxt, TypeFoldable, TypingEnv},
 };
 
-use super::state::{Access, Analysis, Origin, Region, State, Value};
+use super::{
+    bounds,
+    state::{Access, Analysis, Origin, Region, State, Value},
+};
 use crate::{
     attributes,
     codegen::KernelParameter,
@@ -24,7 +27,7 @@ pub(in crate::verify) fn verify<'tcx>(
     functions: &FxHashSet<Instance<'tcx>>,
     configured: bool,
     returns_value: bool,
-) -> (Extent, Vec<Condition>) {
+) -> (Extent, Vec<Condition>, Vec<(usize, Bound)>) {
     let body = tcx.instance_mir(instance.def);
     let mut analysis = Analysis {
         tcx,
@@ -37,6 +40,8 @@ pub(in crate::verify) fn verify<'tcx>(
         controls: vec![Vec::new(); body.basic_blocks.len()],
         comparisons: vec![None; body.basic_blocks.len()],
         conditions: Vec::new(),
+        proofs: Vec::new(),
+        escaped: FxHashSet::default(),
         uses_index: functions.iter().any(|function| {
             paths::path(tcx, function.def_id()).starts_with("gpurs::gpu::thread::")
                 && !paths::is(tcx, function.def_id(), "gpurs::gpu::thread::sync_block")
@@ -46,6 +51,7 @@ pub(in crate::verify) fn verify<'tcx>(
         block: 0,
         span: body.span,
     };
+    analysis.escaped = analysis.escapes();
     let mut initial = State {
         locals: vec![Value::default(); body.local_decls.len()],
         facts: Vec::new(),
@@ -107,6 +113,7 @@ pub(in crate::verify) fn verify<'tcx>(
     for (block, state) in exits.iter_mut().enumerate() {
         if let Some(state) = state {
             analysis.block(block, state);
+            analysis.prove(block, state);
         }
     }
     let mut lengths = Vec::new();
@@ -147,7 +154,7 @@ pub(in crate::verify) fn verify<'tcx>(
     if configured || extent != Extent::Single {
         analysis.races();
     }
-    (extent, analysis.conditions)
+    (extent, analysis.conditions, analysis.proofs)
 }
 
 impl<'tcx> Analysis<'_, 'tcx> {
@@ -170,7 +177,19 @@ impl<'tcx> Analysis<'_, 'tcx> {
             match &statement.kind {
                 StatementKind::Assign(assign) => {
                     let (place, rvalue) = &**assign;
-                    let value = self.rvalue(rvalue, state);
+                    let mut value = self.rvalue(rvalue, state);
+                    // An `overflowing_*` result is exact only where its overflow flag is
+                    // asserted; otherwise it may have wrapped.
+                    if let mir::Rvalue::BinaryOp(operation, _) = rvalue
+                        && operation.overflowing_to_wrapping().is_some()
+                        && !self.asserted(block, place.local)
+                        && let Some(result) = value.fields.first_mut()
+                    {
+                        result.expression = None;
+                        if *operation == BinOp::SubWithOverflow {
+                            result.maximum = None;
+                        }
+                    }
                     self.assign(*place, value, state);
                 }
                 StatementKind::Intrinsic(intrinsic)
@@ -228,6 +247,38 @@ impl<'tcx> Analysis<'_, 'tcx> {
                 ..Value::default()
             };
         };
+        // `for value in start..end` over unsigned ranges: the iterator is the range itself,
+        // and each value it yields is below `end`, which `next` leaves unchanged.
+        if paths::is(
+            self.tcx,
+            def_id,
+            "core::iter::traits::collect::IntoIterator::into_iter",
+        ) && self.is_range(args.no_bound_vars().unwrap().type_at(0))
+        {
+            return arguments[0].clone();
+        }
+        if paths::is(
+            self.tcx,
+            def_id,
+            "core::iter::traits::iterator::Iterator::next",
+        ) && self.is_range(args.no_bound_vars().unwrap().type_at(0))
+        {
+            let variance = arguments[0].variance;
+            let maximum = arguments[0]
+                .fields
+                .get(1)
+                .and_then(bounds::maximum)
+                .map(|end| end.add(&Polynomial::constant(1), -1));
+            return Value {
+                fields: vec![Value {
+                    maximum,
+                    variance,
+                    ..Value::default()
+                }],
+                variance,
+                ..Value::default()
+            };
+        }
         let instance = Instance::expect_resolve(
             self.tcx,
             TypingEnv::fully_monomorphized(),
