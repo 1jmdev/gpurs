@@ -95,6 +95,7 @@ fn value(expression: &Expr) -> Result<Value> {
             Some(number) => (-number).into(),
             None => return Err(Error::new(expr.span(), "expected an integer")),
         },
+        Expr::Group(group) => value(&group.expr)?,
         Expr::Array(array) => array.elems.iter().map(value).collect::<Result<_>>()?,
         Expr::Call(call) if call.args.len() == 1 => {
             let Expr::Path(function) = &*call.func else {
