@@ -1,4 +1,4 @@
-use gpurs_artifact::{Convergence, Failure, Lowering, Operand as CallOperand, Primitive};
+use gpurs_artifact::{Convergence, Failure, Lowering, Memory, Operand as CallOperand, Primitive};
 
 use super::{
     function::FunctionBuilder,
@@ -352,7 +352,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
         if self.certificate.is_none() && primitive.convergence == Convergence::Warp {
             let mask = self
                 .ir
-                .assembly("activemask.b32 $0;", "=r", Type::I32, Vec::new());
+                .assembly("activemask.b32 $0;", "=r", true, Type::I32, Vec::new());
             let complete = self.ir.compare(Predicate::Eq, mask, ir::Value::i32(-1));
             let ready = self.ir.fresh_block("warp");
             let failed = self.ir.fresh_block("warp");
@@ -406,6 +406,21 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                 };
                 self.ir
                     .call(symbol, layout::immediate_type(result), operands)
+            }
+            Lowering::Assembly { text, constraints } => {
+                let ValueRepr::Scalar(result) = destination.shape.repr().clone() else {
+                    unreachable!()
+                };
+                let effects =
+                    primitive.memory != Memory::None || primitive.convergence != Convergence::None;
+                let operands = arguments.iter().map(Operand::scalar).collect();
+                self.ir.assembly(
+                    &text,
+                    &constraints,
+                    effects,
+                    layout::immediate_type(result),
+                    operands,
+                )
             }
             Lowering::SharedArray => {
                 let element = instance.args().0[0].ty().copied().unwrap();
@@ -502,7 +517,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
         let ready = self.ir.fresh_block("barrier");
         self.ir.branch_if(incomplete, failed, ready);
         self.ir.position(failed);
-        self.ir.assembly("exit;", "", Type::Void, Vec::new());
+        self.ir.assembly("exit;", "", true, Type::Void, Vec::new());
         self.ir.unreachable();
         self.ir.position(ready);
     }

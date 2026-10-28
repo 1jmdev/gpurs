@@ -205,9 +205,10 @@ impl Function {
             } => {
                 match callee {
                     Callee::Symbol(name) => write!(f, "call {result} @{name}")?,
-                    Callee::Assembly(text, constraints) => write!(
+                    Callee::Assembly(text, constraints, effects) => write!(
                         f,
-                        "call {result} asm sideeffect \"{text}\", \"{constraints}\""
+                        "call {result} asm {}\"{text}\", \"{constraints}\"",
+                        if *effects { "sideeffect " } else { "" }
                     )?,
                 }
                 let arguments: Vec<_> = arguments

@@ -25,6 +25,13 @@ pub enum Lowering {
     },
     /// One special register zero-extended to `usize`.
     Register(String),
+    /// Inline PTX; `$0` is the result and `$1..` are the arguments in order, bound by the
+    /// LLVM `constraints`. Without a convergence or memory effect it is pure, so it can be
+    /// combined and hoisted like ordinary arithmetic.
+    Assembly {
+        text: String,
+        constraints: String,
+    },
     /// Three special registers zero-extended into a `Dim3`.
     Dimensions(String),
     Index,

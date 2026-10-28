@@ -122,8 +122,8 @@ pub enum Transfer {
 #[derive(Clone, Debug)]
 pub enum Callee {
     Symbol(String),
-    /// Inline PTX with its constraint string; always has side effects.
-    Assembly(String, String),
+    /// Inline PTX with its constraint string and whether it has side effects.
+    Assembly(String, String, bool),
 }
 
 #[derive(Clone, Debug)]

@@ -237,11 +237,12 @@ impl Function {
         &mut self,
         text: &str,
         constraints: &str,
+        effects: bool,
         result: Type,
         arguments: Vec<Value>,
     ) -> Value {
         let call = Instruction::Call {
-            callee: Callee::Assembly(text.to_owned(), constraints.to_owned()),
+            callee: Callee::Assembly(text.to_owned(), constraints.to_owned(), effects),
             result: result.clone(),
             arguments,
         };

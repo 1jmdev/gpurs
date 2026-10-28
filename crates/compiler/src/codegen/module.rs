@@ -135,7 +135,7 @@ impl<'sess> ModuleBuilder<'sess> {
             false,
         );
         if stop {
-            function.assembly("exit;", "", Type::Void, Vec::new());
+            function.assembly("exit;", "", true, Type::Void, Vec::new());
             function.unreachable();
         } else {
             function.ret(None);

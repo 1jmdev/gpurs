@@ -247,7 +247,10 @@ impl Analysis<'_, '_> {
 
     fn primitive(&mut self, primitive: &Primitive, instance: Instance) -> Value {
         self.uses_index |= primitive.geometry();
-        self.geometry |= primitive.proof != Proof::Index;
+        self.geometry |= primitive.proof != Proof::Index
+            && (primitive.geometry()
+                || primitive.convergence != Convergence::None
+                || primitive.memory != Memory::None);
         if self.collect && self.quiet == 0 {
             let block = self.kernel_block();
             match primitive.convergence {

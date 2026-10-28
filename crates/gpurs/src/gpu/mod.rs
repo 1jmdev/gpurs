@@ -4,6 +4,7 @@
 //! host code panics.
 
 pub mod atomic;
+pub mod bit;
 #[doc(hidden)]
 pub mod intrinsics;
 mod shared;
