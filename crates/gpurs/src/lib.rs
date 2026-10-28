@@ -13,6 +13,7 @@ mod tracking;
 
 pub use buffer::{Buffer, DeviceSlice, DeviceSliceMut, DeviceValue, Pending, View, ViewMut};
 pub use device::Gpu;
+pub use gpu::{BFloat16, Half};
 pub use gpurs_macros::gpu;
 pub use stream::{ConfiguredStream, Launch, LaunchConfig, Stream};
 
