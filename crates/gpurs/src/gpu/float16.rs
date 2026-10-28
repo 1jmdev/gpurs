@@ -13,6 +13,7 @@ pub struct BFloat16(pub u16);
 
 impl Half {
     /// Rounds to nearest, ties to even; out-of-range values become infinite.
+    #[inline]
     pub fn from_f32(value: f32) -> Self {
         let bits = value.to_bits();
         let sign = bits >> 16 & 0x8000;
@@ -42,6 +43,7 @@ impl Half {
         Half((sign | (truncated + round as u32)) as u16)
     }
 
+    #[inline]
     pub fn to_f32(self) -> f32 {
         let bits = self.0 as u32;
         let sign = (bits & 0x8000) << 16;
@@ -61,6 +63,7 @@ impl Half {
 
 impl BFloat16 {
     /// Rounds to nearest, ties to even.
+    #[inline]
     pub fn from_f32(value: f32) -> Self {
         let bits = value.to_bits();
         if value.is_nan() {
@@ -69,6 +72,7 @@ impl BFloat16 {
         BFloat16(((bits + 0x7fff + (bits >> 16 & 1)) >> 16) as u16)
     }
 
+    #[inline]
     pub fn to_f32(self) -> f32 {
         f32::from_bits((self.0 as u32) << 16)
     }
