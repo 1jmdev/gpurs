@@ -422,13 +422,17 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                     // Aggregate results are register tuples, returned as one LLVM struct and
                     // stored field by field.
                     let leaves = self.scalars(&destination.shape);
-                    let types = leaves
+                    let types: Vec<_> = leaves
                         .iter()
                         .map(|(_, scalar)| layout::immediate_type(*scalar))
                         .collect();
-                    let result =
-                        self.ir
-                            .assembly(&text, &constraints, effects, Type::Struct(types), operands);
+                    let result = match types.is_empty() {
+                        true => Type::Void,
+                        false => Type::Struct(types),
+                    };
+                    let result = self
+                        .ir
+                        .assembly(&text, &constraints, effects, result, operands);
                     for (index, (offset, scalar)) in leaves.into_iter().enumerate() {
                         let value = self.ir.extract(result.clone(), index as u32);
                         let pointer = self.offset(destination.pointer.clone(), offset);
@@ -509,8 +513,10 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
             .into_iter()
             .map(|(offset, scalar)| {
                 let pointer = self.offset(place.pointer.clone(), offset);
-                let align =
-                    layout::restrict_align(place.align, MachineSize::from_bits(offset as usize * 8));
+                let align = layout::restrict_align(
+                    place.align,
+                    MachineSize::from_bits(offset as usize * 8),
+                );
                 self.load_scalar(pointer, scalar, align)
             })
             .collect()

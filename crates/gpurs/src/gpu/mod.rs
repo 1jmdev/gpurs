@@ -9,7 +9,7 @@ macro_rules! assembly {
     ($(
         $(#[$attribute:meta])*
         $convergence:ident $architecture:literal $text:literal $constraints:literal
-        fn $name:ident($($argument:ident: $type:ty),*) -> $result:ty;
+        fn $name:ident($($argument:ident: $type:ty),* $(,)?) -> $result:ty;
     )*) => {
         $(
             #[gpurs_macros::primitive(
@@ -32,12 +32,15 @@ pub mod atomic;
 pub mod bit;
 pub mod convert;
 pub mod float;
+mod float16;
 pub mod integer;
 #[doc(hidden)]
 pub mod intrinsics;
 mod shared;
+pub mod tensor;
 mod thread;
 pub mod warp;
 
+pub use float16::{BFloat16, Half};
 pub use shared::{SharedArray, shared_array};
 pub use thread::{Dim3, block_dim, block_id, grid_dim, index, sync_block, thread_id};
