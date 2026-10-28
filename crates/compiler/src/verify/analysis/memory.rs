@@ -29,7 +29,7 @@ impl Analysis<'_, '_> {
                     matches!(access.origin.region, Region::Shared(..)),
                 )
             });
-            if !access.atomic && injective.is_none() {
+            if !access.atomic && access.partition.is_none() && injective.is_none() {
                 diagnostic::error(
                     self.sess,
                     access.span,
@@ -67,6 +67,17 @@ impl Analysis<'_, '_> {
                     && other.origin.region != Region::Unknown)
                     || (access.atomic && other.atomic)
                 {
+                    continue;
+                }
+                if access.partition.is_some() || other.partition.is_some() {
+                    if access.partition != other.partition {
+                        diagnostic::error(
+                            self.sess,
+                            other.span,
+                            "GPU memory accesses may race with a partitioned matrix",
+                            "access the matrix only through one partition built from the same data and dimensions",
+                        );
+                    }
                     continue;
                 }
                 let shared = matches!(access.origin.region, Region::Shared(..));

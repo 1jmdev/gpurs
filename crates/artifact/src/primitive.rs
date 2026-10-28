@@ -66,6 +66,14 @@ pub enum Memory {
     Read,
     /// Writes the referent of the first argument.
     Write,
+    /// Reads memory reachable from argument `n` at positions the verifier does not track.
+    ReadReachable(usize),
+    /// Reads elements of the first argument's referent that the calling thread owns under the
+    /// partition its type defines. The referent's first three fields are its data slice, row
+    /// count, and column count.
+    PartitionRead,
+    /// Writes owned elements of the first argument's referent, as [`Memory::PartitionRead`].
+    PartitionWrite,
 }
 
 /// Symbolic meaning of the result for the verifier.
@@ -82,6 +90,9 @@ pub enum Proof {
     Varying,
     /// Opaque and identical across threads.
     Uniform,
+    /// Requires a block of `N` threads along x and one along y and z, for the first const
+    /// generic `N`.
+    BlockShape,
 }
 
 impl Primitive {
@@ -106,7 +117,8 @@ impl Primitive {
             | Proof::BlockDimensionAxes
             | Proof::GridDimensionAxes
             | Proof::Index
-            | Proof::Lane => true,
+            | Proof::Lane
+            | Proof::BlockShape => true,
             Proof::SharedRegion | Proof::Varying | Proof::Uniform => false,
         }
     }

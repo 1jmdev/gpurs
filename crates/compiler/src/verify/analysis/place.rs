@@ -188,6 +188,7 @@ impl Analysis<'_, '_> {
                 origin: origin.clone(),
                 write,
                 atomic,
+                partition: None,
                 block: self.kernel_block(),
                 facts: state.facts.clone(),
                 span: self.span,

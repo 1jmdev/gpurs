@@ -86,10 +86,16 @@ pub struct Frame {
     pub statement: usize,
 }
 
+/// The identity of a partition: the partitioned type, its data origin, and its dimensions.
+pub type Partition = (String, Vec<Polynomial>);
+
 pub struct Access {
     pub origin: Origin,
     pub write: bool,
     pub atomic: bool,
+    /// Accesses of elements the thread owns under this partition; they never race with
+    /// accesses under the same partition.
+    pub partition: Option<Partition>,
     pub block: usize,
     pub facts: Vec<Fact>,
     pub span: Span,

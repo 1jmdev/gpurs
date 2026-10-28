@@ -1,6 +1,6 @@
 use std::env;
 
-use gpurs_artifact::{Convergence, Memory};
+use gpurs_artifact::{Convergence, Lowering, Memory};
 use rustc_data_structures::fx::FxHashSet;
 
 use crate::{
@@ -9,9 +9,18 @@ use crate::{
 };
 
 /// Rejects call graphs that GPU code cannot express: recursion, dynamic dispatch, host-only
-/// callees, and primitives beyond the target architecture.
-pub fn verify(sess: Sess<'_>, root: Instance) {
-    visit(sess, root, &mut Vec::new(), &mut FxHashSet::default());
+/// callees, and primitives beyond the target architecture. Returns whether the kernel issues
+/// asynchronous copies into block-shared memory.
+pub fn verify(sess: Sess<'_>, root: Instance) -> bool {
+    let mut asynchronous = false;
+    visit(
+        sess,
+        root,
+        &mut Vec::new(),
+        &mut FxHashSet::default(),
+        &mut asynchronous,
+    );
+    asynchronous
 }
 
 fn visit(
@@ -19,6 +28,7 @@ fn visit(
     instance: Instance,
     active: &mut Vec<Instance>,
     checked: &mut FxHashSet<Instance>,
+    asynchronous: &mut bool,
 ) {
     if active.contains(&instance) {
         diagnostic::error(
@@ -77,6 +87,9 @@ fn visit(
                     continue;
                 };
                 let primitive = attributes::primitive(sess, callee.def.def_id());
+                *asynchronous |= primitive.as_ref().is_some_and(|primitive| {
+                    matches!(&primitive.lowering, Lowering::Assembly { text, .. } if text.starts_with("cp.async."))
+                });
                 if active.len() > 1
                     && attributes::is_device(sess, instance.def.def_id())
                     && primitive.as_ref().is_some_and(|primitive| {
@@ -102,7 +115,7 @@ fn visit(
                     );
                 }
                 if allowed(sess, callee, terminator.source_info.span) {
-                    visit(sess, callee, active, checked);
+                    visit(sess, callee, active, checked, asynchronous);
                 }
             }
             TerminatorKind::InlineAsm { .. } => {
@@ -189,7 +202,7 @@ fn reachable(body: &Body) -> Vec<usize> {
     seen.into_iter().collect()
 }
 
-fn architecture() -> u32 {
+pub fn architecture() -> u32 {
     env::var("GPURS_ARCHITECTURE").unwrap()[3..]
         .parse()
         .unwrap()

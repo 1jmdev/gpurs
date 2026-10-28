@@ -21,4 +21,4 @@ mod symbolic;
 
 pub use diagnostic::Warning;
 pub use kernel::kernel;
-pub(crate) use policy::leaf;
+pub(crate) use policy::{architecture, leaf};

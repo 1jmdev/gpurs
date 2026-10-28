@@ -43,4 +43,4 @@ pub mod warp;
 
 pub use float16::{BFloat16, Half};
 pub use shared::{SharedArray, shared_array};
-pub use thread::{Dim3, block_dim, block_id, grid_dim, index, sync_block, thread_id};
+pub use thread::{Block, Dim3, block_dim, block_id, grid_dim, index, sync_block, thread_id};

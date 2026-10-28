@@ -37,6 +37,8 @@ pub struct KernelPlan {
     pub instrumented: bool,
     /// Whether the kernel reads the linear thread index.
     pub uses_index: bool,
+    /// Whether the kernel issues asynchronous copies, which must land before the block exits.
+    pub asynchronous: bool,
     /// The kernel's entry in the `*.preconditions` report.
     pub summary: String,
     pub warnings: Vec<crate::verify::Warning>,
@@ -172,6 +174,15 @@ impl<'sess> ModuleBuilder<'sess> {
             let pointer = function.ir.offset(pointer, offset, true);
             let value = function.load(&destination);
             function.store(&Place::new(pointer, destination.shape.clone()), &value);
+        }
+        if plan.asynchronous {
+            function.ir.assembly(
+                "cp.async.wait_all;",
+                "~{memory}",
+                true,
+                Type::Void,
+                Vec::new(),
+            );
         }
         function.ir.ret(None);
         function.ir.annotations.push(("kernel", 1));

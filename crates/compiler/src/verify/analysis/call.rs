@@ -1,12 +1,14 @@
 use gpurs_artifact::{Convergence, Memory, Primitive, Proof};
 
-use super::{Analysis, Kind, Obligation, Origin, Pointer, Region, State, Value, arithmetic, state};
+use super::{
+    Access, Analysis, Kind, Obligation, Origin, Pointer, Region, State, Value, arithmetic, state,
+};
 use crate::{
-    attributes, paths,
+    attributes, diagnostic, paths,
     stable::{CrateDef, Instance, Operand, Place, RigidTy, Ty, TyKind},
     verify::{
         policy,
-        symbolic::{Atom, Polynomial, Predicate, Relation, Requirement},
+        symbolic::{Atom, Polynomial, Predicate, Relation, Requirement, launch_monomial},
     },
 };
 
@@ -252,10 +254,31 @@ impl Analysis<'_, '_> {
         arguments: &[Value],
         state: &mut State,
     ) -> Value {
-        if matches!(primitive.memory, Memory::Read | Memory::Write)
-            && let Some(Pointer::Memory(origin)) = arguments[0].pointer.clone()
-        {
-            self.access(&origin, primitive.memory == Memory::Write, false, state);
+        match primitive.memory {
+            Memory::Read | Memory::Write => {
+                if let Some(Pointer::Memory(origin)) = arguments[0].pointer.clone() {
+                    self.access(&origin, primitive.memory == Memory::Write, false, state);
+                }
+            }
+            Memory::ReadReachable(argument) => {
+                let mut regions = Vec::new();
+                reachable(&arguments[argument], state, 3, &mut regions);
+                for region in regions {
+                    let origin = Origin {
+                        region,
+                        index: None,
+                        inner: false,
+                    };
+                    self.access(&origin, false, false, state);
+                }
+            }
+            Memory::PartitionRead | Memory::PartitionWrite => self.partition(
+                instance,
+                &arguments[0],
+                primitive.memory == Memory::PartitionWrite,
+                state,
+            ),
+            Memory::None | Memory::BlockFence | Memory::SharedAllocation => {}
         }
         self.uses_index |= primitive.geometry();
         self.geometry |= primitive.proof != Proof::Index
@@ -342,8 +365,107 @@ impl Analysis<'_, '_> {
                     ..Value::default()
                 }
             }
+            Proof::BlockShape => {
+                let threads = instance.args().0[0]
+                    .expect_const()
+                    .eval_target_usize()
+                    .unwrap();
+                if self.collect {
+                    for (axis, count) in [(0, threads), (1, 1), (2, 1)] {
+                        self.requirement(
+                            Predicate::new(
+                                Polynomial::atom(Atom::BlockDimension(axis))
+                                    .offset(-(count as i128))
+                                    .unwrap(),
+                                Relation::Zero,
+                            ),
+                            "the block must have the shape its declaration requires",
+                        );
+                    }
+                }
+                Value::default()
+            }
             Proof::Varying => Value::varying(2),
             Proof::Uniform => Value::default(),
         }
+    }
+
+    /// Records an access of the elements the thread owns in the partitioned matrix `argument`
+    /// points to. The partition is sound only when every thread derives it from the same data
+    /// and dimensions, so those must be launch values.
+    fn partition(&mut self, instance: Instance, argument: &Value, write: bool, state: &State) {
+        if !self.collect || self.quiet > 0 {
+            return;
+        }
+        let referent = match &argument.pointer {
+            Some(Pointer::Slot(slot, path)) => state::get(&state.slots[*slot], path),
+            _ => Value::default(),
+        };
+        let launch = |value: &Value| {
+            value
+                .integer
+                .clone()
+                .filter(|integer| value.variance == 0 && integer.0.keys().all(|m| launch_monomial(m)))
+        };
+        let data = referent.fields.first().and_then(|data| match &data.pointer {
+            Some(Pointer::Memory(origin)) if data.variance == 0 => origin
+                .index
+                .clone()
+                .filter(|index| index.0.keys().all(|m| launch_monomial(m)))
+                .map(|index| (origin.region.clone(), index)),
+            _ => None,
+        });
+        let rows = referent.fields.get(1).and_then(launch);
+        let columns = referent.fields.get(2).and_then(launch);
+        let (Some((region, index)), Some(rows), Some(columns)) = (data, rows, columns) else {
+            diagnostic::error(
+                self.sess,
+                self.span,
+                "the partitioned matrix may differ between GPU threads",
+                "construct it from kernel parameters, or values computed only from them, so every thread derives the same partition",
+            );
+            return;
+        };
+        self.requirement(
+            Predicate::new(
+                Polynomial::atom(Atom::GridDimension(2)).offset(-1).unwrap(),
+                Relation::Zero,
+            ),
+            "a partitioned matrix assigns one tile to each block of a two-dimensional grid",
+        );
+        self.accesses.push(Access {
+            origin: Origin {
+                region,
+                index: None,
+                inner: false,
+            },
+            write,
+            atomic: false,
+            partition: Some((format!("{:?}", instance.args()), vec![index, rows, columns])),
+            block: self.kernel_block(),
+            facts: state.facts.clone(),
+            span: self.span,
+        });
+    }
+}
+
+/// The regions `value` may point into, following local pointers up to `depth` levels.
+fn reachable(value: &Value, state: &State, depth: usize, regions: &mut Vec<Region>) {
+    let region = match &value.pointer {
+        Some(Pointer::Memory(origin)) => Some(origin.region.clone()),
+        Some(Pointer::Slot(slot, path)) if depth > 0 => {
+            reachable(&state::get(&state.slots[*slot], path), state, depth - 1, regions);
+            None
+        }
+        Some(_) => Some(Region::Unknown),
+        None => None,
+    };
+    if let Some(region) = region
+        && !regions.contains(&region)
+    {
+        regions.push(region);
+    }
+    for field in &value.fields {
+        reachable(field, state, depth, regions);
     }
 }

@@ -20,7 +20,7 @@ pub fn kernel(
     key: String,
     symbol: String,
 ) -> Option<KernelPlan> {
-    device_policy::verify(sess, instance);
+    let asynchronous = device_policy::verify(sess, instance);
     let module = ModuleBuilder::new(sess);
     let signature = module.signature(instance);
     let mut parameters = Vec::new();
@@ -150,6 +150,7 @@ pub fn kernel(
         status,
         instrumented: !certified || policy::instrumented(),
         uses_index: analysis.uses_index,
+        asynchronous,
         summary,
         warnings,
     })

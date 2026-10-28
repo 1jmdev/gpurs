@@ -65,3 +65,37 @@ pub fn index() -> usize;
     proof = Uniform
 )]
 pub fn sync_block();
+
+/// Proof that every block has `THREADS` threads along x and one along y and z. The host checks
+/// the launch geometry against it before every launch.
+#[derive(Clone, Copy, Debug)]
+pub struct Block<const THREADS: usize>(());
+
+impl<const THREADS: usize> Block<THREADS> {
+    #[primitive(
+        lowering = Body,
+        architecture = 0,
+        convergence = None,
+        memory = None,
+        proof = BlockShape
+    )]
+    pub fn new() -> Self {
+        const {
+            assert!(
+                THREADS > 0 && THREADS % 32 == 0 && THREADS <= 1024,
+                "a block holds between 32 and 1024 threads in complete warps"
+            )
+        };
+        Block(())
+    }
+
+    /// This thread's index within the block.
+    pub fn thread(&self) -> usize {
+        thread_id().x
+    }
+
+    /// This thread's warp within the block.
+    pub fn warp(&self) -> usize {
+        thread_id().x / 32
+    }
+}

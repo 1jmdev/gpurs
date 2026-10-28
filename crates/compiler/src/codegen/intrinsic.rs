@@ -460,8 +460,27 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                     ir::Value::undef(Type::bytes(size)),
                     layout.align(),
                 );
-                self.ir
-                    .cast(Conversion::AddrSpaceCast, shared, Type::byte_pointer())
+                let shared = self
+                    .ir
+                    .cast(Conversion::AddrSpaceCast, shared, Type::byte_pointer());
+                if matches!(destination.shape.repr(), ValueRepr::Scalar(_)) {
+                    shared
+                } else {
+                    // A structure holding the storage in its first field and zeroed state.
+                    for (offset, scalar) in self.scalars(&destination.shape) {
+                        let value = match offset {
+                            0 => shared.clone(),
+                            _ => ir::Value::int(layout::immediate_type(scalar), 0),
+                        };
+                        let pointer = self.offset(destination.pointer.clone(), offset);
+                        let align = layout::restrict_align(
+                            destination.align,
+                            MachineSize::from_bits(offset as usize * 8),
+                        );
+                        self.store_scalar(pointer, value, scalar, align);
+                    }
+                    return;
+                }
             }
             Lowering::Body => unreachable!(),
         };
