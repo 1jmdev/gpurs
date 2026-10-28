@@ -5,14 +5,14 @@ use super::{
     ir::{
         self, Access, Binary, Conversion, Flags, Modification, Ordering, Predicate, Transfer, Type,
     },
-    layout,
+    layout::{self, Shape},
     place::{Operand, Place, Value},
 };
 use crate::{
-    attributes, paths,
+    attributes, paths, stable,
     stable::{
-        BinOp, CrateDef, GenericArgKind, Instance, RigidTy, Ty, TyConst, TyConstKind, TyKind,
-        ValueRepr,
+        BinOp, CrateDef, GenericArgKind, Instance, MachineSize, RigidTy, Scalar, Ty, TyConst,
+        TyConstKind, TyKind, ValueRepr,
     },
 };
 
@@ -408,19 +408,38 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                     .call(symbol, layout::immediate_type(result), operands)
             }
             Lowering::Assembly { text, constraints } => {
-                let ValueRepr::Scalar(result) = destination.shape.repr().clone() else {
-                    unreachable!()
-                };
                 let effects =
                     primitive.memory != Memory::None || primitive.convergence != Convergence::None;
-                let operands = arguments.iter().map(Operand::scalar).collect();
-                self.ir.assembly(
-                    &text,
-                    &constraints,
-                    effects,
-                    layout::immediate_type(result),
-                    operands,
-                )
+                let operands = arguments
+                    .iter()
+                    .flat_map(|argument| self.registers(argument))
+                    .collect();
+                if let ValueRepr::Scalar(result) = destination.shape.repr() {
+                    let result = layout::immediate_type(*result);
+                    self.ir
+                        .assembly(&text, &constraints, effects, result, operands)
+                } else {
+                    // Aggregate results are register tuples, returned as one LLVM struct and
+                    // stored field by field.
+                    let leaves = self.scalars(&destination.shape);
+                    let types = leaves
+                        .iter()
+                        .map(|(_, scalar)| layout::immediate_type(*scalar))
+                        .collect();
+                    let result =
+                        self.ir
+                            .assembly(&text, &constraints, effects, Type::Struct(types), operands);
+                    for (index, (offset, scalar)) in leaves.into_iter().enumerate() {
+                        let value = self.ir.extract(result.clone(), index as u32);
+                        let pointer = self.offset(destination.pointer.clone(), offset);
+                        let align = layout::restrict_align(
+                            destination.align,
+                            MachineSize::from_bits(offset as usize * 8),
+                        );
+                        self.store_scalar(pointer, value, scalar, align);
+                    }
+                    return;
+                }
             }
             Lowering::SharedArray => {
                 let element = instance.args().0[0].ty().copied().unwrap();
@@ -478,6 +497,45 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
         let offset = self.ir.binary(Binary::Mul, flags, block, count);
         let index = self.ir.binary(Binary::Add, flags, offset, thread);
         self.ir.cast(Conversion::ZExt, index, Type::I64)
+    }
+
+    /// The registers holding `operand`: a scalar directly, an aggregate as its scalar leaves.
+    fn registers(&mut self, operand: &Operand) -> Vec<ir::Value> {
+        if let Value::Scalar(value) = &operand.value {
+            return vec![value.clone()];
+        }
+        let place = self.spill(operand);
+        self.scalars(&operand.shape)
+            .into_iter()
+            .map(|(offset, scalar)| {
+                let pointer = self.offset(place.pointer.clone(), offset);
+                let align =
+                    layout::restrict_align(place.align, MachineSize::from_bits(offset as usize * 8));
+                self.load_scalar(pointer, scalar, align)
+            })
+            .collect()
+    }
+
+    /// The scalar leaves of `shape` with their byte offsets, in memory order.
+    fn scalars(&self, shape: &Shape) -> Vec<(u64, Scalar)> {
+        match shape.repr() {
+            ValueRepr::Scalar(scalar) => vec![(0, *scalar)],
+            ValueRepr::ScalarPair { a, b, b_offset } => {
+                vec![(0, *a), (b_offset.bytes() as u64, *b)]
+            }
+            _ => (0..shape.count())
+                .flat_map(|field| {
+                    let inner = match stable::rigid(shape.ty) {
+                        RigidTy::Array(element, _) => self.shape_of(element),
+                        _ => shape.field(self.sess, field),
+                    };
+                    let offset = shape.offset(field).bytes() as u64;
+                    self.scalars(&inner)
+                        .into_iter()
+                        .map(move |(inner, scalar)| (offset + inner, scalar))
+                })
+                .collect(),
+        }
     }
 
     fn extended_register(&mut self, register: &str) -> ir::Value {

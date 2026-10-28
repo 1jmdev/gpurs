@@ -62,6 +62,10 @@ pub enum Memory {
     BlockFence,
     /// Allocates block-shared storage per call site.
     SharedAllocation,
+    /// Reads the referent of the first argument.
+    Read,
+    /// Writes the referent of the first argument.
+    Write,
 }
 
 /// Symbolic meaning of the result for the verifier.

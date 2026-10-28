@@ -63,7 +63,7 @@ impl Analysis<'_, '_> {
                 ..Value::default()
             });
         let model = match &primitive {
-            Some(primitive) => Some(self.primitive(primitive, instance)),
+            Some(primitive) => Some(self.primitive(primitive, instance, &values, state)),
             None => check
                 .or_else(|| self.model(&declared, receiver, &values, state))
                 .or_else(|| self.model(&path, None, &values, state)),
@@ -245,7 +245,18 @@ impl Analysis<'_, '_> {
         )
     }
 
-    fn primitive(&mut self, primitive: &Primitive, instance: Instance) -> Value {
+    fn primitive(
+        &mut self,
+        primitive: &Primitive,
+        instance: Instance,
+        arguments: &[Value],
+        state: &mut State,
+    ) -> Value {
+        if matches!(primitive.memory, Memory::Read | Memory::Write)
+            && let Some(Pointer::Memory(origin)) = arguments[0].pointer.clone()
+        {
+            self.access(&origin, primitive.memory == Memory::Write, false, state);
+        }
         self.uses_index |= primitive.geometry();
         self.geometry |= primitive.proof != Proof::Index
             && (primitive.geometry()
