@@ -256,7 +256,9 @@ impl Analysis<'_, '_> {
     ) -> Value {
         match primitive.memory {
             Memory::Read | Memory::Write => {
-                if let Some(Pointer::Memory(origin)) = arguments[0].pointer.clone() {
+                if let Some(Pointer::Memory(origin)) =
+                    arguments.first().and_then(|argument| argument.pointer.clone())
+                {
                     self.access(&origin, primitive.memory == Memory::Write, false, state);
                 }
             }
@@ -278,7 +280,10 @@ impl Analysis<'_, '_> {
                 primitive.memory == Memory::PartitionWrite,
                 state,
             ),
-            Memory::None | Memory::BlockFence | Memory::SharedAllocation => {}
+            Memory::None
+            | Memory::BlockFence
+            | Memory::SharedAllocation
+            | Memory::Encapsulated => {}
         }
         self.uses_index |= primitive.geometry();
         self.geometry |= primitive.proof != Proof::Index

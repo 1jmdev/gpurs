@@ -156,6 +156,7 @@ fn allowed(sess: Sess<'_>, instance: Instance, span: Span) -> bool {
             "core::clone::",
             "core::marker::",
             "core::convert::",
+            "core::default::",
             "core::mem::",
             "core::ptr::",
             "core::cell::",
