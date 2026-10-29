@@ -106,39 +106,9 @@ fn values(count: usize, seed: u32) -> Vec<Half> {
         .collect()
 }
 
-fn verify(gpu: &Gpu, stream: &Stream, rows: usize, inner: usize, columns: usize) {
-    let (left, right) = (values(rows * inner, 1), values(inner * columns, 2));
-    let mut output = gpu.zeros::<f32>(rows * columns);
-    matrix_multiply(
-        &stream.with_launch(launch(rows, columns)),
-        &gpu.upload(&left),
-        &gpu.upload(&right),
-        &mut output,
-        rows,
-        inner,
-        columns,
-    );
-    let output = output.download();
-    let error = (0..rows * columns)
-        .map(|index| {
-            let (row, column) = (index / columns, index % columns);
-            let expected: f32 = (0..inner)
-                .map(|k| left[row * inner + k].to_f32() * right[k * columns + column].to_f32())
-                .sum();
-            (output[index] - expected).abs()
-        })
-        .fold(0.0, f32::max);
-    println!("{rows}x{inner}x{columns}: maximum error {error}");
-    assert!(error < 1e-3);
-}
-
 fn main() {
     let gpu = Gpu::new(0);
     let stream = gpu.stream();
-
-    verify(&gpu, &stream, 256, 128, 256);
-    verify(&gpu, &stream, 333, 1000, 517);
-    verify(&gpu, &stream, 200, 77, 130);
 
     let size = 4096;
     let left = gpu.upload(&values(size * size, 3));

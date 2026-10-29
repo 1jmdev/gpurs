@@ -542,7 +542,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
     }
 
     /// The scalar leaves of `shape` with their byte offsets, in memory order.
-    fn scalars(&self, shape: &Shape) -> Vec<(u64, Scalar)> {
+    pub(super) fn scalars(&self, shape: &Shape) -> Vec<(u64, Scalar)> {
         match shape.repr() {
             ValueRepr::Scalar(scalar) => vec![(0, *scalar)],
             ValueRepr::ScalarPair { a, b, b_offset } => {

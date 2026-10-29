@@ -30,7 +30,7 @@ pub struct Function {
     /// Blocks in the order they were first entered, which is the printed order.
     pub(super) layout: Vec<Block>,
     current: Block,
-    registers: u32,
+    pub(super) registers: u32,
     allocas: usize,
 }
 

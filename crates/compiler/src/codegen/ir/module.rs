@@ -46,7 +46,8 @@ impl Module {
         address
     }
 
-    pub fn define(&mut self, function: Function) {
+    pub fn define(&mut self, mut function: Function) {
+        function.promote();
         self.functions.push(function);
     }
 

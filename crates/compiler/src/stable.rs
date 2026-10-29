@@ -31,11 +31,12 @@ pub use rustc_public::{
         VariantsShape,
     },
     mir::{
-        AggregateKind, AssertMessage, BinOp, Body, CastKind, ConstOperand, Mutability,
+        AggregateKind, AssertMessage, BinOp, Body, CastKind, ConstOperand, Local, Mutability,
         NonDivergingIntrinsic, Operand, Place, PointerCoercion, ProjectionElem, RETURN_LOCAL,
         RuntimeChecks, Rvalue, StatementKind, TerminatorKind, UnOp,
         alloc::{AllocId, GlobalAlloc},
         mono::{Instance, InstanceKind},
+        visit::{Location, MirVisitor, PlaceContext, statement_location, terminator_location},
     },
     target::MachineSize,
     ty::{
@@ -44,7 +45,6 @@ pub use rustc_public::{
     },
 };
 use rustc_public::{
-    mir::visit::{Location, MirVisitor},
     rustc_internal,
     ty::MirConst,
     visitor::{Visitable, Visitor},

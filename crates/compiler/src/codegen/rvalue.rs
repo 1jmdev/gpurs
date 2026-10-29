@@ -95,6 +95,14 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
         if operand.shape.is_zst() || count == 0 {
             return;
         }
+        // Short arrays are stored element by element, so that LLVM can split them into registers.
+        if count <= 16 {
+            for index in 0..count {
+                let element = self.index(destination, ir::Value::i64(index));
+                self.store(&element, operand);
+            }
+            return;
+        }
         let (head, body, end) = (
             self.ir.fresh_block("repeat"),
             self.ir.fresh_block("repeat"),

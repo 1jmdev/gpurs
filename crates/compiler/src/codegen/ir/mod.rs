@@ -9,6 +9,7 @@ mod function;
 mod instruction;
 mod module;
 mod print;
+mod promote;
 mod ty;
 mod value;
 

@@ -290,6 +290,21 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                     layout::restrict_align(place.align, b_offset),
                 );
             }
+            (Value::Memory(source, align), _) if let Some(leaves) = self.leaves(&operand.shape) => {
+                for (offset, scalar) in leaves {
+                    let from = self.offset(source.clone(), offset);
+                    let to = self.offset(place.pointer.clone(), offset);
+                    let offset = MachineSize::from_bits(offset as usize * 8);
+                    let value =
+                        self.load_scalar(from, scalar, layout::restrict_align(*align, offset));
+                    self.store_scalar(
+                        to,
+                        value,
+                        scalar,
+                        layout::restrict_align(place.align, offset),
+                    );
+                }
+            }
             (Value::Memory(source, align), _) => {
                 let mut shape = operand.shape.clone();
                 while let RigidTy::Adt(definition, _) = stable::rigid(shape.ty)
@@ -317,6 +332,32 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                 operand.shape.ty.kind()
             ),
         }
+    }
+
+    /// The scalar leaves of a small aggregate of structs, tuples, and arrays, which is copied
+    /// leaf by leaf with its own types, so that LLVM splits it into registers.
+    fn leaves(&self, shape: &Shape) -> Option<Vec<(u64, Scalar)>> {
+        fn plain(builder: &FunctionBuilder<'_, '_>, shape: &Shape) -> bool {
+            match stable::rigid(shape.ty) {
+                RigidTy::Adt(definition, _) if definition.kind() == AdtKind::Struct => (0..shape
+                    .count())
+                    .all(|field| plain(builder, &shape.field(builder.sess, field))),
+                RigidTy::Tuple(_) => (0..shape.count())
+                    .all(|field| plain(builder, &shape.field(builder.sess, field))),
+                RigidTy::Array(element, _) => plain(builder, &builder.shape_of(element)),
+                RigidTy::Int(_)
+                | RigidTy::Uint(_)
+                | RigidTy::Float(_)
+                | RigidTy::Bool
+                | RigidTy::Char => true,
+                _ => false,
+            }
+        }
+        if !plain(self, shape) {
+            return None;
+        }
+        let leaves = self.scalars(shape);
+        (leaves.len() <= 16).then_some(leaves)
     }
 
     pub fn load_scalar(&mut self, pointer: ir::Value, scalar: Scalar, align: u64) -> ir::Value {

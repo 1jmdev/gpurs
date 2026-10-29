@@ -1,13 +1,14 @@
 use std::collections::BTreeSet;
 
 use gpurs_artifact::Failure;
-use rustc_data_structures::fx::FxHashSet;
+use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 
 use super::{
     ir::{self, Type},
     layout::{self, PassMode, Shape},
     module::{Certificate, ModuleBuilder},
     place::{Operand, Place, Value},
+    unroll::{self, Loop},
 };
 use crate::{
     attributes, diagnostic, stable,
@@ -25,11 +26,22 @@ pub struct FunctionBuilder<'m, 'sess> {
     pub instance: Instance,
     pub body: Body,
     pub locals: Vec<Place>,
+    /// The size of each local held in its own stack slot, for its lifetime markers.
+    slots: Vec<Option<u64>>,
     pub fast_math: bool,
     pub span: Span,
     pub ir: ir::Function,
-    /// The IR block of each MIR block.
+    /// The IR block of each MIR block, in the first copy of every unrolled loop.
     blocks: Vec<ir::Block>,
+    /// The loops lowered as one copy of their body per iteration, outermost first.
+    unrolled: Vec<unroll::Loop>,
+    /// The copy of each unrolled loop enclosing the current block, outermost first.
+    copy: Vec<u64>,
+    /// The IR blocks of further copies, and the copies awaiting lowering.
+    copies: FxHashMap<(usize, Vec<u64>), ir::Block>,
+    pending: Vec<(usize, Vec<u64>)>,
+    /// The block an unrolled loop continues to after its last iteration, which is unreachable.
+    exhausted: Option<ir::Block>,
     /// The checks this certified copy omits or records; `None` for the instrumented copy.
     pub certificate: Option<Certificate>,
     /// Blocks whose divisions follow a recorded zero-divisor check and use a safe divisor.
@@ -53,9 +65,15 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
             instance,
             body,
             locals: Vec::new(),
+            slots: Vec::new(),
             span,
             ir: ir::Function::new("", Type::Void, Vec::new()),
             blocks: Vec::new(),
+            unrolled: Vec::new(),
+            copy: Vec::new(),
+            copies: FxHashMap::default(),
+            pending: Vec::new(),
+            exhausted: None,
             certificate: None,
             guarded: FxHashSet::default(),
             linear: false,
@@ -132,9 +150,64 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
         self.ir.unreachable();
     }
 
-    /// The IR block lowering MIR block `block`.
-    pub fn target(&self, block: usize) -> ir::Block {
-        self.blocks[block]
+    /// The IR block lowering MIR block `block` when the current block branches to it, which is
+    /// the next copy when the branch closes an iteration of an unrolled loop.
+    pub fn target(&mut self, block: usize) -> ir::Block {
+        let from = self.enclosing(self.block);
+        let mut copy = Vec::new();
+        for unrolled in self.enclosing(block) {
+            let Loop { header, count, .. } = self.unrolled[unrolled];
+            let index = match from.iter().position(|&enclosing| enclosing == unrolled) {
+                Some(position) if block == header => self.copy[position] + 1,
+                Some(position) => self.copy[position],
+                None => 0,
+            };
+            // Copy `count` only finds the range exhausted; its body is never entered.
+            if index > count {
+                return self.exhausted();
+            }
+            copy.push(index);
+        }
+        self.instance(block, copy)
+    }
+
+    /// The unrolled loops containing `block`, outermost first.
+    fn enclosing(&self, block: usize) -> Vec<usize> {
+        (0..self.unrolled.len())
+            .filter(|&unrolled| self.unrolled[unrolled].blocks.contains(&block))
+            .collect()
+    }
+
+    /// The IR block of copy `copy` of `block`, queued for lowering when new.
+    fn instance(&mut self, block: usize, copy: Vec<u64>) -> ir::Block {
+        if copy.iter().all(|&index| index == 0) {
+            if !self.copies.contains_key(&(block, copy.clone())) {
+                self.copies
+                    .insert((block, copy.clone()), self.blocks[block]);
+                self.pending.push((block, copy));
+            }
+            return self.blocks[block];
+        }
+        if let Some(&target) = self.copies.get(&(block, copy.clone())) {
+            return target;
+        }
+        let target = self.ir.fresh_block(&format!("bb{block}.copy"));
+        self.copies.insert((block, copy.clone()), target);
+        self.pending.push((block, copy));
+        target
+    }
+
+    fn exhausted(&mut self) -> ir::Block {
+        if let Some(block) = self.exhausted {
+            return block;
+        }
+        let current = self.ir.current();
+        let block = self.ir.fresh_block("exhausted");
+        self.ir.position(block);
+        self.ir.unreachable();
+        self.ir.position(current);
+        self.exhausted = Some(block);
+        block
     }
 
     /// Lowers the body as the function `name` and adds it to the module.
@@ -170,6 +243,8 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
             {
                 Place::new(arguments[index][0].clone(), shape)
             } else {
+                self.slots.resize(local, None);
+                self.slots.push(Some(shape.size().bytes().max(1) as u64));
                 self.temporary(shape)
             };
             self.locals.push(place);
@@ -192,7 +267,11 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
                 },
             );
         }
-        self.ir.branch(self.blocks[0]);
+        self.unrolled = unroll::loops(&self.body);
+        let entry = self.enclosing(0).iter().map(|_| 0).collect();
+        self.block = 0;
+        let entry = self.instance(0, entry);
+        self.ir.branch(entry);
 
         let reachable = reachable_blocks(&self.body);
         for block in self
@@ -212,9 +291,10 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
                 self.guarded.insert(target);
             }
         }
-        for block in 0..self.body.blocks.len() {
+        while let Some((block, copy)) = self.pending.pop() {
             self.block = block;
-            self.ir.position(self.blocks[block]);
+            self.ir.position(self.copies[&(block, copy.clone())]);
+            self.copy = copy;
             if !reachable.contains(block) {
                 self.ir.unreachable();
                 continue;
@@ -275,6 +355,17 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
                     );
                 }
             },
+            StatementKind::StorageLive(local) | StatementKind::StorageDead(local) => {
+                if let Some(Some(size)) = self.slots.get(*local) {
+                    let symbol = match statement {
+                        StatementKind::StorageLive(_) => "llvm.lifetime.start.p0i8",
+                        _ => "llvm.lifetime.end.p0i8",
+                    };
+                    let pointer = self.locals[*local].pointer.clone();
+                    self.ir
+                        .call(symbol, Type::Void, vec![ir::Value::i64(*size), pointer]);
+                }
+            }
             _ => {}
         }
     }
@@ -540,7 +631,8 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
     }
 
     pub fn branch(&mut self, target: usize) {
-        self.ir.branch(self.target(target));
+        let target = self.target(target);
+        self.ir.branch(target);
     }
 
     pub fn operand(&mut self, operand: &MirOperand) -> Operand {

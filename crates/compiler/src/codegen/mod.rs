@@ -15,6 +15,7 @@ pub(crate) mod layout;
 mod module;
 mod place;
 mod rvalue;
+mod unroll;
 
 pub use kernel::{KernelParameter, KernelPlan};
 pub(crate) use layout::Shape;
