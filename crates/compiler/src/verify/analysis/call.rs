@@ -78,13 +78,16 @@ impl Analysis<'_, '_> {
             return self.result(value, destination, state);
         }
         // A modelled callee is still analyzed for the checks it carries, but its memory
-        // effects and result come from the model.
+        // effects and result come from the model. Its checks are only kept by the collecting
+        // pass, so the fixpoint rounds skip it.
         match model {
             Some(value) => {
-                let mut copy = state.clone();
-                self.quiet += 1;
-                self.enter(instance, values, &mut copy);
-                self.quiet -= 1;
+                if self.collect {
+                    let mut copy = state.clone();
+                    self.quiet += 1;
+                    self.enter(instance, values, &mut copy);
+                    self.quiet -= 1;
+                }
                 self.result(value, destination, state)
             }
             None => match self.enter(instance, values, state) {

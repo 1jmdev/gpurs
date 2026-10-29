@@ -119,54 +119,59 @@ impl<T: Element, const ROWS: usize, const COLUMNS: usize> TileWriter<'_, T, ROWS
         column: usize,
     ) {
         let width = SharedTile::<T, ROWS, COLUMNS>::CHUNKS;
-        let chunks = ROWS * width;
         let lanes = 16 / size_of::<T>();
-        // SAFETY: the pipeline hands out writers only for stages it owns.
-        let destination = unsafe { &*self.tile }.address();
         let (data, rows, columns) = (source.data(), source.rows(), source.columns());
-        let vector = data.as_ptr() as usize % 16 == 0 && columns % lanes == 0 && column % lanes == 0;
-        for step in 0..chunks.div_ceil(THREADS) {
-            let chunk = step * THREADS + block.thread();
-            if chunks % THREADS != 0 && chunk >= chunks {
-                break;
-            }
-            let (tile_row, tile_chunk) = (chunk / width, chunk % width);
-            let offset = SharedTile::<T, ROWS, COLUMNS>::offset(tile_row, tile_chunk);
-            let source_row = row.wrapping_add(tile_row);
-            let source_column = column.wrapping_add(tile_chunk * lanes);
-            let (start, available) = if source_row < rows && source_column < columns {
-                (
-                    source_row * columns + source_column,
-                    (columns - source_column).min(lanes),
-                )
-            } else {
-                (0, 0)
-            };
-            // SAFETY: `start + available` is within `data`, since `rows` only counts rows the
-            // slice holds; a zero-byte copy reads nothing.
-            let pointer = unsafe { data.as_ptr().add(start) };
-            if vector {
-                let bytes = (available * size_of::<T>()) as u32;
-                copy_asynchronously(destination + offset, pointer as u64, bytes);
-            } else {
-                let mut values = [T::default(); 8];
-                for (index, value) in values.iter_mut().enumerate().take(available) {
-                    // SAFETY: as above.
-                    *value = unsafe { *pointer.add(index) };
+        if data.as_ptr() as usize % 16 == 0 && columns % lanes == 0 && column % lanes == 0 {
+            // SAFETY: the pipeline hands out writers only for stages it owns.
+            let destination = unsafe { &*self.tile }.address();
+            let chunks = ROWS * width;
+            for step in 0..chunks.div_ceil(THREADS) {
+                let chunk = step * THREADS + block.thread();
+                if chunks % THREADS != 0 && chunk >= chunks {
+                    break;
                 }
-                // SAFETY: the chunk lies inside the tile, which this writer may fill.
+                let (tile_row, tile_chunk) = (chunk / width, chunk % width);
+                let offset = SharedTile::<T, ROWS, COLUMNS>::offset(tile_row, tile_chunk);
+                let source_row = row.wrapping_add(tile_row);
+                let source_column = column.wrapping_add(tile_chunk * lanes);
+                let (start, bytes) = if source_row < rows && source_column < columns {
+                    (source_row * columns + source_column, 16)
+                } else {
+                    (0, 0)
+                };
+                // SAFETY: `start` is inside `data`, since `rows` only counts rows the slice
+                // holds, and the chunk ends at or before the end of its row; a zero-byte copy
+                // reads nothing.
+                let pointer = unsafe { data.as_ptr().add(start) };
+                copy_asynchronously(destination + offset, pointer as u64, bytes);
+            }
+        } else {
+            let elements = ROWS * COLUMNS;
+            for step in 0..elements.div_ceil(THREADS) {
+                let element = step * THREADS + block.thread();
+                if elements % THREADS != 0 && element >= elements {
+                    break;
+                }
+                let (tile_row, tile_column) = (element / COLUMNS, element % COLUMNS);
+                let offset = SharedTile::<T, ROWS, COLUMNS>::offset(tile_row, tile_column / lanes);
+                let source_row = row.wrapping_add(tile_row);
+                let source_column = column.wrapping_add(tile_column);
+                let value = if source_row < rows && source_column < columns {
+                    // SAFETY: as above.
+                    unsafe { *data.as_ptr().add(source_row * columns + source_column) }
+                } else {
+                    T::default()
+                };
+                // SAFETY: the element lies inside the tile, which this writer may fill.
                 unsafe {
                     self.tile
                         .cast::<u8>()
                         .add(offset as usize)
-                        .cast::<Chunk<T>>()
-                        .write(Chunk(values))
+                        .cast::<T>()
+                        .add(tile_column % lanes)
+                        .write(value)
                 };
             }
         }
     }
 }
-
-/// Eight 16-bit elements stored by one 16-byte instruction.
-#[repr(C, align(16))]
-struct Chunk<T>([T; 8]);
