@@ -137,7 +137,13 @@ impl<'sess> ModuleBuilder<'sess> {
         if stop {
             // A stopping thread may still have asynchronous copies into block-shared memory.
             if crate::verify::architecture() >= 80 {
-                function.assembly("cp.async.wait_all;", "~{memory}", true, Type::Void, Vec::new());
+                function.assembly(
+                    "cp.async.wait_all;",
+                    "~{memory}",
+                    true,
+                    Type::Void,
+                    Vec::new(),
+                );
             }
             function.assembly("exit;", "", true, Type::Void, Vec::new());
             function.unreachable();

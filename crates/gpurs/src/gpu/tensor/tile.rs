@@ -63,7 +63,10 @@ impl<T: Element, const ROWS: usize, const COLUMNS: usize> SharedTile<T, ROWS, CO
     fn lane_address(&self, row: usize, column: usize, across: bool) -> u32 {
         let lane = lane_id();
         let (row, chunk) = if across {
-            (row.wrapping_add(lane / 16 * 8 + lane % 8), column / 8 + lane / 8 % 2)
+            (
+                row.wrapping_add(lane / 16 * 8 + lane % 8),
+                column / 8 + lane / 8 % 2,
+            )
         } else {
             (row.wrapping_add(lane % 16), column / 8 + lane / 16)
         };
@@ -80,7 +83,7 @@ impl<T: Element, const ROWS: usize, const COLUMNS: usize> SharedTile<T, ROWS, CO
         let row = row as u32 & (ROWS as u32 - 1);
         let chunk = chunk as u32 & (Self::CHUNKS as u32 - 1);
         let group = Self::CHUNKS.min(8) as u32;
-        let permutation = row / (8 / group) & (group - 1);
+        let permutation = (row / (8 / group)) & (group - 1);
         (row * Self::CHUNKS as u32 + (chunk ^ permutation)) * 16
     }
 }

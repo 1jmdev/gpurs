@@ -30,7 +30,10 @@ impl OutputElement for f32 {
     unsafe fn read_pair(pointer: *const Self) -> [Self; 2] {
         // SAFETY: guaranteed by the caller.
         let bits = unsafe { pointer.cast::<u64>().read() };
-        [f32::from_bits(bits as u32), f32::from_bits((bits >> 32) as u32)]
+        [
+            f32::from_bits(bits as u32),
+            f32::from_bits((bits >> 32) as u32),
+        ]
     }
 }
 

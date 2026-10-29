@@ -110,8 +110,15 @@ impl Accumulator<Half> {
     #[inline]
     pub fn multiply_accumulate(&mut self, a: &FragmentA<Half>, b: &FragmentB<Half>) {
         let [w, x, y, z] = self.values;
-        let packed = [w.0 as u32 | (x.0 as u32) << 16, y.0 as u32 | (z.0 as u32) << 16];
-        let [w, x, y, z] = unpack(multiply_accumulate_f16_f16(a.registers, b.registers, packed));
+        let packed = [
+            w.0 as u32 | (x.0 as u32) << 16,
+            y.0 as u32 | (z.0 as u32) << 16,
+        ];
+        let [w, x, y, z] = unpack(multiply_accumulate_f16_f16(
+            a.registers,
+            b.registers,
+            packed,
+        ));
         self.values = [Half(w), Half(x), Half(y), Half(z)];
     }
 
@@ -125,5 +132,10 @@ impl Accumulator<Half> {
 
 #[inline]
 fn unpack([low, high]: [u32; 2]) -> [u16; 4] {
-    [low as u16, (low >> 16) as u16, high as u16, (high >> 16) as u16]
+    [
+        low as u16,
+        (low >> 16) as u16,
+        high as u16,
+        (high >> 16) as u16,
+    ]
 }

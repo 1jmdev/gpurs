@@ -1,10 +1,12 @@
 use std::time::Instant;
 
-use gpurs::gpu::{
-    Block,
-    tensor::{Accumulator, FragmentA, FragmentB, Matrix, Output, Pipeline, SharedTile},
+use gpurs::{
+    gpu::{
+        Block,
+        tensor::{Accumulator, FragmentA, FragmentB, Matrix, Output, Pipeline, SharedTile},
+    },
+    *,
 };
-use gpurs::*;
 
 const THREADS: usize = 128;
 const BLOCK_ROWS: usize = 128;
@@ -85,7 +87,11 @@ fn matrix_multiply(
 
 fn launch(rows: usize, columns: usize) -> LaunchConfig {
     LaunchConfig {
-        grid: [columns.div_ceil(BLOCK_COLUMNS), rows.div_ceil(BLOCK_ROWS), 1],
+        grid: [
+            columns.div_ceil(BLOCK_COLUMNS),
+            rows.div_ceil(BLOCK_ROWS),
+            1,
+        ],
         block: [THREADS, 1, 1],
         shared_bytes: 0,
     }

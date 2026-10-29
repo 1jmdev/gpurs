@@ -259,8 +259,9 @@ impl Analysis<'_, '_> {
     ) -> Value {
         match primitive.memory {
             Memory::Read | Memory::Write => {
-                if let Some(Pointer::Memory(origin)) =
-                    arguments.first().and_then(|argument| argument.pointer.clone())
+                if let Some(Pointer::Memory(origin)) = arguments
+                    .first()
+                    .and_then(|argument| argument.pointer.clone())
                 {
                     self.access(&origin, primitive.memory == Memory::Write, false, state);
                 }
@@ -283,10 +284,8 @@ impl Analysis<'_, '_> {
                 primitive.memory == Memory::PartitionWrite,
                 state,
             ),
-            Memory::None
-            | Memory::BlockFence
-            | Memory::SharedAllocation
-            | Memory::Encapsulated => {}
+            Memory::None | Memory::BlockFence | Memory::SharedAllocation | Memory::Encapsulated => {
+            }
         }
         self.uses_index |= primitive.geometry();
         self.geometry |= primitive.proof != Proof::Index
@@ -410,19 +409,21 @@ impl Analysis<'_, '_> {
             _ => Value::default(),
         };
         let launch = |value: &Value| {
-            value
-                .integer
-                .clone()
-                .filter(|integer| value.variance == 0 && integer.0.keys().all(|m| launch_monomial(m)))
+            value.integer.clone().filter(|integer| {
+                value.variance == 0 && integer.0.keys().all(|m| launch_monomial(m))
+            })
         };
-        let data = referent.fields.first().and_then(|data| match &data.pointer {
-            Some(Pointer::Memory(origin)) if data.variance == 0 => origin
-                .index
-                .clone()
-                .filter(|index| index.0.keys().all(|m| launch_monomial(m)))
-                .map(|index| (origin.region.clone(), index)),
-            _ => None,
-        });
+        let data = referent
+            .fields
+            .first()
+            .and_then(|data| match &data.pointer {
+                Some(Pointer::Memory(origin)) if data.variance == 0 => origin
+                    .index
+                    .clone()
+                    .filter(|index| index.0.keys().all(|m| launch_monomial(m)))
+                    .map(|index| (origin.region.clone(), index)),
+                _ => None,
+            });
         let rows = referent.fields.get(1).and_then(launch);
         let columns = referent.fields.get(2).and_then(launch);
         let (Some((region, index)), Some(rows), Some(columns)) = (data, rows, columns) else {
@@ -462,7 +463,12 @@ fn reachable(value: &Value, state: &State, depth: usize, regions: &mut Vec<Regio
     let region = match &value.pointer {
         Some(Pointer::Memory(origin)) => Some(origin.region.clone()),
         Some(Pointer::Slot(slot, path)) if depth > 0 => {
-            reachable(&state::get(&state.slots[*slot], path), state, depth - 1, regions);
+            reachable(
+                &state::get(&state.slots[*slot], path),
+                state,
+                depth - 1,
+                regions,
+            );
             None
         }
         Some(_) => Some(Region::Unknown),
