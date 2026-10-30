@@ -37,6 +37,16 @@ impl Target {
                 || self.kind != Compatibility::Generic && self.capability / 10 == capability / 10)
     }
 
+    /// PTX can be JIT-compiled forward across major versions only for generic targets.
+    pub fn supports_ptx(self, capability: u32) -> bool {
+        capability >= self.capability
+            && match self.kind {
+                Compatibility::Generic => true,
+                Compatibility::Architecture => capability == self.capability,
+                Compatibility::Family => capability / 10 == self.capability / 10,
+            }
+    }
+
     pub fn supports(self, capability: u32) -> bool {
         capability / 10 == self.capability / 10
             && capability >= self.capability

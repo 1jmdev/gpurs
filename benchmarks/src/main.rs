@@ -1,12 +1,6 @@
-use std::ffi::c_void;
-
 use gpurs::*;
 
 unsafe extern "C" {
-    fn benchmark_capture_begin(stream: *mut c_void) -> *mut c_void;
-    fn benchmark_capture_end(graph: *mut c_void, stream: *mut c_void);
-    fn benchmark_graph_time(graph: *mut c_void, stream: *mut c_void, iterations: u32) -> f32;
-    fn benchmark_graph_destroy(graph: *mut c_void);
     fn benchmark_reference(
         operation: i32,
         left: *const u32,
@@ -159,56 +153,76 @@ fn main() {
                 let mut output = gpu.zeros::<u32>(count);
                 let mut reference = vec![0; count];
                 let iterations = 128;
-                let mut run = || match operation {
-                    0 => copy(&launch, &device_left, &device_right, &mut output),
-                    1 => add(&launch, &device_left, &device_right, &mut output),
-                    2 => subtract(&launch, &device_left, &device_right, &mut output),
-                    3 => multiply(&launch, &device_left, &device_right, &mut output),
-                    4 => divide_constant(&launch, &device_left, &device_right, &mut output),
-                    5 => remainder_constant(&launch, &device_left, &device_right, &mut output),
-                    6 => bitwise_and(&launch, &device_left, &device_right, &mut output),
-                    7 => bitwise_or(&launch, &device_left, &device_right, &mut output),
-                    8 => bitwise_xor(&launch, &device_left, &device_right, &mut output),
-                    9 => shift_left(&launch, &device_left, &device_right, &mut output),
-                    10 => shift_right(&launch, &device_left, &device_right, &mut output),
-                    11 => minimum(&launch, &device_left, &device_right, &mut output),
-                    12 => maximum(&launch, &device_left, &device_right, &mut output),
-                    13 => conditional(&launch, &device_left, &device_right, &mut output),
-                    14 => divergent(&launch, &device_left, &device_right, &mut output),
-                    15 => compound(&launch, &device_left, &device_right, &mut output),
-                    16 => equal(&launch, &device_left, &device_right, &mut output),
-                    17 => bitwise_not(&launch, &device_left, &device_right, &mut output),
-                    18 => reverse(&launch, &device_left, &device_right, &mut output),
-                    19 => rotate(&launch, &device_left, &device_right, &mut output),
-                    20 => loop_arithmetic(&launch, &device_left, &device_right, &mut output),
-                    21 => masked_add(&launch, &device_left, &device_right, &mut output),
-                    22 => float_add(&launch, &device_left, &device_right, &mut output),
-                    23 => float_multiply(&launch, &device_left, &device_right, &mut output),
-                    24 => float_divide(&launch, &device_left, &device_right, &mut output),
-                    25 => float_compound(&launch, &device_left, &device_right, &mut output),
-                    _ => unreachable!(),
-                };
+                macro_rules! run {
+                    ($launch:expr) => {
+                        match operation {
+                            0 => copy($launch, &device_left, &device_right, &mut output),
+                            1 => add($launch, &device_left, &device_right, &mut output),
+                            2 => subtract($launch, &device_left, &device_right, &mut output),
+                            3 => multiply($launch, &device_left, &device_right, &mut output),
+                            4 => divide_constant($launch, &device_left, &device_right, &mut output),
+                            5 => remainder_constant(
+                                $launch,
+                                &device_left,
+                                &device_right,
+                                &mut output,
+                            ),
+                            6 => bitwise_and($launch, &device_left, &device_right, &mut output),
+                            7 => bitwise_or($launch, &device_left, &device_right, &mut output),
+                            8 => bitwise_xor($launch, &device_left, &device_right, &mut output),
+                            9 => shift_left($launch, &device_left, &device_right, &mut output),
+                            10 => shift_right($launch, &device_left, &device_right, &mut output),
+                            11 => minimum($launch, &device_left, &device_right, &mut output),
+                            12 => maximum($launch, &device_left, &device_right, &mut output),
+                            13 => conditional($launch, &device_left, &device_right, &mut output),
+                            14 => divergent($launch, &device_left, &device_right, &mut output),
+                            15 => compound($launch, &device_left, &device_right, &mut output),
+                            16 => equal($launch, &device_left, &device_right, &mut output),
+                            17 => bitwise_not($launch, &device_left, &device_right, &mut output),
+                            18 => reverse($launch, &device_left, &device_right, &mut output),
+                            19 => rotate($launch, &device_left, &device_right, &mut output),
+                            20 => {
+                                loop_arithmetic($launch, &device_left, &device_right, &mut output)
+                            }
+                            21 => masked_add($launch, &device_left, &device_right, &mut output),
+                            22 => float_add($launch, &device_left, &device_right, &mut output),
+                            23 => float_multiply($launch, &device_left, &device_right, &mut output),
+                            24 => float_divide($launch, &device_left, &device_right, &mut output),
+                            25 => float_compound($launch, &device_left, &device_right, &mut output),
+                            _ => unreachable!(),
+                        }
+                    };
+                }
                 for _ in 0..10 {
-                    run();
+                    run!(&launch);
                 }
                 stream.synchronize();
                 // SAFETY: the CUDA events and stream remain live until all recorded work completes.
                 let (gpurs_time, cuda_time) = unsafe {
-                    let graph = benchmark_capture_begin(stream.benchmark_raw());
-                    for _ in 0..iterations {
-                        run();
-                    }
-                    benchmark_capture_end(graph, stream.benchmark_raw());
+                    let graph = stream.capture(|capture| {
+                        let launch = capture.with_launch(LaunchConfig {
+                            grid: [count.div_ceil(block), 1, 1],
+                            block: [block, 1, 1],
+                            shared_bytes: 0,
+                        });
+                        for _ in 0..iterations {
+                            run!(&launch);
+                        }
+                    });
+                    let executable = graph.instantiate();
                     let mut gpurs_times = Vec::new();
                     let mut cuda_times = Vec::new();
                     for batch in 0..5 {
                         for implementation in [batch % 2, 1 - batch % 2] {
                             if implementation == 0 {
-                                gpurs_times.push(benchmark_graph_time(
-                                    graph,
-                                    stream.benchmark_raw(),
-                                    iterations,
-                                ));
+                                executable.launch(&stream).synchronize();
+                                let start = stream.record_timed();
+                                executable.launch(&stream);
+                                let end = stream.record_timed();
+                                end.synchronize();
+                                gpurs_times.push(
+                                    start.elapsed(&end).as_secs_f32() * 1000.0 / iterations as f32,
+                                );
                             } else {
                                 cuda_times.push(benchmark_reference(
                                     operation as i32,
@@ -222,7 +236,6 @@ fn main() {
                             }
                         }
                     }
-                    benchmark_graph_destroy(graph);
                     gpurs_times.sort_by(f32::total_cmp);
                     cuda_times.sort_by(f32::total_cmp);
                     (gpurs_times[2], cuda_times[2])

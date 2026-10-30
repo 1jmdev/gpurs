@@ -1,15 +1,9 @@
-use std::ffi::c_void;
-
 use gpurs::*;
 
 const TILE: usize = 16;
 const BLOCK: usize = 256;
 
 unsafe extern "C" {
-    fn benchmark_capture_begin(stream: *mut c_void) -> *mut c_void;
-    fn benchmark_capture_end(graph: *mut c_void, stream: *mut c_void);
-    fn benchmark_graph_time(graph: *mut c_void, stream: *mut c_void, iterations: u32) -> f32;
-    fn benchmark_graph_destroy(graph: *mut c_void);
     fn benchmark_workload(
         operation: u32,
         input: *const f32,
@@ -171,35 +165,52 @@ fn main() {
                 }
             };
             let launch = stream.with_launch(config);
-            let mut run = || match operation {
-                0 => matrix_multiply(&launch, &device_input, &device_weights, &mut output, size),
-                1 => convolution(&launch, &device_input, &device_weights, &mut output, size),
-                2 => reduction(&launch, &device_input, &mut output),
-                3 => normalization(&launch, &device_input, &mut output),
-                _ => unreachable!(),
-            };
+            macro_rules! run {
+                ($launch:expr) => {
+                    match operation {
+                        0 => matrix_multiply(
+                            $launch,
+                            &device_input,
+                            &device_weights,
+                            &mut output,
+                            size,
+                        ),
+                        1 => {
+                            convolution($launch, &device_input, &device_weights, &mut output, size)
+                        }
+                        2 => reduction($launch, &device_input, &mut output),
+                        3 => normalization($launch, &device_input, &mut output),
+                        _ => unreachable!(),
+                    }
+                };
+            }
             for _ in 0..5 {
-                run();
+                run!(&launch);
             }
             stream.synchronize();
             let iterations = 32;
             // SAFETY: the events, stream, and host buffers remain valid until the work completes.
             let (gpurs_time, cuda_time) = unsafe {
-                let graph = benchmark_capture_begin(stream.benchmark_raw());
-                for _ in 0..iterations {
-                    run();
-                }
-                benchmark_capture_end(graph, stream.benchmark_raw());
+                let graph = stream.capture(|capture| {
+                    let launch = capture.with_launch(config);
+                    for _ in 0..iterations {
+                        run!(&launch);
+                    }
+                });
+                let executable = graph.instantiate();
                 let mut gpurs_times = Vec::new();
                 let mut cuda_times = Vec::new();
                 for batch in 0..5 {
                     for implementation in [batch % 2, 1 - batch % 2] {
                         if implementation == 0 {
-                            gpurs_times.push(benchmark_graph_time(
-                                graph,
-                                stream.benchmark_raw(),
-                                iterations,
-                            ));
+                            executable.launch(&stream).synchronize();
+                            let start = stream.record_timed();
+                            executable.launch(&stream);
+                            let end = stream.record_timed();
+                            end.synchronize();
+                            gpurs_times.push(
+                                start.elapsed(&end).as_secs_f32() * 1000.0 / iterations as f32,
+                            );
                         } else {
                             cuda_times.push(benchmark_workload(
                                 operation as u32,
@@ -212,7 +223,6 @@ fn main() {
                         }
                     }
                 }
-                benchmark_graph_destroy(graph);
                 gpurs_times.sort_by(f32::total_cmp);
                 cuda_times.sort_by(f32::total_cmp);
                 (gpurs_times[2], cuda_times[2])

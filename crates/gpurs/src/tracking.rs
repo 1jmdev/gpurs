@@ -45,6 +45,7 @@ pub(crate) struct Status {
     pub observed: Cell<Option<u32>>,
 }
 
+#[derive(Clone)]
 pub(crate) struct Access {
     pub allocation: Rc<Allocation>,
     pub range: Range<usize>,
@@ -68,7 +69,7 @@ impl Allocation {
 
 impl Drop for Allocation {
     fn drop(&mut self) {
-        self.device.context.make_current();
+        let _context = self.device.context.enter();
         let release = &self.device.release;
         for record in self.records.get_mut().iter() {
             if record.sequence > record.stream.completed.get() {

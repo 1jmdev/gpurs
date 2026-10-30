@@ -82,7 +82,7 @@ impl Cache {
             .collect::<Vec<_>>();
         fingerprints.sort_unstable();
         let input = format!(
-            "{}\n{key}\n{configured}\n{}",
+            "{}\n{architecture}\n{key}\n{configured}\n{}",
             self.identity,
             fingerprints.join("\n")
         );
@@ -120,7 +120,7 @@ impl Cache {
             lowered
         };
         let toolkit = nvvm::toolkit()?;
-        let mut input = format!("{}\n", self.identity);
+        let mut input = format!("{}\n{architecture}\n", self.identity);
         for file in [
             "bin/ptxas",
             "nvvm/lib64/libnvvm.so",
@@ -136,21 +136,23 @@ impl Cache {
             ));
         }
         input.push_str(&lowered.ir);
-        let entry = self.entry(input.as_bytes(), "cubin");
-        let cubin = if let Some(bytes) = entry.read() {
-            bytes
+        let entry = self.entry(input.as_bytes(), "module");
+        let module = if let Some(module) = entry
+            .read()
+            .and_then(|bytes| postcard::from_bytes::<Module>(&bytes).ok())
+        {
+            module
         } else {
-            let cubin = nvvm::compile(&lowered.ir, architecture, &toolkit, &entry.path)?;
-            entry.write(&cubin)?;
-            cubin
-        };
-        Ok((
-            Module {
+            let (cubin, ptx) = nvvm::compile(&lowered.ir, architecture, &toolkit, &entry.path)?;
+            let module = Module {
                 cubin,
+                ptx,
                 kernels: vec![lowered.kernel],
-            },
-            lowered.summary,
-        ))
+            };
+            entry.write(&postcard::to_allocvec(&module).map_err(|error| error.to_string())?)?;
+            module
+        };
+        Ok((module, lowered.summary))
     }
 
     fn entry(&self, input: &[u8], extension: &str) -> Entry {

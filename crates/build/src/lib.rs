@@ -12,4 +12,4 @@ mod build;
 mod object;
 mod wrapper;
 
-pub use build::compile;
+pub use build::{compile, compile_architectures};

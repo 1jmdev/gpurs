@@ -25,6 +25,7 @@ impl Gpu {
         rows: usize,
         columns: usize,
     ) -> DeviceTensorMap<T, ROWS, COLUMNS> {
+        let _context = self.device.context.enter();
         const { TensorMap::<T, ROWS, COLUMNS>::validate() };
         let span = source.span();
         assert!(

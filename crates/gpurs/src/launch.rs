@@ -62,7 +62,7 @@ pub fn kernel<'a, S: Launch, G>(
     cache: &KernelCache,
 ) -> KernelLaunch<'a, S> {
     let device = &stream.stream().device;
-    device.context.make_current();
+    let _context = device.context.enter();
     let generics = any::type_name::<G>();
     let mut loaded = cache.loaded.borrow_mut();
     let kernel = if let Some(((previous_module, previous_tail, previous), owner, kernel)) = &*loaded
@@ -224,6 +224,7 @@ impl<S: Launch> KernelLaunch<'_, S> {
     fn submit<R>(mut self) -> Option<Buffer<R>> {
         let stream = self.stream.stream();
         let device = &stream.device;
+        let _context = device.context.enter();
         let kernel = self.kernel.clone();
         let metadata = &kernel.metadata;
         let explicit = self.stream.config();
@@ -321,6 +322,11 @@ impl<S: Launch> KernelLaunch<'_, S> {
             }
             threads
         });
+        let capture = self.stream.capture();
+        assert!(
+            capture.is_none() || metadata.result.is_none(),
+            "graph kernels must write into existing storage rather than return values",
+        );
         let result = metadata.result.map(|value| {
             assert_eq!(
                 value.size,
@@ -346,7 +352,11 @@ impl<S: Launch> KernelLaunch<'_, S> {
                 0..buffer.allocation.bytes,
             ));
         }
-        let mut sources = tracking::order(&stream.raw, &accesses);
+        let mut sources = if capture.is_some() {
+            Vec::new()
+        } else {
+            tracking::order(&stream.raw, &accesses)
+        };
         if threads == 0 {
             return result;
         }
@@ -363,6 +373,21 @@ impl<S: Launch> KernelLaunch<'_, S> {
         }
         if let Some(buffer) = &result {
             self.write_word(RESULT_OFFSET as usize, buffer.allocation.pointer);
+        }
+        if let Some(capture) = capture {
+            capture.borrow_mut().push(crate::graph::CapturedKernel {
+                function: *function,
+                config: crate::LaunchConfig {
+                    shared_bytes: config
+                        .shared_bytes
+                        .max(metadata.shared.dynamic_bytes as usize),
+                    ..config
+                },
+                arguments: self.arguments[entry.offset..].to_vec(),
+                accesses,
+                status,
+            });
+            return result;
         }
         // SAFETY: the argument block follows the kernel's verified parameter layout, and the
         // recorded accesses keep every referenced allocation alive until the launch completes.

@@ -53,12 +53,12 @@ pub struct Transfer<T> {
 impl Gpu {
     /// CUDA device ordinal used by this handle.
     pub fn ordinal(&self) -> usize {
-        self.device.context.device as usize
+        self.device.context.device() as usize
     }
 
     /// Allocates uninitialized bytes with the requested alignment.
     pub fn allocate(&self, layout: Layout) -> DeviceAllocation {
-        self.device.context.make_current();
+        let _context = self.device.context.enter();
         let bytes = layout
             .size()
             .checked_add(layout.align() - 1)
@@ -83,7 +83,7 @@ impl Gpu {
     /// The owner is dropped only after all tracked work completes.
     ///
     /// # Safety
-    /// The address range must belong to this GPU's primary context and remain allocated
+    /// The address range must belong to this GPU's context and remain allocated
     /// while `owner` lives. Import each allocation once and derive every alias from this
     /// handle. External accesses and recycling must be ordered outside gpurs; no external
     /// access may conflict with tracked work. Previously queued initialization must finish
@@ -124,7 +124,7 @@ impl Gpu {
         if size_of_val(&*data) == 0 {
             return self.pin(&data);
         }
-        self.device.context.make_current();
+        let _context = self.device.context.enter();
         let pointer = data.as_mut_ptr();
         // SAFETY: the vector is retained, and its capacity is never changed.
         unsafe { driver::register_host(pointer.cast(), size_of_val(&*data)) };
@@ -140,7 +140,7 @@ impl Gpu {
     }
 
     fn pinned_uninit<T>(&self, len: usize) -> PinnedBuffer<MaybeUninit<T>> {
-        self.device.context.make_current();
+        let _context = self.device.context.enter();
         let bytes = Layout::array::<T>(len).expect("pinned allocation exceeds the host size range");
         let pointer = driver::allocate_host(
             bytes
@@ -177,7 +177,7 @@ impl DeviceAllocation {
     }
 
     pub fn ordinal(&self) -> usize {
-        self.allocation.device.context.device as usize
+        self.allocation.device.context.device() as usize
     }
 
     /// Creates typed uninitialized storage at a byte offset, retaining this allocation.
@@ -267,7 +267,7 @@ impl<T> DerefMut for PinnedBuffer<T> {
 
 impl Drop for HostStorage {
     fn drop(&mut self) {
-        self.device.context.make_current();
+        let _context = self.device.context.enter();
         // SAFETY: transfer completion precedes destruction of its owned storage.
         unsafe {
             if self.registered.is_some() {
@@ -282,7 +282,7 @@ impl Drop for HostStorage {
 impl<T> Transfer<T> {
     /// Polls CUDA completion without waiting or exposing host storage.
     pub fn is_complete(&self) -> bool {
-        self.accesses[0].allocation.device.context.make_current();
+        let _context = self.accesses[0].allocation.device.context.enter();
         self.event
             .as_ref()
             .expect("transfer was submitted")
@@ -300,7 +300,7 @@ impl<T> Transfer<T> {
         if self.finished {
             return;
         }
-        self.accesses[0].allocation.device.context.make_current();
+        let _context = self.accesses[0].allocation.device.context.enter();
         if let Some(event) = &self.event {
             event.synchronize();
         } else {
@@ -323,7 +323,7 @@ impl Stream {
         data: T,
         submit: impl FnOnce(&mut T),
     ) -> Transfer<T> {
-        self.device.context.make_current();
+        let _context = self.device.context.enter();
         for access in &accesses {
             assert!(
                 Rc::ptr_eq(&self.device, &access.allocation.device),

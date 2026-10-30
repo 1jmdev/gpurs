@@ -9,15 +9,26 @@ use crate::{
 
 /// Configures compilation of the selected target's GPU kernels for `architecture`.
 pub fn compile(architecture: &str) {
+    compile_architectures(&[architecture]);
+}
+
+/// Embeds verified native images and PTX for each target; runtime selects a compatible image.
+/// Generic PTX supports forward JIT compatibility; `a` and `f` targets retain their restrictions.
+pub fn compile_architectures(architectures: &[&str]) {
     if env::var_os("GPURS_WRAPPER").is_some() && env::args_os().len() > 1 {
         process::exit(wrapper::run_wrapper());
     }
     println!("cargo::rustc-check-cfg=cfg(gpurs_device)");
-    if architecture.parse::<Target>().is_err() {
-        fail(&format!(
-            "GPU architecture must look like `sm_89`, `sm_90a`, or `sm_100f`, found \
-             `{architecture}`"
-        ));
+    if architectures.is_empty() {
+        fail("at least one GPU architecture is required");
+    }
+    for architecture in architectures {
+        if architecture.parse::<Target>().is_err() {
+            fail(&format!(
+                "GPU architecture must look like `sm_89`, `sm_90a`, or `sm_100f`, found \
+                 `{architecture}`"
+            ));
+        }
     }
     let directory = PathBuf::from(env::var_os("OUT_DIR").unwrap());
     let artifacts = directory.join("artifacts");
@@ -44,7 +55,7 @@ pub fn compile(architecture: &str) {
             "GPURS_COMPILER_ID",
             format!("{:?}:{}", compiler.modified().unwrap(), compiler.len()),
         ),
-        ("GPURS_ARCHITECTURE", architecture.to_owned()),
+        ("GPURS_ARCHITECTURE", architectures.join(",")),
         (
             "GPURS_OVERFLOW_CHECKS",
             if env::var("PROFILE").unwrap() == "release" {

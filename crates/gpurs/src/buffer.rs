@@ -223,7 +223,7 @@ impl<'a> Span<'a> {
 
 #[track_caller]
 fn download<T>(span: Span<'_>) -> Vec<T> {
-    span.allocation.device.context.make_current();
+    let _context = span.allocation.device.context.enter();
     let stream = &span.allocation.device.download;
     let range = span.bytes::<T>();
     let sources = tracking::order(stream, &[Access::read(span.allocation, range.clone())]);
@@ -258,7 +258,7 @@ fn fill<T: Copy>(span: Span<'_>, stream: &Stream, value: T) {
         Rc::ptr_eq(&stream.device, &span.allocation.device),
         "fill allocation belongs to another GPU"
     );
-    stream.device.context.make_current();
+    let _context = stream.device.context.enter();
     let access = Access::recovering(span.allocation, span.bytes::<T>());
     tracking::order(&stream.raw, slice::from_ref(&access));
     let pointer = span.allocation.pointer + access.range.start as u64;

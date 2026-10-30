@@ -10,8 +10,8 @@ use crate::{
 
 /// An ordered queue of GPU work. Launches return without waiting for completion.
 pub struct Stream {
-    pub(crate) device: Rc<Device>,
     pub(crate) raw: Rc<driver::Stream>,
+    pub(crate) device: Rc<Device>,
     pub(crate) launched: RefCell<Vec<Rc<Status>>>,
     pub(crate) arguments: RefCell<Vec<MaybeUninit<u8>>>,
     pub(crate) lengths: RefCell<Vec<u64>>,
@@ -48,6 +48,9 @@ pub(crate) mod sealed {
     pub trait Sealed {
         fn stream(&self) -> &Stream;
         fn config(&self) -> Option<LaunchConfig>;
+        fn capture(&self) -> Option<&std::cell::RefCell<Vec<crate::graph::CapturedKernel>>> {
+            None
+        }
     }
 }
 
@@ -57,10 +60,21 @@ impl Stream {
         self.raw.raw
     }
 
+    /// Exports a borrowed handle. External allocation accesses require `submit_external`;
+    /// the handle must not be destroyed or used after the stream's retained lifetime.
+    pub fn as_raw(&self) -> *mut std::ffi::c_void {
+        self.raw.as_raw()
+    }
+
     pub(crate) fn new(device: Rc<Device>) -> Self {
+        let raw = driver::Stream::with_context(&device.context, 0);
+        Self::from_driver(device, raw)
+    }
+
+    pub(crate) fn from_driver(device: Rc<Device>, raw: driver::Stream) -> Self {
         Stream {
             device,
-            raw: Rc::new(driver::Stream::new()),
+            raw: Rc::new(raw),
             launched: RefCell::default(),
             arguments: RefCell::default(),
             lengths: RefCell::default(),
@@ -79,7 +93,7 @@ impl Stream {
     /// Waits for all work on this stream and panics if any of its launches failed.
     #[track_caller]
     pub fn synchronize(&self) {
-        self.device.context.make_current();
+        let _context = self.device.context.enter();
         self.raw.synchronize();
         tracking::observe(&self.launched.take());
     }

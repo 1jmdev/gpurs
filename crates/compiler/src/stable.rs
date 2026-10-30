@@ -125,6 +125,9 @@ impl<'tcx> Session<'tcx> {
             tcx,
             target: env::var("GPURS_ARCHITECTURE")
                 .expect("GPU compilation has a target architecture")
+                .split(',')
+                .next()
+                .expect("at least one architecture")
                 .parse()
                 .expect("the build script validated the target architecture"),
         }

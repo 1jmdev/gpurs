@@ -14,9 +14,27 @@ pub struct DeviceView;
 
 impl DeviceView {
     fn compile(&self, sess: Session<'_>) -> Result<(), String> {
+        let architectures = env::var("GPURS_ARCHITECTURE").unwrap();
+        let mut artifacts = architectures
+            .split(',')
+            .map(|architecture| self.compile_target(sess, architecture));
+        let mut artifact = artifacts.next().expect("at least one architecture")?;
+        artifact.alternatives = artifacts.collect::<Result<_, _>>()?;
+        let output = PathBuf::from(env::var_os("GPURS_TARGET_ARTIFACT").unwrap());
+        let bytes = artifact.encode();
+        let mut embedded = (bytes.len() as u64).to_le_bytes().to_vec();
+        embedded.extend_from_slice(&bytes);
+        fs::write(output, embedded).map_err(|error| error.to_string())
+    }
+
+    fn compile_target(
+        &self,
+        mut sess: Session<'_>,
+        architecture: &str,
+    ) -> Result<Artifact, String> {
+        sess.target = architecture.parse().expect("validated GPU architecture");
         let mut host = HostView::default();
         host.analyze(sess);
-        let architecture = env::var("GPURS_ARCHITECTURE").unwrap();
         let directory = PathBuf::from(env::var_os("GPURS_ARTIFACTS").unwrap());
         let output = PathBuf::from(env::var_os("GPURS_TARGET_ARTIFACT").unwrap());
         let definitions: Vec<_> = rustc_public::all_local_items()
@@ -72,13 +90,8 @@ impl DeviceView {
                     continue;
                 }
             };
-            let (module, summary) = cache.kernel(
-                sess,
-                instance,
-                launch.configured,
-                &launch.key,
-                &architecture,
-            )?;
+            let (module, summary) =
+                cache.kernel(sess, instance, launch.configured, &launch.key, architecture)?;
             report.push_str(&summary);
             modules.push(module);
         }
@@ -89,16 +102,14 @@ impl DeviceView {
                 env!("CARGO_PKG_VERSION"),
                 util::rustc_version_str().unwrap_or("unknown rustc")
             ),
-            architecture,
+            architecture: architecture.to_owned(),
+            alternatives: Vec::new(),
             types: host.types,
             modules,
         };
         fs::write(output.with_extension("preconditions"), report)
             .map_err(|error| error.to_string())?;
-        let bytes = artifact.encode();
-        let mut embedded = (bytes.len() as u64).to_le_bytes().to_vec();
-        embedded.extend_from_slice(&bytes);
-        fs::write(output, embedded).map_err(|error| error.to_string())
+        Ok(artifact)
     }
 }
 

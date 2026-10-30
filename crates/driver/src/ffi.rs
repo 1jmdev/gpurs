@@ -26,6 +26,33 @@ pub const CU_TENSOR_MAP_L2_PROMOTION_L2_256B: c_int = 3;
 
 #[link(name = "cuda")]
 unsafe extern "C" {
+    pub fn cuStreamBeginCapture_v2(stream: CUstream, mode: c_int) -> CUresult;
+    pub fn cuStreamEndCapture(stream: CUstream, graph: *mut *mut c_void) -> CUresult;
+    pub fn cuGraphDestroy(graph: *mut c_void) -> CUresult;
+    pub fn cuGraphInstantiateWithFlags(
+        executable: *mut *mut c_void,
+        graph: *mut c_void,
+        flags: u64,
+    ) -> CUresult;
+    pub fn cuGraphExecDestroy(executable: *mut c_void) -> CUresult;
+    pub fn cuGraphLaunch(executable: *mut c_void, stream: CUstream) -> CUresult;
+    pub fn cuGraphExecUpdate(
+        executable: *mut c_void,
+        graph: *mut c_void,
+        error_node: *mut *mut c_void,
+        result: *mut c_int,
+    ) -> CUresult;
+    pub fn cuGraphGetNodes(
+        graph: *mut c_void,
+        nodes: *mut *mut c_void,
+        count: *mut usize,
+    ) -> CUresult;
+    pub fn cuGraphNodeGetType(node: *mut c_void, kind: *mut c_int) -> CUresult;
+    pub fn cuGraphExecKernelNodeSetParams(
+        executable: *mut c_void,
+        node: *mut c_void,
+        parameters: *const crate::graph::KernelNodeParameters,
+    ) -> CUresult;
     pub fn cuInit(flags: c_uint) -> CUresult;
     pub fn cuGetErrorName(error: CUresult, name: *mut *const c_char) -> CUresult;
     pub fn cuGetErrorString(error: CUresult, description: *mut *const c_char) -> CUresult;
@@ -33,6 +60,12 @@ unsafe extern "C" {
     pub fn cuDeviceGetAttribute(value: *mut c_int, attribute: c_int, device: CUdevice) -> CUresult;
     pub fn cuDevicePrimaryCtxRetain(context: *mut CUcontext, device: CUdevice) -> CUresult;
     pub fn cuDevicePrimaryCtxRelease_v2(device: CUdevice) -> CUresult;
+    pub fn cuCtxGetCurrent(context: *mut CUcontext) -> CUresult;
+    pub fn cuCtxGetDevice(device: *mut CUdevice) -> CUresult;
+    pub fn cuCtxDestroy_v2(context: CUcontext) -> CUresult;
+    pub fn cuDeviceGetName(name: *mut c_char, len: c_int, device: CUdevice) -> CUresult;
+    pub fn cuMemGetInfo_v2(free: *mut usize, total: *mut usize) -> CUresult;
+    pub fn cuCtxGetStreamPriorityRange(least: *mut c_int, greatest: *mut c_int) -> CUresult;
     pub fn cuCtxSetCurrent(context: CUcontext) -> CUresult;
     pub fn cuCtxSynchronize() -> CUresult;
     pub fn cuModuleLoadData(module: *mut CUmodule, image: *const c_void) -> CUresult;
@@ -63,6 +96,11 @@ unsafe extern "C" {
         parameters: *mut *mut c_void,
         extra: *mut *mut c_void,
     ) -> CUresult;
+    pub fn cuFuncGetAttribute(
+        value: *mut c_int,
+        attribute: c_int,
+        function: CUfunction,
+    ) -> CUresult;
     pub fn cuFuncSetAttribute(function: CUfunction, attribute: c_int, value: c_int) -> CUresult;
     pub fn cuTensorMapEncodeTiled(
         tensor_map: *mut TensorDescriptor,
@@ -78,7 +116,14 @@ unsafe extern "C" {
         promotion: c_int,
         fill: c_int,
     ) -> CUresult;
-    pub fn cuStreamCreate(stream: *mut CUstream, flags: c_uint) -> CUresult;
+    pub fn cuStreamCreateWithPriority(
+        stream: *mut CUstream,
+        flags: c_uint,
+        priority: c_int,
+    ) -> CUresult;
+    pub fn cuStreamGetPriority(stream: CUstream, priority: *mut c_int) -> CUresult;
+    pub fn cuStreamQuery(stream: CUstream) -> CUresult;
+    pub fn cuEventElapsedTime(milliseconds: *mut f32, start: CUevent, end: CUevent) -> CUresult;
     pub fn cuStreamDestroy_v2(stream: CUstream) -> CUresult;
     pub fn cuStreamSynchronize(stream: CUstream) -> CUresult;
     pub fn cuStreamWaitEvent(stream: CUstream, event: CUevent, flags: c_uint) -> CUresult;

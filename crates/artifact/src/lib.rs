@@ -24,12 +24,14 @@ pub struct Artifact {
     pub architecture: String,
     pub modules: Vec<Module>,
     pub types: Vec<TransferType>,
+    pub alternatives: Vec<Artifact>,
 }
 
 /// Kernel entry points compiled into one CUBIN image.
 #[derive(Serialize, Deserialize, Debug, Default)]
 pub struct Module {
     pub cubin: Vec<u8>,
+    pub ptx: String,
     pub kernels: Vec<Kernel>,
 }
 
@@ -268,6 +270,17 @@ impl Artifact {
     pub fn merge(&mut self, other: Artifact) {
         self.compiler = other.compiler;
         self.architecture = other.architecture;
+        for alternative in other.alternatives {
+            if let Some(existing) = self
+                .alternatives
+                .iter_mut()
+                .find(|existing| existing.architecture == alternative.architecture)
+            {
+                existing.merge(alternative);
+            } else {
+                self.alternatives.push(alternative);
+            }
+        }
         self.modules.extend(other.modules);
         for descriptor in other.types {
             if !self.types.contains(&descriptor) {

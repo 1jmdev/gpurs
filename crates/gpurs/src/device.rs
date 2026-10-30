@@ -71,33 +71,38 @@ impl Gpu {
     /// Opens the device with the given ordinal and loads this executable's kernels.
     #[track_caller]
     pub fn new(ordinal: usize) -> Self {
-        let artifact = embedded_artifact();
-        let context = Context::primary(ordinal);
+        Self::from_context(Context::primary(ordinal))
+    }
+
+    /// Uses a shared or unsafely imported context on this host thread.
+    pub fn from_context(context: Context) -> Self {
+        let _context = context.enter();
+        let mut artifact = embedded_artifact();
         let capability = context.compute_capability();
-        let target: Target = artifact
-            .architecture
-            .parse()
-            .expect("the compiler recorded a valid GPU architecture");
-        if !target.supports(capability) {
-            panic!(
-                "GPU {ordinal} has compute capability {}.{}, but kernels were compiled for {}; \
-                 change the architecture passed to gpurs_build::compile",
-                capability / 10,
-                capability % 10,
-                artifact.architecture,
-            );
-        }
+        let mut candidates = std::mem::take(&mut artifact.alternatives);
+        candidates.push(artifact);
+        let artifact = candidates
+            .into_iter()
+            .filter_map(|artifact| {
+                let target: Target = artifact.architecture.parse().ok()?;
+                let native = target.supports(capability);
+                (native || target.supports_ptx(capability))
+                    .then_some(((native, target.capability()), artifact))
+            })
+            .max_by_key(|(priority, _)| *priority)
+            .map(|(_, artifact)| artifact)
+            .expect("no embedded GPU image or PTX target is compatible with this device");
         let device = Device {
-            transfer: Rc::new(driver::Stream::new()),
-            download: Rc::new(driver::Stream::new()),
-            release: Rc::new(driver::Stream::new()),
+            transfer: Rc::new(driver::Stream::with_context(&context, 0)),
+            download: Rc::new(driver::Stream::with_context(&context, 0)),
+            release: Rc::new(driver::Stream::with_context(&context, 0)),
             modules: artifact.modules.iter().map(|_| OnceCell::new()).collect(),
             instrumented: Cell::new(false),
             artifact,
             kernels: RefCell::default(),
             statuses: RefCell::default(),
             status_count: Cell::new(0),
-            context,
+            context: context.clone(),
         };
         Gpu {
             device: Rc::new(device),
@@ -115,8 +120,37 @@ impl Gpu {
         });
     }
 
+    pub fn context(&self) -> &Context {
+        &self.device.context
+    }
+
+    pub fn stream_with_priority(&self, priority: i32) -> Stream {
+        let _context = self.device.context.enter();
+        Stream::from_driver(
+            self.device.clone(),
+            driver::Stream::with_context(&self.device.context, priority),
+        )
+    }
+
+    /// Imports an external stream belonging to this context.
+    ///
+    /// # Safety
+    /// The handle must belong to this context. Borrowed streams must outlive the returned
+    /// stream and queued uses. Owned streams transfer destruction rights. All external work
+    /// touching tracked storage must follow `Stream::submit_external`'s contract.
+    pub unsafe fn import_stream(
+        &self,
+        raw: *mut std::ffi::c_void,
+        ownership: driver::Ownership,
+    ) -> Stream {
+        let _context = self.device.context.enter();
+        Stream::from_driver(self.device.clone(), unsafe {
+            driver::Stream::from_raw(raw, self.device.context.clone(), ownership)
+        })
+    }
+
     pub fn stream(&self) -> Stream {
-        self.device.context.make_current();
+        let _context = self.device.context.enter();
         Stream::new(self.device.clone())
     }
 
@@ -129,7 +163,7 @@ impl Gpu {
 
     /// Copies the bytes of `data` into a new GPU buffer.
     pub(crate) fn copy<T>(&self, data: &[T]) -> Buffer<T> {
-        self.device.context.make_current();
+        let _context = self.device.context.enter();
         let bytes = size_of_val(data);
         let pointer = driver::allocate_async(bytes, &self.device.transfer);
         let allocation = Rc::new(Allocation::new(self.device.clone(), pointer, bytes));
@@ -148,7 +182,7 @@ impl Gpu {
     /// Allocates `len` zero-initialized elements; `T` must accept the all-zero bit pattern.
     #[track_caller]
     pub fn zeros<T>(&self, len: usize) -> Buffer<T> {
-        self.device.context.make_current();
+        let _context = self.device.context.enter();
         let descriptor = launch::verified::<T>(&self.device);
         if !descriptor.zeroable {
             panic!("`{}` has no valid all-zero representation", descriptor.name);
@@ -206,8 +240,18 @@ impl Device {
                  gpurs_build::compile discovers the launch"
             )
         };
-        let module =
-            self.modules[index].get_or_init(|| Module::load(&self.artifact.modules[index].cubin));
+        let module = self.modules[index].get_or_init(|| {
+            let target: Target = self
+                .artifact
+                .architecture
+                .parse()
+                .expect("valid artifact target");
+            if target.supports(self.context.compute_capability()) {
+                Module::load(&self.artifact.modules[index].cubin)
+            } else {
+                Module::load_ptx(&self.artifact.modules[index].ptx)
+            }
+        });
         let (offsets, size) = gpurs_artifact::parameter_offsets(&metadata.parameters);
         let align = metadata
             .parameters
@@ -280,7 +324,7 @@ impl Device {
 
 impl Drop for Device {
     fn drop(&mut self) {
-        self.context.make_current();
+        let _context = self.context.enter();
         self.context.synchronize();
         for &chunk in self.statuses.borrow().iter() {
             // SAFETY: the context is idle, so no launch still writes status words.

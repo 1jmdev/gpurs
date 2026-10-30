@@ -18,11 +18,11 @@ pub fn compile(
     architecture: &str,
     toolkit: &Path,
     output: &Path,
-) -> Result<Vec<u8>, String> {
+) -> Result<(Vec<u8>, String), String> {
     let scratch = output.with_added_extension(format!("{}.nvvm", std::process::id()));
     fs::create_dir_all(&scratch).map_err(|error| error.to_string())?;
-    let result =
-        ptx(toolkit, ir, architecture).and_then(|ptx| cubin(toolkit, &ptx, architecture, &scratch));
+    let result = ptx(toolkit, ir, architecture)
+        .and_then(|ptx| cubin(toolkit, &ptx, architecture, &scratch).map(|cubin| (cubin, ptx)));
     fs::remove_dir_all(scratch).map_err(|error| error.to_string())?;
     result
 }

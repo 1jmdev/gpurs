@@ -5,13 +5,14 @@ use std::{
 };
 
 use crate::{
-    Stream,
+    Context, Stream,
     ffi::{self, CUfunction, CUmodule},
 };
 
 #[derive(Debug)]
 pub struct Module {
     raw: CUmodule,
+    context: Context,
 }
 
 impl Module {
@@ -23,11 +24,24 @@ impl Module {
             unsafe { ffi::cuModuleLoadData(&mut raw, image.as_ptr().cast()) },
             "cuModuleLoadData",
         );
-        Module { raw }
+        Module {
+            raw,
+            context: Context::current(),
+        }
+    }
+
+    pub fn load_ptx(ptx: &str) -> Self {
+        let ptx = CString::new(ptx).expect("PTX contains no interior NUL bytes");
+        Self::load(ptx.as_bytes_with_nul())
+    }
+
+    pub fn as_raw(&self) -> CUmodule {
+        self.raw
     }
 
     #[track_caller]
     pub fn function(&self, name: &str) -> Function {
+        let _context = self.context.enter();
         let name = CString::new(name).expect("kernel names contain no NUL bytes");
         let mut raw = ptr::null_mut();
         // SAFETY: the module is loaded and `name` is NUL-terminated.
@@ -42,6 +56,7 @@ impl Module {
 impl Drop for Module {
     fn drop(&mut self) {
         // SAFETY: owners drop the module only after all its launches completed.
+        let _context = self.context.enter();
         unsafe { ffi::cuModuleUnload(self.raw) };
     }
 }
@@ -53,6 +68,53 @@ pub struct Function {
 }
 
 impl Function {
+    pub fn as_raw(&self) -> CUfunction {
+        self.raw
+    }
+
+    /// Launches using CUDA's array of pointers to individual parameter values.
+    ///
+    /// # Safety
+    /// Parameters must match the CUDA ABI. The module, context, and device addresses must
+    /// remain live until completion; parameter values need only outlive this call.
+    pub unsafe fn launch_parameters(
+        &self,
+        grid: [u32; 3],
+        block: [u32; 3],
+        shared_bytes: u32,
+        stream: &Stream,
+        parameters: &mut [*mut c_void],
+    ) {
+        ffi::check(
+            unsafe {
+                ffi::cuLaunchKernel(
+                    self.raw,
+                    grid[0],
+                    grid[1],
+                    grid[2],
+                    block[0],
+                    block[1],
+                    block[2],
+                    shared_bytes,
+                    stream.raw,
+                    parameters.as_mut_ptr(),
+                    ptr::null_mut(),
+                )
+            },
+            "cuLaunchKernel",
+        );
+    }
+
+    /// CUDA function attribute identifier, as defined by CUfunction_attribute.
+    pub fn attribute(&self, attribute: i32) -> i32 {
+        let mut value = 0;
+        ffi::check(
+            unsafe { ffi::cuFuncGetAttribute(&mut value, attribute, self.raw) },
+            "cuFuncGetAttribute",
+        );
+        value
+    }
+
     /// Block size that maximizes occupancy for this kernel.
     pub fn preferred_block_size(&self) -> u32 {
         let (mut grid, mut block) = (0, 0);
