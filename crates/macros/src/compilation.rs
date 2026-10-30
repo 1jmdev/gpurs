@@ -73,6 +73,14 @@ pub(crate) fn expand(mut file: File) -> Result<Tokens> {
                 .flatten()
         })
         .collect::<Vec<_>>();
+    let modules = file
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Mod(module) => Some(module.ident.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
     for mut item in file.items {
         if let Item::Macro(item) = &item {
             if item
@@ -92,6 +100,16 @@ pub(crate) fn expand(mut file: File) -> Result<Tokens> {
         if let Item::Use(import) = &item {
             let mut import = import.clone();
             DevicePaths.visit_item_use_mut(&mut import);
+            if let syn::UseTree::Path(path) = &mut import.tree
+                && modules.contains(&path.ident)
+            {
+                let name = &path.ident;
+                let suffix = &path.tree;
+                import.tree = parse_quote!(super::#name::__gpurs_device::#suffix);
+            }
+            if !matches!(import.vis, Visibility::Inherited) {
+                import.vis = parse_quote!(pub(crate));
+            }
             device.push(quote!(#import));
         }
         if let Item::Mod(module) = &mut item {
@@ -150,7 +168,7 @@ pub(crate) fn expand(mut file: File) -> Result<Tokens> {
         #(#host)*
         #[allow(dead_code, unused_imports)]
         pub(crate) mod __gpurs_device {
-            pub(super) use super::*;
+            pub(crate) use super::*;
             #(#device)*
         }
     })
