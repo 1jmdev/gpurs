@@ -65,10 +65,17 @@ pub(crate) fn run_wrapper() -> i32 {
             .env("RUSTC_BOOTSTRAP", "1")
             .env(
                 "CARGO_ENCODED_RUSTFLAGS",
-                "-Zalways-encode-mir\u{1f}-Zmir-opt-level=2\u{1f}-Copt-level=3\\
-                 u{1f}-Cdebug-assertions=no\u{1f}-Coverflow-checks=on\u{1f}--cfg=gpurs_device\\
-                 u{1f}-Zcrate-attr=feature(register_tool)\\
-                 u{1f}-Zcrate-attr=register_tool(gpurs_tool)",
+                [
+                    "-Zalways-encode-mir",
+                    "-Zmir-opt-level=2",
+                    "-Copt-level=3",
+                    "-Cdebug-assertions=no",
+                    "-Coverflow-checks=on",
+                    "--cfg=gpurs_device",
+                    "-Zcrate-attr=feature(register_tool)",
+                    "-Zcrate-attr=register_tool(gpurs_tool)",
+                ]
+                .join("\u{1f}"),
             )
             .output()
             .unwrap_or_else(|error| build::fail(&error.to_string()));
