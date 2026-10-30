@@ -1,4 +1,4 @@
-use gpurs_artifact::{Compatibility, Convergence, Lowering, Memory, Proof};
+use gpurs_artifact::{Compatibility, Lowering, Memory};
 use rustc_data_structures::fx::FxHashSet;
 
 use crate::{
@@ -114,24 +114,6 @@ fn visit(
                 effects.tensor |= primitive.as_ref().is_some_and(|primitive| {
                     primitive.architecture >= 90 && primitive.memory != Memory::None
                 });
-                if let Some(primitive) = &primitive
-                    && active.len() > 1
-                    && (primitive.memory == Memory::SharedAllocation
-                        || primitive.proof != Proof::Initialized
-                            && primitive.convergence != Convergence::None
-                            && active
-                                .iter()
-                                .skip(1)
-                                .any(|caller| attributes::is_device(sess, caller.def.def_id())))
-                {
-                    sess.error_help(
-                        terminator.source_info.span,
-                        "cannot verify shared memory or collective participation inside this \
-                         device helper",
-                        "keep shared-memory declarations and collective operations in the kernel \
-                         body so their synchronization phases can be verified",
-                    );
-                }
                 if let Some(primitive) = primitive
                     && !sess
                         .target
@@ -184,8 +166,10 @@ fn allowed(sess: Session<'_>, instance: Instance, span: Span) -> bool {
     }
     let path = sess.path(instance.def.def_id());
     let approved = attributes::is_device(sess, instance.def.def_id())
+        || attributes::primitive(sess, instance.def.def_id()).is_some()
         || call_graph::leaf(sess, instance)
         || path.starts_with("gpurs::gpu::")
+        || path.starts_with("gpurs::address::")
         || [
             "core::ops::",
             "core::iter::",

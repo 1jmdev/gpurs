@@ -72,6 +72,7 @@ pub struct Obligation {
 
 pub struct Context {
     pub instance: Instance,
+    pub offset: usize,
     /// Child contexts by call block.
     pub calls: BTreeMap<usize, usize>,
 }

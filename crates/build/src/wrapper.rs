@@ -39,6 +39,7 @@ pub(crate) fn run_wrapper() -> i32 {
             .expect("the compiler library has a parent directory")
             .join("metadata");
         let mut command = Command::new(env::var_os("CARGO").unwrap());
+        let mut metadata = Command::new(env::var_os("CARGO").unwrap());
         for (name, _) in env::vars_os() {
             let name = name.to_string_lossy();
             if (name.starts_with("CARGO_") && name != "CARGO_HOME")
@@ -48,17 +49,77 @@ pub(crate) fn run_wrapper() -> i32 {
                 || name == "RUSTFLAGS"
             {
                 command.env_remove(&*name);
+                metadata.env_remove(&*name);
             }
+        }
+        let manifest = Path::new(&env::var_os("CARGO_MANIFEST_DIR").unwrap()).join("Cargo.toml");
+        let output = metadata
+            .args([
+                "metadata",
+                "--all-features",
+                "--format-version=1",
+                "--manifest-path",
+            ])
+            .arg(&manifest)
+            .output()
+            .expect("cargo metadata runs");
+        if !output.status.success() {
+            build::fail(&String::from_utf8_lossy(&output.stderr));
+        }
+        let metadata: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let package = metadata["packages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|package| package["manifest_path"].as_str() == manifest.to_str())
+            .expect("the launch package is in cargo metadata");
+        let dependencies = metadata["resolve"]["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|node| node["id"] == package["id"])
+            .unwrap()["deps"]
+            .as_array()
+            .unwrap();
+        let dependencies: Vec<_> = dependencies
+            .iter()
+            .filter(|dependency| {
+                arguments.iter().any(|argument| {
+                    argument
+                        .to_string_lossy()
+                        .starts_with(&format!("{}=", dependency["name"].as_str().unwrap()))
+                })
+            })
+            .collect();
+        command.arg("check");
+        command.args([
+            "--package",
+            package["id"].as_str().unwrap(),
+            "--no-default-features",
+        ]);
+        for argument in &arguments {
+            if let Some(feature) = argument.to_str().and_then(|argument| {
+                argument
+                    .strip_prefix("feature=\"")
+                    .and_then(|feature| feature.strip_suffix('"'))
+            }) {
+                command.args([
+                    "--features",
+                    &format!("{}/{feature}", package["name"].as_str().unwrap()),
+                ]);
+            }
+        }
+        for dependency in &dependencies {
+            command.args(["--package", dependency["pkg"].as_str().unwrap()]);
         }
         let output = command
             .args([
-                "check",
                 "--quiet",
                 "--lib",
                 "--message-format=json",
                 "--manifest-path",
             ])
-            .arg(env::var_os("GPURS_RUNTIME_MANIFEST").unwrap())
+            .arg(&manifest)
             .arg("--target-dir")
             .arg(&directory)
             .env("RUSTC", &arguments[1])
@@ -82,7 +143,7 @@ pub(crate) fn run_wrapper() -> i32 {
         if !output.status.success() {
             build::fail(&String::from_utf8_lossy(&output.stderr));
         }
-        let mut runtime = None;
+        let mut libraries = Vec::new();
         for line in output.stdout.split(|byte| *byte == b'\n') {
             let Ok(message) = serde_json::from_slice::<serde_json::Value>(line) else {
                 continue;
@@ -90,8 +151,21 @@ pub(crate) fn run_wrapper() -> i32 {
             if message["reason"] == "compiler-artifact" {
                 for file in message["filenames"].as_array().unwrap() {
                     let file = file.as_str().unwrap();
-                    if message["target"]["name"] == "gpurs" && file.ends_with(".rmeta") {
-                        runtime = Some(file.to_owned());
+                    if file.ends_with(".rmeta") || file.ends_with(".so") {
+                        for dependency in &dependencies {
+                            if message["package_id"] == dependency["pkg"] {
+                                libraries.push((
+                                    dependency["name"].as_str().unwrap().to_owned(),
+                                    file.to_owned(),
+                                ));
+                            }
+                        }
+                        if message["package_id"] == package["id"] {
+                            libraries.push((
+                                message["target"]["name"].as_str().unwrap().to_owned(),
+                                file.to_owned(),
+                            ));
+                        }
                     }
                     arguments.extend([
                         "-L".into(),
@@ -101,10 +175,12 @@ pub(crate) fn run_wrapper() -> i32 {
                 }
             }
         }
-        let runtime = runtime.expect("runtime compilation produces metadata");
         for argument in &mut arguments {
-            if argument.to_string_lossy().starts_with("gpurs=") {
-                *argument = format!("gpurs={runtime}").into();
+            if let Some((name, file)) = libraries
+                .iter()
+                .find(|(name, _)| argument.to_string_lossy().starts_with(&format!("{name}=")))
+            {
+                *argument = format!("{name}={file}").into();
             }
         }
     }

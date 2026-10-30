@@ -5,7 +5,7 @@ use crate::{
     stable::{Instance, TerminatorKind},
     verify::{
         engine::{Bound, Direction},
-        symbolic::{Fact, Polynomial, Requirement},
+        symbolic::{Fact, Polynomial, Predicate, Relation, Requirement},
     },
 };
 
@@ -84,8 +84,30 @@ impl Analysis<'_, '_> {
             }
             exits[block] = Some(state);
         }
-        if self.collect && self.frames.len() == 1 {
-            self.collective_control(&exits);
+        if self.collect && self.quiet == 0 {
+            for (block, state) in exits.iter().enumerate() {
+                if let Some(state) = state
+                    && let TerminatorKind::SwitchInt { discr, targets } =
+                        &body.blocks[block].terminator.kind
+                {
+                    let value = self.operand(discr, state);
+                    let node = self.contexts[context].offset + block;
+                    self.comparisons[node] = value
+                        .guard(1)
+                        .and_then(|facts| facts.first())
+                        .map(|fact| fact.predicate.clone())
+                        .or_else(|| {
+                            let [(constant, _)] = targets.branches().collect::<Vec<_>>()[..] else {
+                                return None;
+                            };
+                            Some(Predicate::new(
+                                value.integer.clone()?.offset(-(constant as i128))?,
+                                Relation::Zero,
+                            ))
+                        });
+                    self.branches[node] = Some(value);
+                }
+            }
         }
         self.frames.pop();
         exit.map(|state| {

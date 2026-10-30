@@ -62,7 +62,9 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                 .cloned()
                 .unwrap_or_default()
         });
-        let name = self.module.function(instance, certificate, false);
+        let mut path = self.path.clone();
+        path.push((self.instance, self.block, self.copy.clone()));
+        let name = self.module.specialize(instance, certificate, false, path);
         self.invoke_named(&name, instance, arguments, destination);
     }
 

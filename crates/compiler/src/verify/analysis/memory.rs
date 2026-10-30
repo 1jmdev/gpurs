@@ -11,7 +11,6 @@ use crate::{
 
 impl Analysis<'_, '_> {
     pub fn races(&mut self) {
-        let body = self.sess.body(self.kernel);
         for index in 0..self.accesses.len() {
             if !self.accesses[index].write {
                 continue;
@@ -92,8 +91,18 @@ impl Analysis<'_, '_> {
                 }
                 let apart = |barriers: &FxHashSet<usize>| {
                     access.block != other.block
-                        && !control::reachable(&body, access.block, other.block, barriers)
-                        && !control::reachable(&body, other.block, access.block, barriers)
+                        && !control::reachable(
+                            &self.successors,
+                            access.block,
+                            other.block,
+                            barriers,
+                        )
+                        && !control::reachable(
+                            &self.successors,
+                            other.block,
+                            access.block,
+                            barriers,
+                        )
                 };
                 let other_comparisons = proof::comparisons(&other.facts);
                 let separated = shared
@@ -131,14 +140,17 @@ impl Analysis<'_, '_> {
                 .iter()
                 .filter(|write| write.write && write.origin.region == access.origin.region)
                 .find_map(|write| {
-                    if control::reachable(&body, write.block, access.block, &self.barriers)
-                        || !control::reachable(
-                            &body,
-                            write.block,
-                            access.block,
-                            &FxHashSet::default(),
-                        )
-                    {
+                    if control::reachable(
+                        &self.successors,
+                        write.block,
+                        access.block,
+                        &self.barriers,
+                    ) || !control::reachable(
+                        &self.successors,
+                        write.block,
+                        access.block,
+                        &FxHashSet::default(),
+                    ) {
                         return None;
                     }
                     let index = write.origin.index.as_ref()?;

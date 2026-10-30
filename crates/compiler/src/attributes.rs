@@ -1,6 +1,6 @@
 use std::rc::Rc;
 
-use gpurs_artifact::Primitive;
+use gpurs_artifact::{Lowering, Memory, Primitive, Proof};
 
 use crate::stable::{DefId, QUERIES, Session};
 
@@ -15,7 +15,35 @@ pub fn is_fast_math(sess: Session<'_>, def: DefId) -> bool {
 
 /// The `#[gpurs::primitive]` definition of `def`, or of the trait item it implements.
 pub fn primitive(sess: Session<'_>, def: DefId) -> Option<Rc<Primitive>> {
-    if sess.is_local(def) || sess.crate_name(def) != "gpurs" {
+    if let Some(text) = sess.tool_attr(def, "unsafe_primitive") {
+        return QUERIES.with(|queries| {
+            queries
+                .primitives
+                .borrow_mut()
+                .entry(def)
+                .or_insert_with(|| {
+                    let primitive = Primitive::decode(&text);
+                    if !sess.is_unsafe_function(def)
+                        || !matches!(primitive.lowering, Lowering::Assembly { .. })
+                        || primitive.proof != Proof::Varying
+                        || !matches!(
+                            primitive.memory,
+                            Memory::None
+                                | Memory::Read
+                                | Memory::Write
+                                | Memory::Encapsulated
+                                | Memory::BlockFence
+                        )
+                    {
+                        sess.error(def.span(), "invalid unsafe GPU primitive contract");
+                        return None;
+                    }
+                    Some(Rc::new(primitive))
+                })
+                .clone()
+        });
+    }
+    if !sess.is_runtime(def) {
         return None;
     }
     // Implementations of gpurs traits share the trait item's definition; implementations of

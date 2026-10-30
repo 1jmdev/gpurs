@@ -13,9 +13,14 @@ pub trait DeviceReferenceMut<T>: DeviceReference<T> {}
 
 pub(crate) mod sealed {
     use super::{Buffer, Span};
+    use crate::ExternalAccess;
 
     pub trait Reference<T> {
         fn buffer(&self) -> &Buffer<T>;
+
+        fn dependencies(&self) -> &[ExternalAccess] {
+            &[]
+        }
 
         fn source(&self) -> Option<Span<'_>> {
             None

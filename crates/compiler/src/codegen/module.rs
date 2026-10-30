@@ -7,7 +7,7 @@ use super::{
     function::FunctionBuilder,
     ir::{self, Access, Ordering, Type},
     layout,
-    shared_memory::SharedAllocations,
+    shared_memory::{CallPath, SharedAllocations},
 };
 use crate::{
     kernel::Signature,
@@ -18,7 +18,7 @@ use crate::{
 
 /// One copy of a function: certified with its certificate, or instrumented; `linear` folds a
 /// one-dimensional launch geometry.
-type Copy = (Instance, Option<Certificate>, bool);
+type Copy = (Instance, Option<Certificate>, bool, CallPath);
 
 /// One NVVM IR module holding every device function reachable from the requested kernels.
 pub struct ModuleBuilder<'sess> {
@@ -63,7 +63,17 @@ impl<'sess> ModuleBuilder<'sess> {
         certificate: Option<Certificate>,
         linear: bool,
     ) -> String {
-        let copy = (instance, certificate, linear);
+        self.specialize(instance, certificate, linear, Vec::new())
+    }
+
+    pub fn specialize(
+        &mut self,
+        instance: Instance,
+        certificate: Option<Certificate>,
+        linear: bool,
+        path: CallPath,
+    ) -> String {
+        let copy = (instance, certificate, linear, path);
         if let Some(name) = self.functions.get(&copy) {
             return name.clone();
         }
@@ -82,10 +92,11 @@ impl<'sess> ModuleBuilder<'sess> {
     pub fn finish(mut self) -> (String, SharedMemory) {
         while let Some(copy) = self.queue.pop() {
             let name = self.functions[&copy].clone();
-            let (instance, certificate, linear) = copy;
+            let (instance, certificate, linear, path) = copy;
             let mut builder = FunctionBuilder::new(&mut self, instance);
             builder.certificate = certificate;
             builder.linear = linear;
+            builder.path = path;
             builder.lower(&name);
         }
         self.ir.define(self.failure("gpurs.fail", true));

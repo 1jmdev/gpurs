@@ -8,6 +8,7 @@ use super::{
     layout::{self, PassMode, Shape},
     module::ModuleBuilder,
     place::{Operand, Place, Value},
+    shared_memory::CallPath,
     unroll::{self, Loop},
 };
 use crate::{
@@ -52,6 +53,7 @@ pub struct FunctionBuilder<'m, 'sess> {
     /// Whether the launch has one block and thread dimension.
     pub linear: bool,
     pub block: usize,
+    pub path: CallPath,
 }
 
 impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
@@ -79,6 +81,7 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
             guarded: FxHashSet::default(),
             linear: false,
             block: 0,
+            path: Vec::new(),
         }
     }
 

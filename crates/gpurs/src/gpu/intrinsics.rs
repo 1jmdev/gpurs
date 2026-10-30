@@ -168,6 +168,7 @@ asynchronous! {
 }
 
 #[track_caller]
+#[cfg_attr(gpurs_device, rustc_diagnostic_item = "gpurs_runtime")]
 pub fn host() -> ! {
     panic!("GPU built-ins can only be called from #[gpu] code running on the GPU")
 }

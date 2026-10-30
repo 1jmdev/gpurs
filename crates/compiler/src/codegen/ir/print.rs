@@ -109,7 +109,7 @@ impl Display for Function {
             .collect();
         writeln!(
             f,
-            "define {}{} @{}({}){} {{",
+            "define {}{} @{}({}){} convergent {{",
             if self.internal { "internal " } else { "" },
             self.result,
             self.name,
@@ -236,7 +236,11 @@ impl Function {
                     .iter()
                     .map(|value| Typed(value).to_string())
                     .collect();
-                write!(f, "({})", arguments.join(", "))
+                write!(f, "({})", arguments.join(", "))?;
+                if matches!(callee, Callee::Assembly(_, _, true)) {
+                    write!(f, " convergent")?;
+                }
+                Ok(())
             }
             Instruction::Phi(ty, incoming) => {
                 let edges: Vec<_> = incoming

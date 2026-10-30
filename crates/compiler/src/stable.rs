@@ -50,6 +50,7 @@ use rustc_public::{
     ty::MirConst,
     visitor::{Visitable, Visitor},
 };
+use rustc_span::Symbol;
 
 use crate::{call_graph::Function, kernel::Signature};
 
@@ -310,8 +311,19 @@ impl<'tcx> Session<'tcx> {
         *self.path(def) == *expected
     }
 
-    pub fn is_local(&self, def: DefId) -> bool {
-        self.internal_def(def).is_local()
+    pub fn is_unsafe_function(&self, def: DefId) -> bool {
+        self.tcx
+            .fn_sig(self.internal_def(def))
+            .skip_binder()
+            .skip_binder()
+            .safety()
+            .is_unsafe()
+    }
+
+    pub fn is_runtime(&self, def: DefId) -> bool {
+        self.tcx
+            .get_diagnostic_item(Symbol::intern("gpurs_runtime"))
+            .is_some_and(|runtime| runtime.krate == self.internal_def(def).krate)
     }
 
     pub fn crate_name(&self, def: DefId) -> String {

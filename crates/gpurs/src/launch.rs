@@ -196,6 +196,13 @@ impl<S: Launch> KernelLaunch<'_, S> {
             self.accesses
                 .push(Access::read(source.allocation, source.bytes::<u8>()));
         }
+        for access in value.dependencies() {
+            assert!(
+                Rc::ptr_eq(&self.stream.stream().device, &access.0.allocation.device),
+                "descriptor storage belongs to another GPU"
+            );
+            self.accesses.push(access.0.clone());
+        }
     }
 
     fn effect(&self, mutable: bool) -> bool {

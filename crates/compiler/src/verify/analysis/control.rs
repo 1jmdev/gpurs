@@ -282,7 +282,7 @@ impl Analysis<'_, '_> {
 
     /// Rejects collectives that threads may reach on different paths of the kernel body, and
     /// records which branches control each block.
-    pub fn collective_control(&mut self, states: &[Option<State>]) {
+    pub fn collective_control(&mut self) {
         if self.collectives.is_empty()
             && !self
                 .accesses
@@ -291,16 +291,14 @@ impl Analysis<'_, '_> {
         {
             return;
         }
-        let body = self.sess.body(self.kernel);
-        let count = body.blocks.len();
+        let count = self.successors.len();
         // Normal edges reversed, entered at a virtual exit that blocks without successors reach.
         let mut reversed = vec![Vec::new(); count + 1];
-        for block in 0..count {
-            let successors = normal_successors(&body, block);
+        for (block, successors) in self.successors.iter().enumerate() {
             if successors.is_empty() {
                 reversed[count].push(block);
             }
-            for successor in successors {
+            for &successor in successors {
                 reversed[successor].push(block);
             }
         }
@@ -309,32 +307,16 @@ impl Analysis<'_, '_> {
         let postdominates = |first: usize, second: usize| {
             !postdominators.is_reachable(second) || postdominators.dominates(first, second)
         };
-        for (block, state) in states.iter().enumerate() {
-            let Some(state) = state else { continue };
-            let TerminatorKind::SwitchInt { discr, targets } = &body.blocks[block].terminator.kind
-            else {
+        for block in 0..count {
+            let Some(value) = &self.branches[block] else {
                 continue;
             };
-            let value = self.operand(discr, state);
-            self.comparisons[block] = value
-                .guard(1)
-                .and_then(|facts| facts.first())
-                .map(|fact| fact.predicate.clone())
-                .or_else(|| {
-                    let [(constant, _)] = targets.branches().collect::<Vec<_>>()[..] else {
-                        return None;
-                    };
-                    Some(Predicate::new(
-                        value.integer.clone()?.offset(-(constant as i128))?,
-                        Relation::Zero,
-                    ))
-                });
             let reconvergence: FxHashSet<usize> = (0..count)
                 .filter(|&candidate| candidate != block && postdominates(candidate, block))
                 .collect();
-            for successor in normal_successors(&body, block) {
+            for successor in self.successors[block].clone() {
                 for (target, controls) in self.controls.iter_mut().enumerate() {
-                    if reachable(&body, successor, target, &reconvergence) {
+                    if reachable(&self.successors, successor, target, &reconvergence) {
                         controls.push((block, successor));
                     }
                 }
@@ -342,7 +324,7 @@ impl Analysis<'_, '_> {
             for &(collective, permitted, span) in &self.collectives {
                 if value.variance > permitted
                     && !postdominates(collective, block)
-                    && reachable(&body, block, collective, &reconvergence)
+                    && reachable(&self.successors, block, collective, &reconvergence)
                 {
                     self.sess.error_help(
                         span,
@@ -360,7 +342,12 @@ impl Analysis<'_, '_> {
     }
 }
 
-pub fn reachable(body: &Body, start: usize, target: usize, barriers: &FxHashSet<usize>) -> bool {
+pub fn reachable(
+    successors: &[Vec<usize>],
+    start: usize,
+    target: usize,
+    barriers: &FxHashSet<usize>,
+) -> bool {
     let mut pending = vec![start];
     let mut visited = FxHashSet::default();
     while let Some(block) = pending.pop() {
@@ -370,7 +357,7 @@ pub fn reachable(body: &Body, start: usize, target: usize, barriers: &FxHashSet<
         if block == target {
             return true;
         }
-        pending.extend(normal_successors(body, block));
+        pending.extend(successors[block].iter().copied());
     }
     false
 }

@@ -4,12 +4,12 @@ use gpurs_artifact::Parameter;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 
 use super::{
-    Access, Context, Frame, Obligation, Origin, Pointer, Region, State, Value, arithmetic,
+    Access, Context, Frame, Obligation, Origin, Pointer, Region, State, Value, arithmetic, control,
 };
 use crate::{
     kernel::KernelParameter,
     stable,
-    stable::{Instance, RigidTy, Session, Span},
+    stable::{Instance, RigidTy, Session, Span, TerminatorKind},
     verify::{
         engine::{Engine, Variable},
         render::Names,
@@ -32,6 +32,8 @@ pub struct Analysis<'a, 'sess> {
     pub collectives: Vec<(usize, u8, Span)>,
     pub controls: Vec<Vec<(usize, usize)>>,
     pub comparisons: Vec<Option<Predicate>>,
+    pub branches: Vec<Option<Value>>,
+    pub successors: Vec<Vec<usize>>,
     pub requirements: Vec<Clause>,
     /// Slice parameters whose length guards the linear index, for launch extent inference.
     pub lengths: Vec<usize>,
@@ -77,6 +79,8 @@ impl<'a, 'sess> Analysis<'a, 'sess> {
             collectives: Vec::new(),
             controls: vec![Vec::new(); blocks],
             comparisons: vec![None; blocks],
+            branches: Vec::new(),
+            successors: Vec::new(),
             requirements: Vec::new(),
             lengths: Vec::new(),
             uses_index: false,
@@ -132,8 +136,11 @@ impl<'a, 'sess> Analysis<'a, 'sess> {
         let context = self.context(None, self.kernel);
         self.function(self.kernel, context, state.clone())?;
         self.collect = true;
-        self.function(self.kernel, context, state)
-            .map(|(state, _)| state)
+        let result = self
+            .function(self.kernel, context, state)
+            .map(|(state, _)| state);
+        self.collective_control();
+        result
     }
 
     /// The context of `instance` called from `parent`, stable across passes.
@@ -143,13 +150,36 @@ impl<'a, 'sess> Analysis<'a, 'sess> {
         {
             return *child;
         }
+        let body = self.sess.body(instance);
+        let offset = self.successors.len();
+        self.successors.extend((0..body.blocks.len()).map(|block| {
+            control::normal_successors(&body, block)
+                .into_iter()
+                .map(|successor| offset + successor)
+                .collect()
+        }));
+        self.branches.resize(self.successors.len(), None);
+        self.comparisons.resize(self.successors.len(), None);
+        self.controls.resize(self.successors.len(), Vec::new());
         self.contexts.push(Context {
             instance,
+            offset,
             calls: BTreeMap::new(),
         });
         let child = self.contexts.len() - 1;
         if let Some((context, block)) = parent {
             self.contexts[context].calls.insert(block, child);
+            if self.quiet > 0 {
+                return child;
+            }
+            let caller = self.contexts[context].offset + block;
+            let continuation = self.successors[caller].clone();
+            self.successors[caller] = vec![offset];
+            for (block, data) in body.blocks.iter().enumerate() {
+                if matches!(data.terminator.kind, TerminatorKind::Return) {
+                    self.successors[offset + block] = continuation.clone();
+                }
+            }
         }
         child
     }
@@ -158,9 +188,9 @@ impl<'a, 'sess> Analysis<'a, 'sess> {
         self.frames.last().unwrap()
     }
 
-    /// The kernel block that the current position belongs to.
+    /// The context-specific block that the current position belongs to.
     pub fn kernel_block(&self) -> usize {
-        self.frames[0].block
+        self.contexts[self.frame().context].offset + self.frame().block
     }
 
     pub fn engine<'b>(&'b self, facts: &'b [Fact]) -> Engine<'b> {

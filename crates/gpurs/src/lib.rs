@@ -8,6 +8,10 @@
 //! a context per thread; operations restore the previously current context. Raw CUDA work
 //! must use the explicit external submission protocol to participate in dependency tracking.
 
+#![cfg_attr(gpurs_device, feature(rustc_attrs))]
+#![cfg_attr(gpurs_device, allow(internal_features))]
+
+mod address;
 mod buffer;
 mod device;
 pub mod gpu;
@@ -21,11 +25,12 @@ mod stream;
 mod tensor_map;
 mod tracking;
 
+pub use address::{DeviceAddress, DeviceDescriptor};
 pub use buffer::{Buffer, DeviceSlice, DeviceSliceMut, DeviceValue, Pending, View, ViewMut};
 pub use device::Gpu;
 pub use gpu::{BFloat16, Half};
 pub use gpurs_driver::{Context, ContextGuard, KernelNodeParameters, Ownership};
-pub use gpurs_macros::gpu;
+pub use gpurs_macros::{gpu, unsafe_primitive};
 pub use graph::{CaptureStream, Graph, GraphExec};
 pub use interop::{Event, ExternalAccess};
 pub use memory::{DeviceAllocation, PinnedBuffer, Transfer};

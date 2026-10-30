@@ -67,3 +67,21 @@ pub fn primitive(attribute: TokenStream, item: TokenStream) -> TokenStream {
         .unwrap_or_else(Error::into_compile_error)
         .into()
 }
+
+/// Declares an unsafe PTX extension using the primitive definition format.
+/// Operand and result types follow the Rust signature; LLVM constraints bind their scalar
+/// leaves. Declare minimum architecture, compatibility, convergence, memory and Varying proof.
+/// Set `volatile = true` for observable register-only operations.
+///
+/// # Safety
+/// The declaration must be an unsafe function. Its caller contract must cover instruction
+/// validity, operand constraints, memory bounds, initialization, aliasing, asynchronous
+/// completion, and every required participant. Memory effects and convergence must describe
+/// all effects; Encapsulated delegates memory verification to that contract. Extensions cannot
+/// manufacture built-in proofs. Memory operations receive a compiler memory clobber.
+#[proc_macro_attribute]
+pub fn unsafe_primitive(attribute: TokenStream, item: TokenStream) -> TokenStream {
+    primitive::extension(attribute.into(), item.into())
+        .unwrap_or_else(Error::into_compile_error)
+        .into()
+}

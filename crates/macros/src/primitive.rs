@@ -1,16 +1,26 @@
-use gpurs_artifact::{Lowering, Primitive};
+use std::env;
+
+use gpurs_artifact::{Lowering, Memory, Primitive, Proof};
 use proc_macro2::TokenStream as Tokens;
 use quote::quote;
 use serde_json::{Map, Value};
 use syn::{
     Attribute, Block, Error, Expr, ExprLit, ExprUnary, FnArg, Lit, LitStr, MetaNameValue, Pat,
-    Path, Result, Signature, Token, UnOp, Visibility,
+    Path, Result, Safety, Signature, Token, UnOp, Visibility,
     parse::{ParseStream, Parser},
     punctuated::Punctuated,
     spanned::Spanned,
 };
 
 pub(crate) fn expand(attribute: Tokens, item: Tokens) -> Result<Tokens> {
+    declaration(attribute, item, false)
+}
+
+pub(crate) fn extension(attribute: Tokens, item: Tokens) -> Result<Tokens> {
+    declaration(attribute, item, true)
+}
+
+fn declaration(attribute: Tokens, item: Tokens, extension: bool) -> Result<Tokens> {
     let span = attribute.span();
     let fields = Punctuated::<MetaNameValue, Token![,]>::parse_terminated.parse2(attribute)?;
     let definition = fields
@@ -31,6 +41,25 @@ pub(crate) fn expand(attribute: Tokens, item: Tokens) -> Result<Tokens> {
         ))
     })
     .parse2(item)?;
+    if extension
+        && (!matches!(signature.safety, Safety::Unsafe(_))
+            || !matches!(primitive.lowering, Lowering::Assembly { .. })
+            || primitive.proof != Proof::Varying
+            || !matches!(
+                primitive.memory,
+                Memory::None
+                    | Memory::Read
+                    | Memory::Write
+                    | Memory::Encapsulated
+                    | Memory::BlockFence
+            ))
+    {
+        return Err(Error::new(
+            signature.span(),
+            "extensions require an unsafe assembly declaration, Varying proof, and None, Read, \
+             Write, Encapsulated or BlockFence memory effects",
+        ));
+    }
     let inline = body.as_ref().map(|_| quote!(#[inline]));
     let body = match (&primitive.lowering, body) {
         (Lowering::Body, Some(body)) => quote!(#body),
@@ -52,19 +81,31 @@ pub(crate) fn expand(attribute: Tokens, item: Tokens) -> Result<Tokens> {
                     },
                     FnArg::Receiver(_) => None,
                 });
+            let host = if extension {
+                quote!(panic!("GPU primitives can only run on the GPU"))
+            } else {
+                quote!(crate::gpu::intrinsics::host())
+            };
             quote!({
                 let _ = (#(#arguments,)*);
-                crate::gpu::intrinsics::host()
+                #host
             })
         }
     };
     let encoded = primitive.encode();
     let documentation = format!("<!-- gpurs::primitive={encoded} -->");
+    let attribute = if extension && env::var_os("GPURS_DEVICE_BUILD").is_some() {
+        quote!(#[gpurs_tool::unsafe_primitive = #encoded])
+    } else if extension {
+        quote!(#[cfg_attr(gpurs_device, gpurs_tool::unsafe_primitive = #encoded)])
+    } else {
+        quote!(#[cfg_attr(gpurs_device, gpurs_tool::primitive = #encoded)])
+    };
     Ok(quote! {
         #(#attributes)*
         #inline
         #[doc = #documentation]
-        #[cfg_attr(gpurs_device, gpurs_tool::primitive = #encoded)]
+        #attribute
         #visibility #signature #body
     })
 }
@@ -87,6 +128,10 @@ fn value(expression: &Expr) -> Result<Value> {
             lit: Lit::Int(number),
             ..
         }) => number.base10_parse::<u64>()?.into(),
+        Expr::Lit(ExprLit {
+            lit: Lit::Bool(value),
+            ..
+        }) => value.value.into(),
         Expr::Unary(ExprUnary {
             op: UnOp::Neg(_),
             expr,

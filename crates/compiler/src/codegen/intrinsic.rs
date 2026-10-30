@@ -356,8 +356,18 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                 self.ir.call(symbol, result, operands)
             }
             Lowering::Assembly { text, constraints } => {
-                let effects =
-                    primitive.memory != Memory::None || primitive.convergence != Convergence::None;
+                let constraints =
+                    if primitive.memory != Memory::None && !constraints.contains("~{memory}") {
+                        format!(
+                            "{constraints}{}~{{memory}}",
+                            if constraints.is_empty() { "" } else { "," }
+                        )
+                    } else {
+                        constraints
+                    };
+                let effects = primitive.volatile
+                    || primitive.memory != Memory::None
+                    || primitive.convergence != Convergence::None;
                 let operands = arguments
                     .iter()
                     .flat_map(|argument| self.registers(argument))
@@ -402,7 +412,12 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                 let size = layout.size().bytes().max(1) as u64;
                 let (base, offset) = self.module.shared.allocate(
                     &mut self.module.ir,
-                    (self.instance, self.block, self.copy.clone()),
+                    (
+                        self.instance,
+                        self.block,
+                        self.copy.clone(),
+                        self.path.clone(),
+                    ),
                     size,
                     layout.align(),
                 );

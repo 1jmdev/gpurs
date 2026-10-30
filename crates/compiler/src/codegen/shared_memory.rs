@@ -6,9 +6,12 @@ use crate::stable::Instance;
 
 const STATIC_LIMIT: u64 = 48 * 1024;
 
+pub type CallPath = Vec<(Instance, usize, Vec<u64>)>;
+type Site = (Instance, usize, Vec<u64>, CallPath);
+
 pub struct SharedAllocations {
     pub required: SharedMemory,
-    slots: FxHashMap<(Instance, usize, Vec<u64>), (Value, u64)>,
+    slots: FxHashMap<Site, (Value, u64)>,
 }
 
 impl Default for SharedAllocations {
@@ -27,7 +30,7 @@ impl SharedAllocations {
     pub fn allocate(
         &mut self,
         module: &mut Module,
-        site: (Instance, usize, Vec<u64>),
+        site: Site,
         size: u64,
         align: u64,
     ) -> (Value, u64) {

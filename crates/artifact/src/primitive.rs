@@ -20,6 +20,8 @@ pub struct Primitive {
     pub convergence: Convergence,
     pub memory: Memory,
     pub proof: Proof,
+    #[serde(default)]
+    pub volatile: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
