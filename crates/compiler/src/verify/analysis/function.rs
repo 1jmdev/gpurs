@@ -21,7 +21,7 @@ impl Analysis<'_, '_> {
         context: usize,
         entry: State,
     ) -> Option<(State, Value)> {
-        let body = self.body(instance);
+        let body = self.sess.body(instance);
         let base = entry.slots.len() - body.locals().len();
         self.frames.push(Frame {
             body: body.clone(),

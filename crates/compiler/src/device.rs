@@ -5,18 +5,15 @@ use rustc_driver::{Callbacks, Compilation};
 use rustc_interface::{interface::Compiler, util};
 
 use crate::{
-    attributes,
     cache::Cache,
     discovery::HostView,
-    paths,
-    queries::Scope,
-    stable::{self, CrateDef, GenericArgKind, GenericArgs, Instance, Sess, Session, Ty, TyCtxt},
+    stable::{self, CrateDef, GenericArgKind, GenericArgs, Instance, Session, Ty, TyCtxt},
 };
 
 pub struct DeviceView;
 
 impl DeviceView {
-    fn compile(&self, sess: Sess<'_>) -> Result<(), String> {
+    fn compile(&self, sess: Session<'_>) -> Result<(), String> {
         let mut host = HostView::default();
         host.analyze(sess);
         let architecture = env::var("GPURS_ARCHITECTURE").unwrap();
@@ -25,7 +22,8 @@ impl DeviceView {
         let definitions: Vec<_> = rustc_public::all_local_items()
             .into_iter()
             .filter_map(|item| {
-                attributes::marker(sess, item.def_id(), "device").map(|tail| (item, tail))
+                sess.tool_attr(item.def_id(), "device")
+                    .map(|tail| (item, tail))
             })
             .collect();
         let mut cache = Cache::new(&directory)?;
@@ -34,7 +32,8 @@ impl DeviceView {
         for launch in &host.launches {
             let Some((definition, _)) = definitions.iter().find(|(definition, tail)| {
                 *tail == launch.tail
-                    && paths::module_path(sess, definition.def_id())
+                    && sess
+                        .module_path(definition.def_id())
                         .strip_suffix("::__gpurs_device")
                         == Some(launch.module.as_str())
             }) else {
@@ -56,16 +55,13 @@ impl DeviceView {
                     .0
                     .iter()
                     .map(|argument| match argument {
-                        GenericArgKind::Lifetime(region) => {
-                            GenericArgKind::Lifetime(region.clone())
-                        }
-                        GenericArgKind::Const(value) => GenericArgKind::Const(value.clone()),
                         GenericArgKind::Type(_) => {
                             GenericArgKind::Type(arguments.next().unwrap_or_else(|| {
                                 sess.err(format!("not enough type arguments for `{}`", launch.key));
                                 Ty::bool_ty()
                             }))
                         }
+                        argument => argument.clone(),
                     })
                     .collect(),
             );
@@ -112,7 +108,6 @@ impl Callbacks for DeviceView {
     }
     fn after_analysis(&mut self, _: &Compiler, tcx: TyCtxt<'_>) -> Compilation {
         stable::run(tcx, || {
-            let _queries = Scope;
             let session = Session::new(tcx);
             if let Err(message) = self.compile(session) {
                 session.err(message);

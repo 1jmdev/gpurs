@@ -1,35 +1,38 @@
 //! Transfer-type verification.
 
+use std::rc::Rc;
+
 use gpurs_artifact::TransferType;
 
-use crate::{
-    paths,
-    stable::{AdtKind, CrateDef, RigidTy, Sess, Ty, TyKind},
-};
+use crate::stable::{AdtKind, CrateDef, RigidTy, Session, Ty, TyKind};
 
-pub fn tensor_map(sess: Sess<'_>, ty: Ty) -> bool {
-    matches!(ty.kind(), TyKind::RigidTy(RigidTy::Adt(definition, _))
-        if paths::is(sess, definition.def_id(), "gpurs::gpu::tensor::source::TensorMap"))
+pub fn tensor_map(sess: Session<'_>, ty: Ty) -> bool {
+    adt_path(sess, ty).as_deref() == Some("gpurs::gpu::tensor::source::TensorMap")
+}
+
+fn adt_path(sess: Session<'_>, ty: Ty) -> Option<Rc<str>> {
+    match ty.kind() {
+        TyKind::RigidTy(RigidTy::Adt(definition, _)) => Some(sess.path(definition.def_id())),
+        _ => None,
+    }
 }
 
 /// Rejects types that cannot be copied bytewise between host and device.
-pub fn check(sess: Sess<'_>, ty: Ty) -> Result<(), String> {
-    if tensor_map(sess, ty) {
-        return Err(format!(
-            "`{}` is an opaque GPU descriptor; construct it with Gpu::tensor_map and pass it by shared reference",
-            sess.type_name(ty)
-        ));
-    }
-    if matches!(ty.kind(), TyKind::RigidTy(RigidTy::Adt(definition, _))
-        if paths::is(sess, definition.def_id(), "gpurs::gpu::tensor::tile::SharedTile"))
-    {
-        return Err("block-shared tiles are created only by GPU pipelines".to_owned());
-    }
-    if matches!(ty.kind(), TyKind::RigidTy(RigidTy::Adt(definition, _))
-        if ["gpurs::gpu::thread::Block", "gpurs::gpu::tensor::stage::Initialized"]
-            .iter().any(|path| paths::is(sess, definition.def_id(), path)))
-    {
-        return Err("GPU execution proofs cannot be transferred from the host".to_owned());
+pub fn check(sess: Session<'_>, ty: Ty) -> Result<(), String> {
+    match adt_path(sess, ty).as_deref() {
+        Some("gpurs::gpu::tensor::source::TensorMap") => {
+            return Err(format!(
+                "`{}` is an opaque GPU descriptor; construct it with Gpu::tensor_map and pass it by shared reference",
+                sess.type_name(ty)
+            ));
+        }
+        Some("gpurs::gpu::tensor::tile::SharedTile") => {
+            return Err("block-shared tiles are created only by GPU pipelines".to_owned());
+        }
+        Some("gpurs::gpu::thread::Block" | "gpurs::gpu::tensor::stage::Initialized") => {
+            return Err("GPU execution proofs cannot be transferred from the host".to_owned());
+        }
+        _ => {}
     }
     if sess.needs_drop(ty) {
         return Err(format!(
@@ -71,7 +74,7 @@ pub fn check(sess: Sess<'_>, ty: Ty) -> Result<(), String> {
     }
 }
 
-pub fn descriptor(sess: Sess<'_>, ty: Ty) -> Result<TransferType, String> {
+pub fn descriptor(sess: Session<'_>, ty: Ty) -> Result<TransferType, String> {
     check(sess, ty)?;
     let layout = ty
         .layout()

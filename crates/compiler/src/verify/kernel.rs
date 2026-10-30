@@ -3,25 +3,24 @@ use gpurs_artifact::{self as artifact, Access, Extent, Parameter, Value};
 use super::{
     Certificate,
     analysis::{Analysis, Kind, Obligation},
-    diagnostic, policy as device_policy, render,
+    diagnostic, render, support,
     symbolic::{self, Clause},
 };
 use crate::{
     kernel::{KernelParameter, KernelPlan},
     policy::{self, Strictness},
     stable,
-    stable::{CrateDef, Instance, Mutability, RigidTy, Sess, TyKind},
+    stable::{CrateDef, Instance, Mutability, RigidTy, Session, TyKind},
     transfer,
 };
 
 pub fn kernel(
-    sess: Sess<'_>,
+    sess: Session<'_>,
     instance: Instance,
     configured: bool,
     key: String,
-    symbol: String,
-) -> Option<KernelPlan> {
-    let effects = device_policy::verify(sess, instance);
+) -> Option<(KernelPlan, String, Vec<diagnostic::Warning>)> {
+    let effects = support::check(sess, instance);
     let signature = sess.signature(instance);
     let mut parameters = Vec::new();
     for (_, shape) in &signature.arguments {
@@ -72,13 +71,16 @@ pub fn kernel(
         sess.error(instance.def.def_id().span(), message);
         return None;
     }
-    let returns_value =
-        !matches!(stable::rigid(result.ty), RigidTy::Tuple(fields) if fields.is_empty());
+    let result = (!matches!(stable::rigid(result.ty), RigidTy::Tuple(fields) if fields.is_empty()))
+        .then(|| Value {
+            size: result.size().bytes() as u64,
+            align: result.align(),
+        });
 
     let mut analysis = Analysis::new(sess, instance, &parameters);
     analysis.run();
     let span = instance.def.def_id().span();
-    let extent = if returns_value || !analysis.uses_index {
+    let extent = if result.is_some() || !analysis.uses_index {
         Extent::Single
     } else if !analysis.geometry && analysis.lengths.len() == 1 {
         Extent::Length(analysis.lengths[0])
@@ -146,12 +148,12 @@ pub fn kernel(
     let certificate = certified.then(|| certify(&analysis, 0));
     let status = certificate.as_ref().is_some_and(Certificate::records);
     let summary = diagnostic::summary(&analysis, certified, &preconditions, &residual);
-    Some(KernelPlan {
+    let plan = KernelPlan {
         instance,
         key,
-        symbol,
         parameters: parameters.clone(),
         extent,
+        result,
         requirements: clauses(&analysis.requirements),
         preconditions: if certified {
             clauses(&preconditions)
@@ -163,9 +165,8 @@ pub fn kernel(
         instrumented: !effects.tensor && (!certified || policy::instrumented()),
         uses_index: analysis.uses_index,
         asynchronous: effects.asynchronous,
-        summary,
-        warnings,
-    })
+    };
+    Some((plan, summary, warnings))
 }
 
 /// Which checks of `context` and its callees the certified entry point omits or records.

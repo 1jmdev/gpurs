@@ -11,7 +11,7 @@ use rustc_public::{
 use crate::{
     stable::{
         Body, ConstOperand, CrateDef, Instance, InstanceKind, Operand, ProjectionElem, RigidTy,
-        Rvalue, Sess, StatementKind, TerminatorKind, Ty, TyKind,
+        Rvalue, Session, StatementKind, TerminatorKind, Ty, TyKind,
     },
     transfer,
 };
@@ -70,7 +70,7 @@ impl MirVisitor for HostView {
 }
 
 impl HostView {
-    pub fn analyze(&mut self, sess: Sess<'_>) {
+    pub fn analyze(&mut self, sess: Session<'_>) {
         self.pending.extend(sess.entry());
         let mut visited = FxHashSet::default();
         while let Some(instance) = self.pending.pop() {
@@ -81,7 +81,7 @@ impl HostView {
         sess.abort_if_errors();
     }
 
-    fn scan(&mut self, sess: Sess<'_>, instance: Instance) {
+    fn scan(&mut self, sess: Session<'_>, instance: Instance) {
         let def = instance.def.def_id();
         if sess.is(def, "gpurs::launch::verified") {
             let arguments = instance.args();
@@ -174,7 +174,7 @@ impl HostView {
 }
 
 /// Reads a `&str` constant through local assignments and reborrows.
-fn string(sess: Sess<'_>, body: &Body, operand: &Operand) -> Option<String> {
+fn string(sess: Session<'_>, body: &Body, operand: &Operand) -> Option<String> {
     let constant: &ConstOperand = match operand {
         Operand::Constant(constant) => constant,
         Operand::Copy(place) | Operand::Move(place) => {

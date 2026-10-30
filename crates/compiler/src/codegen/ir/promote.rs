@@ -14,6 +14,7 @@ use super::{
     instruction::{Callee, Instruction, Terminator},
     value::Kind,
 };
+use crate::graph::Graph;
 
 impl Function {
     pub(super) fn promote(&mut self) {
@@ -22,10 +23,15 @@ impl Function {
         if types.is_empty() {
             return;
         }
-        let order = self.reverse_postorder();
-        let predecessors = self.predecessors(&order);
-        let dominators = dominators(&order, &predecessors);
-        let frontiers = frontiers(&predecessors, &dominators);
+        let graph = Graph::new(
+            0,
+            (0..self.blocks.len())
+                .map(|block| self.successors(block))
+                .collect(),
+        );
+        let order = graph.reverse_postorder();
+        let dominators = graph.dominators();
+        let frontiers = graph.frontiers(&dominators);
 
         let mut phis: FxHashMap<(usize, u32), u32> = FxHashMap::default();
         for slot in types.keys() {
@@ -44,7 +50,7 @@ impl Function {
                 .collect();
             let mut placed = FxHashSet::default();
             while let Some(block) = pending.pop() {
-                for &frontier in frontiers.get(&block).into_iter().flatten() {
+                for &frontier in &frontiers[block] {
                     if placed.insert(frontier) {
                         let register = self.fresh_register();
                         phis.insert((frontier, *slot), register);
@@ -58,9 +64,8 @@ impl Function {
         let mut exits: FxHashMap<usize, FxHashMap<u32, Value>> = FxHashMap::default();
         for &block in &order {
             let mut current = dominators
-                .get(&block)
-                .filter(|&&dominator| dominator != block)
-                .and_then(|dominator| exits.get(dominator))
+                .immediate_dominator(block)
+                .and_then(|dominator| exits.get(&dominator))
                 .cloned()
                 .unwrap_or_default();
             for (slot, ty) in &types {
@@ -265,112 +270,6 @@ impl Function {
             _ => Vec::new(),
         }
     }
-
-    /// The blocks reachable from the entry, in reverse postorder.
-    fn reverse_postorder(&self) -> Vec<usize> {
-        let mut visited = vec![false; self.blocks.len()];
-        let mut order = Vec::new();
-        let mut stack = vec![(0, 0)];
-        visited[0] = true;
-        while let Some((block, next)) = stack.pop() {
-            let successors = self.successors(block);
-            if let Some(&successor) = successors.get(next) {
-                stack.push((block, next + 1));
-                if !visited[successor] {
-                    visited[successor] = true;
-                    stack.push((successor, 0));
-                }
-            } else {
-                order.push(block);
-            }
-        }
-        order.reverse();
-        order
-    }
-
-    /// The distinct predecessors of each reachable block among the reachable blocks.
-    fn predecessors(&self, order: &[usize]) -> FxHashMap<usize, Vec<usize>> {
-        let mut predecessors: FxHashMap<usize, Vec<usize>> =
-            order.iter().map(|&block| (block, Vec::new())).collect();
-        for &block in order {
-            for successor in self.successors(block) {
-                let list = predecessors.get_mut(&successor).unwrap();
-                if !list.contains(&block) {
-                    list.push(block);
-                }
-            }
-        }
-        predecessors
-    }
-}
-
-/// The immediate dominator of each reachable block, by the Cooper–Harvey–Kennedy iteration; the
-/// entry dominates itself.
-fn dominators(
-    order: &[usize],
-    predecessors: &FxHashMap<usize, Vec<usize>>,
-) -> FxHashMap<usize, usize> {
-    let position: FxHashMap<usize, usize> = order
-        .iter()
-        .enumerate()
-        .map(|(index, &block)| (block, index))
-        .collect();
-    let mut dominators = FxHashMap::from_iter([(order[0], order[0])]);
-    let intersect = |dominators: &FxHashMap<usize, usize>, mut first: usize, mut second: usize| {
-        while first != second {
-            while position[&first] > position[&second] {
-                first = dominators[&first];
-            }
-            while position[&second] > position[&first] {
-                second = dominators[&second];
-            }
-        }
-        first
-    };
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for &block in &order[1..] {
-            let mut processed = predecessors[&block]
-                .iter()
-                .copied()
-                .filter(|predecessor| dominators.contains_key(predecessor));
-            let Some(first) = processed.next() else {
-                continue;
-            };
-            let dominator = processed.fold(first, |dominator, predecessor| {
-                intersect(&dominators, predecessor, dominator)
-            });
-            if dominators.insert(block, dominator) != Some(dominator) {
-                changed = true;
-            }
-        }
-    }
-    dominators
-}
-
-/// The dominance frontier of each block: the joins it reaches without strictly dominating them.
-fn frontiers(
-    predecessors: &FxHashMap<usize, Vec<usize>>,
-    dominators: &FxHashMap<usize, usize>,
-) -> FxHashMap<usize, Vec<usize>> {
-    let mut frontiers: FxHashMap<usize, Vec<usize>> = FxHashMap::default();
-    for (&join, sources) in predecessors {
-        if sources.len() < 2 {
-            continue;
-        }
-        for &source in sources {
-            let mut runner = source;
-            while runner != dominators[&join] {
-                let frontier = frontiers.entry(runner).or_default();
-                if !frontier.contains(&join) {
-                    frontier.push(join);
-                }
-                runner = dominators[&runner];
-            }
-        }
-    }
-    frontiers
 }
 
 /// The slot address of a lifetime marker.

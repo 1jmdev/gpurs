@@ -4,12 +4,18 @@
 //! its body per iteration, as nvcc does for small constant loops. Arrays indexed by the loop
 //! variable, such as tensor-core fragments, then have constant indices and stay in registers.
 
-use rustc_data_structures::fx::{FxHashMap, FxHashSet};
+use rustc_data_structures::{
+    fx::{FxHashMap, FxHashSet},
+    graph::dominators::Dominators,
+};
 
-use crate::stable::{
-    AggregateKind, Body, ConstOperand, ConstantKind, Instance, Local, Location, MirVisitor,
-    Operand, Place, PlaceContext, RigidTy, Rvalue, StatementKind, TerminatorKind, TyKind,
-    statement_location, terminator_location,
+use crate::{
+    graph::Graph,
+    stable::{
+        AggregateKind, Body, ConstOperand, ConstantKind, Instance, Local, Location, MirVisitor,
+        Operand, Place, PlaceContext, RigidTy, Rvalue, StatementKind, TerminatorKind, TyKind,
+        statement_location, terminator_location,
+    },
 };
 
 /// The most iterations a loop is unrolled for.
@@ -27,16 +33,12 @@ pub struct Loop {
 /// The loops of `body` to unroll, outermost first.
 pub fn loops(body: &Body) -> Vec<Loop> {
     let mentions = mentions(body);
-    let successors: Vec<Vec<usize>> = body
-        .blocks
-        .iter()
-        .map(|block| block.terminator.successors())
-        .collect();
-    let dominators = dominators(&successors);
+    let graph = Graph::of(body);
+    let dominators = graph.dominators();
     let mut loops: Vec<Loop> = (0..body.blocks.len())
         .filter_map(|advance| {
             let count = iterations(body, &mentions, advance)?;
-            let (header, blocks) = innermost_loop(&successors, &dominators, advance)?;
+            let (header, blocks) = innermost_loop(&graph, &dominators, advance)?;
             let statements: usize = blocks
                 .iter()
                 .map(|&block| body.blocks[block].statements.len() + 1)
@@ -202,103 +204,32 @@ fn mentions(body: &Body) -> FxHashMap<Local, usize> {
 
 /// The header and blocks of the innermost natural loop containing `block`.
 fn innermost_loop(
-    successors: &[Vec<usize>],
-    dominators: &[Option<usize>],
+    graph: &Graph,
+    dominators: &Dominators<usize>,
     block: usize,
 ) -> Option<(usize, FxHashSet<usize>)> {
-    let dominates = |header: usize, mut block: usize| loop {
-        if block == header {
-            return true;
-        }
-        match dominators[block] {
-            Some(dominator) if dominator != block => block = dominator,
-            _ => return false,
-        }
-    };
+    let reachable = |source: &&usize| dominators.is_reachable(**source);
     let mut header = block;
     loop {
-        let latches: Vec<usize> = (0..successors.len())
-            .filter(|&source| {
-                dominators[source].is_some()
-                    && successors[source].contains(&header)
-                    && dominates(header, source)
-            })
+        let latches: Vec<usize> = graph
+            .predecessors(header)
+            .iter()
+            .filter(reachable)
+            .filter(|&&source| dominators.dominates(header, source))
+            .copied()
             .collect();
         if !latches.is_empty() {
             let mut blocks = FxHashSet::from_iter([header]);
             let mut pending = latches;
             while let Some(source) = pending.pop() {
                 if blocks.insert(source) {
-                    pending.extend((0..successors.len()).filter(|&predecessor| {
-                        dominators[predecessor].is_some()
-                            && successors[predecessor].contains(&source)
-                    }));
+                    pending.extend(graph.predecessors(source).iter().filter(reachable));
                 }
             }
             if blocks.contains(&block) {
                 return Some((header, blocks));
             }
         }
-        header = dominators[header].filter(|&dominator| dominator != header)?;
+        header = dominators.immediate_dominator(header)?;
     }
-}
-
-/// The immediate dominator of each block reachable from the entry, which dominates itself.
-fn dominators(successors: &[Vec<usize>]) -> Vec<Option<usize>> {
-    let mut order = Vec::new();
-    let mut visited = vec![false; successors.len()];
-    let mut stack = vec![(0, 0)];
-    visited[0] = true;
-    while let Some((block, next)) = stack.pop() {
-        if let Some(&successor) = successors[block].get(next) {
-            stack.push((block, next + 1));
-            if !visited[successor] {
-                visited[successor] = true;
-                stack.push((successor, 0));
-            }
-        } else {
-            order.push(block);
-        }
-    }
-    order.reverse();
-    let mut position = vec![usize::MAX; successors.len()];
-    for (index, &block) in order.iter().enumerate() {
-        position[block] = index;
-    }
-    let mut dominators: Vec<Option<usize>> = vec![None; successors.len()];
-    dominators[0] = Some(0);
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for &block in &order[1..] {
-            let mut dominator: Option<usize> = None;
-            for predecessor in (0..successors.len())
-                .filter(|&predecessor| successors[predecessor].contains(&block))
-            {
-                if dominators[predecessor].is_none() {
-                    continue;
-                }
-                dominator = Some(match dominator {
-                    None => predecessor,
-                    Some(mut first) => {
-                        let mut second = predecessor;
-                        while first != second {
-                            while position[first] > position[second] {
-                                first = dominators[first].unwrap();
-                            }
-                            while position[second] > position[first] {
-                                second = dominators[second].unwrap();
-                            }
-                        }
-                        first
-                    }
-                });
-            }
-            if dominator.is_some() && dominators[block] != dominator {
-                dominators[block] = dominator;
-                changed = true;
-            }
-        }
-    }
-    dominators
 }

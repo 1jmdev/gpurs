@@ -36,6 +36,13 @@ pub struct Place {
 }
 
 impl Operand {
+    pub fn immediate(value: ir::Value, shape: Shape) -> Self {
+        Operand {
+            value: Value::Scalar(value),
+            shape,
+        }
+    }
+
     pub fn zst(shape: Shape) -> Self {
         Operand {
             value: Value::Zst,
@@ -77,10 +84,10 @@ impl Place {
 }
 
 impl<'sess> FunctionBuilder<'_, 'sess> {
-    pub fn place(&mut self, place: crate::stable::Place) -> Place {
+    pub fn place(&mut self, place: &crate::stable::Place) -> Place {
         let mut current = self.locals[place.local].clone();
-        for element in place.projection {
-            current = self.project(current, element);
+        for element in &place.projection {
+            current = self.project(current, element.clone());
         }
         current
     }
@@ -107,17 +114,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                     value => panic!("dereference of {value:?}"),
                 }
             }
-            ProjectionElem::Field(field, ty) => {
-                let offset = place.shape.offset(field);
-                let shape = self.shape_of(ty);
-                let meta = place.meta.clone().filter(|_| shape.is_unsized());
-                Place {
-                    pointer: self.offset(place.pointer, offset.bytes() as u64),
-                    meta,
-                    shape,
-                    align: layout::restrict_align(place.align, offset),
-                }
-            }
+            ProjectionElem::Field(field, ty) => self.field(&place, field, ty),
             ProjectionElem::Index(local) => {
                 let index = self.load(&self.locals[local].clone());
                 self.index(&place, index.scalar())
@@ -167,13 +164,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                     }
                 }
             }
-            ProjectionElem::Downcast(variant) => {
-                let shape = place.shape.for_variant(variant);
-                Place {
-                    shape,
-                    ..place.clone()
-                }
-            }
+            ProjectionElem::Downcast(variant) => self.downcast(&place, variant),
             ProjectionElem::OpaqueCast(ty) => {
                 let shape = self.shape_of(ty);
                 Place { shape, ..place }
@@ -182,18 +173,17 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
     }
 
     pub fn field(&mut self, place: &Place, field: usize, ty: Ty) -> Place {
-        let offset = place.shape.offset(field);
+        let (pointer, align) = self.interior(place, place.shape.offset(field).bytes() as u64);
         let shape = self.shape_of(ty);
-        let meta = place.meta.clone().filter(|_| shape.is_unsized());
         Place {
-            pointer: self.offset(place.pointer.clone(), offset.bytes() as u64),
-            meta,
-            align: layout::restrict_align(place.align, offset),
+            pointer,
+            meta: place.meta.clone().filter(|_| shape.is_unsized()),
+            align,
             shape,
         }
     }
 
-    pub fn downcast(&mut self, place: &Place, variant: VariantIdx) -> Place {
+    pub fn downcast(&self, place: &Place, variant: VariantIdx) -> Place {
         Place {
             shape: place.shape.for_variant(variant),
             ..place.clone()
@@ -205,13 +195,11 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
         let stride = match &place.shape.layout.fields {
             FieldsShape::Array { stride, .. } => *stride,
             _ => element.size(),
-        };
-        let bytes = self.ir.binary(
-            Binary::Mul,
-            Flags::empty(),
-            index,
-            ir::Value::i64(stride.bytes() as u64),
-        );
+        }
+        .bytes() as u64;
+        let bytes = self
+            .ir
+            .binary(Binary::Mul, Flags::empty(), index, ir::Value::i64(stride));
         Place {
             pointer: self.ir.offset(place.pointer.clone(), bytes, true),
             meta: None,
@@ -253,12 +241,10 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                     Value::Scalar(self.load_scalar(place.pointer.clone(), *scalar, place.align))
                 }
                 ValueRepr::ScalarPair { a, b, b_offset } => {
-                    let (a, b, b_offset) = (*a, *b, *b_offset);
+                    let (a, b, b_offset) = (*a, *b, b_offset.bytes() as u64);
                     let first = self.load_scalar(place.pointer.clone(), a, place.align);
-                    let pointer = self.offset(place.pointer.clone(), b_offset.bytes() as u64);
-                    let second =
-                        self.load_scalar(pointer, b, layout::restrict_align(place.align, b_offset));
-                    Value::Pair(first, second)
+                    let (pointer, align) = self.interior(place, b_offset);
+                    Value::Pair(first, self.load_scalar(pointer, b, align))
                 }
                 _ => Value::Memory(place.pointer.clone(), place.align),
             }
@@ -280,29 +266,18 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                     b_offset,
                 },
             ) => {
-                let (first, second, b_offset) = (*first, *second, *b_offset);
+                let (first, second, b_offset) = (*first, *second, b_offset.bytes() as u64);
                 self.store_scalar(place.pointer.clone(), a.clone(), first, place.align);
-                let pointer = self.offset(place.pointer.clone(), b_offset.bytes() as u64);
-                self.store_scalar(
-                    pointer,
-                    b.clone(),
-                    second,
-                    layout::restrict_align(place.align, b_offset),
-                );
+                let (pointer, align) = self.interior(place, b_offset);
+                self.store_scalar(pointer, b.clone(), second, align);
             }
             (Value::Memory(source, align), _) if let Some(leaves) = self.leaves(&operand.shape) => {
                 for (offset, scalar) in leaves {
                     let from = self.offset(source.clone(), offset);
-                    let to = self.offset(place.pointer.clone(), offset);
-                    let offset = MachineSize::from_bits(offset as usize * 8);
+                    let (to, to_align) = self.interior(place, offset);
                     let value =
                         self.load_scalar(from, scalar, layout::restrict_align(*align, offset));
-                    self.store_scalar(
-                        to,
-                        value,
-                        scalar,
-                        layout::restrict_align(place.align, offset),
-                    );
+                    self.store_scalar(to, value, scalar, to_align);
                 }
             }
             (Value::Memory(source, align), _) => {
@@ -435,10 +410,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                 (_, &Type::I1) => Conversion::Trunc,
                 _ => Conversion::BitCast,
             };
-            return Operand {
-                value: Value::Scalar(self.ir.cast(operation, value.clone(), to)),
-                shape,
-            };
+            return Operand::immediate(self.ir.cast(operation, value.clone(), to), shape);
         }
         let place = self.temporary(if operand.shape.align() > shape.align() {
             operand.shape.clone()

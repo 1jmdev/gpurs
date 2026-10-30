@@ -7,12 +7,12 @@ use super::{
     function::FunctionBuilder,
     ir::{self, Access, Ordering, Type},
     layout,
+    shared_memory::SharedAllocations,
 };
 use crate::{
     kernel::Signature,
     layout::PassMode,
-    shared_memory::SharedAllocations,
-    stable::{AllocId, Instance, Sess},
+    stable::{AllocId, Instance, Session},
     verify::Certificate,
 };
 
@@ -22,7 +22,7 @@ type Copy = (Instance, Option<Certificate>, bool);
 
 /// One NVVM IR module holding every device function reachable from the requested kernels.
 pub struct ModuleBuilder<'sess> {
-    pub sess: Sess<'sess>,
+    pub sess: Session<'sess>,
     pub ir: ir::Module,
     /// The block-shared slot holding the launch's failure status pointer.
     pub status: ir::Value,
@@ -33,7 +33,7 @@ pub struct ModuleBuilder<'sess> {
 }
 
 impl<'sess> ModuleBuilder<'sess> {
-    pub fn new(sess: Sess<'sess>) -> Self {
+    pub fn new(sess: Session<'sess>) -> Self {
         let mut ir = ir::Module::default();
         ir.typed_byval = sess.target.capability() >= 100;
         let status_pointer = Type::I32.pointer();

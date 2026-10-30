@@ -17,18 +17,18 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
         let operand = match rvalue {
             Rvalue::Use(operand, _) => self.operand(operand),
             Rvalue::CopyForDeref(place) => {
-                let place = self.place(place.clone());
+                let place = self.place(place);
                 self.load(&place)
             }
             Rvalue::Ref(_, _, place) | Rvalue::AddressOf(_, place) => {
-                let place = self.place(place.clone());
+                let place = self.place(place);
                 Operand {
                     value: self.address(&place),
                     shape: destination.shape.clone(),
                 }
             }
             Rvalue::Reborrow(_, _, place) => {
-                let place = self.place(place.clone());
+                let place = self.place(place);
                 let value = self.load(&place);
                 self.transmute(&value, destination.shape.clone())
             }
@@ -71,7 +71,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                 self.cast(*kind, &operand, destination.shape.clone())
             }
             Rvalue::Discriminant(place) => {
-                let place = self.place(place.clone());
+                let place = self.place(place);
                 self.discriminant(&place, destination.shape.clone())
             }
             Rvalue::ThreadLocalRef(_) => {
@@ -79,13 +79,10 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                 return;
             }
             Rvalue::Len(place) => {
-                let place = self.place(place.clone());
+                let place = self.place(place);
                 let length = self.length(&place);
                 let shape = self.shape_of(Ty::usize_ty());
-                Operand {
-                    value: Value::Scalar(length),
-                    shape,
-                }
+                Operand::immediate(length, shape)
             }
         };
         self.store(destination, &operand);
@@ -219,129 +216,72 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                 shape: result,
             };
         }
-        let value = if ty.is_float() {
-            let flags = if self.fast_math {
-                Flags::FAST
-            } else {
-                Flags::empty()
-            };
-            let (binary, predicate) = match operation {
-                BinOp::Add => (Some(Binary::FAdd), None),
-                BinOp::Sub => (Some(Binary::FSub), None),
-                BinOp::Mul => (Some(Binary::FMul), None),
-                BinOp::Div if self.fast_math && ty == Type::Float => {
-                    let value = self
-                        .ir
-                        .call("llvm.nvvm.div.approx.f", Type::Float, vec![a, b]);
-                    return Operand {
-                        value: Value::Scalar(value),
-                        shape: result,
-                    };
-                }
-                BinOp::Div => (Some(Binary::FDiv), None),
-                BinOp::Rem => (Some(Binary::FRem), None),
-                BinOp::Eq => (None, Some(Predicate::Oeq)),
-                BinOp::Ne => (None, Some(Predicate::Une)),
-                BinOp::Lt => (None, Some(Predicate::Olt)),
-                BinOp::Le => (None, Some(Predicate::Ole)),
-                BinOp::Gt => (None, Some(Predicate::Ogt)),
-                BinOp::Ge => (None, Some(Predicate::Oge)),
-                BinOp::Cmp => return self.compare(a, b, Predicate::Olt, result),
-                operation => {
-                    self.unsupported(&format!("floating-point `{operation:?}`"));
-                    return Operand::zst(result);
-                }
-            };
-            match (binary, predicate) {
-                (Some(binary), _) => self.ir.binary(binary, flags, a, b),
-                (_, Some(predicate)) => self.ir.compare(predicate, a, b),
-                _ => unreachable!(),
-            }
-        } else {
-            let (division, remainder, shift) = if signed {
-                (Binary::SDiv, Binary::SRem, Binary::AShr)
-            } else {
-                (Binary::UDiv, Binary::URem, Binary::LShr)
-            };
-            let [less, less_equal, greater, greater_equal] = if signed {
-                [
-                    Predicate::Slt,
-                    Predicate::Sle,
-                    Predicate::Sgt,
-                    Predicate::Sge,
-                ]
-            } else {
-                [
-                    Predicate::Ult,
-                    Predicate::Ule,
-                    Predicate::Ugt,
-                    Predicate::Uge,
-                ]
-            };
-            // Overflow in the unchecked forms is undefined behavior, as in rustc.
-            let wrap = if signed { Flags::NSW } else { Flags::NUW };
-            let (binary, flags) = match operation {
-                BinOp::Add => (Binary::Add, Flags::empty()),
-                BinOp::Sub => (Binary::Sub, Flags::empty()),
-                BinOp::Mul => (Binary::Mul, Flags::empty()),
-                BinOp::AddUnchecked => (Binary::Add, wrap),
-                BinOp::SubUnchecked => (Binary::Sub, wrap),
-                BinOp::MulUnchecked => (Binary::Mul, wrap),
-                BinOp::Div => (division, Flags::empty()),
-                BinOp::Rem => (remainder, Flags::empty()),
-                BinOp::BitXor => (Binary::Xor, Flags::empty()),
-                BinOp::BitAnd => (Binary::And, Flags::empty()),
-                BinOp::BitOr => (Binary::Or, Flags::empty()),
-                BinOp::Shl | BinOp::ShlUnchecked | BinOp::Shr | BinOp::ShrUnchecked => {
-                    let amount = self.shift_amount(right, scalar, operation);
-                    let kind = if matches!(operation, BinOp::Shl | BinOp::ShlUnchecked) {
-                        Binary::Shl
-                    } else {
-                        shift
-                    };
-                    return Operand {
-                        value: Value::Scalar(self.ir.binary(kind, Flags::empty(), a, amount)),
-                        shape: result,
-                    };
-                }
-                BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
-                    let predicate = match operation {
-                        BinOp::Eq => Predicate::Eq,
-                        BinOp::Ne => Predicate::Ne,
-                        BinOp::Lt => less,
-                        BinOp::Le => less_equal,
-                        BinOp::Gt => greater,
-                        _ => greater_equal,
-                    };
-                    return Operand {
-                        value: Value::Scalar(self.ir.compare(predicate, a, b)),
-                        shape: result,
-                    };
-                }
-                BinOp::Cmp => return self.compare(a, b, less, result),
-                BinOp::Offset => {
-                    let pointee = left
-                        .shape
-                        .ty
-                        .kind()
-                        .builtin_deref(true)
-                        .expect("pointer offset");
-                    let size = self.shape_of(pointee.ty).size().bytes() as u64;
-                    let bytes =
-                        self.ir
-                            .binary(Binary::Mul, Flags::empty(), b, ir::Value::i64(size));
-                    return Operand {
-                        value: Value::Scalar(self.ir.offset(a, bytes, true)),
-                        shape: result,
-                    };
-                }
-            };
-            self.ir.binary(binary, flags, a, b)
-        };
-        Operand {
-            value: Value::Scalar(value),
-            shape: result,
+        let float = ty.is_float();
+        if let Some(predicate) = predicate(operation, float, signed) {
+            return Operand::immediate(self.ir.compare(predicate, a, b), result);
         }
+        if operation == BinOp::Cmp {
+            let less = predicate(BinOp::Lt, float, signed).expect("`<` is a comparison");
+            return Operand::immediate(self.ordering(a, b, less), result);
+        }
+        let flags = match operation {
+            _ if float && self.fast_math => Flags::FAST,
+            // Overflow in the unchecked forms is undefined behavior, as in rustc.
+            BinOp::AddUnchecked | BinOp::SubUnchecked | BinOp::MulUnchecked if signed => Flags::NSW,
+            BinOp::AddUnchecked | BinOp::SubUnchecked | BinOp::MulUnchecked => Flags::NUW,
+            _ => Flags::empty(),
+        };
+        let binary = match (operation, float) {
+            (BinOp::Add, true) => Binary::FAdd,
+            (BinOp::Sub, true) => Binary::FSub,
+            (BinOp::Mul, true) => Binary::FMul,
+            (BinOp::Div, true) if self.fast_math && ty == Type::Float => {
+                let value = self
+                    .ir
+                    .call("llvm.nvvm.div.approx.f", Type::Float, vec![a, b]);
+                return Operand::immediate(value, result);
+            }
+            (BinOp::Div, true) => Binary::FDiv,
+            (BinOp::Rem, true) => Binary::FRem,
+            (operation, true) => {
+                self.unsupported(&format!("floating-point `{operation:?}`"));
+                return Operand::zst(result);
+            }
+            (BinOp::Add | BinOp::AddUnchecked, _) => Binary::Add,
+            (BinOp::Sub | BinOp::SubUnchecked, _) => Binary::Sub,
+            (BinOp::Mul | BinOp::MulUnchecked, _) => Binary::Mul,
+            (BinOp::Div, _) if signed => Binary::SDiv,
+            (BinOp::Div, _) => Binary::UDiv,
+            (BinOp::Rem, _) if signed => Binary::SRem,
+            (BinOp::Rem, _) => Binary::URem,
+            (BinOp::BitXor, _) => Binary::Xor,
+            (BinOp::BitAnd, _) => Binary::And,
+            (BinOp::BitOr, _) => Binary::Or,
+            (BinOp::Shl | BinOp::ShlUnchecked | BinOp::Shr | BinOp::ShrUnchecked, _) => {
+                let amount = self.shift_amount(right, scalar, operation);
+                let shift = match operation {
+                    BinOp::Shl | BinOp::ShlUnchecked => Binary::Shl,
+                    _ if signed => Binary::AShr,
+                    _ => Binary::LShr,
+                };
+                return Operand::immediate(self.ir.binary(shift, flags, a, amount), result);
+            }
+            (BinOp::Offset, _) => {
+                let pointee = left
+                    .shape
+                    .ty
+                    .kind()
+                    .builtin_deref(true)
+                    .expect("pointer offset");
+                let size = self.shape_of(pointee.ty).size().bytes() as u64;
+                let bytes = self
+                    .ir
+                    .binary(Binary::Mul, Flags::empty(), b, ir::Value::i64(size));
+                return Operand::immediate(self.ir.offset(a, bytes, true), result);
+            }
+            _ => unreachable!("`{operation:?}` is a comparison"),
+        };
+        Operand::immediate(self.ir.binary(binary, flags, a, b), result)
     }
 
     /// `divisor`, or one where the recorded zero-divisor or overflow check failed, so the
@@ -392,7 +332,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
     }
 
     /// `Ordering` of `a` and `b` as `-1`, `0`, or `1`.
-    fn compare(&mut self, a: ir::Value, b: ir::Value, less: Predicate, result: Shape) -> Operand {
+    fn ordering(&mut self, a: ir::Value, b: ir::Value, less: Predicate) -> ir::Value {
         let equal = if a.ty.is_float() {
             Predicate::Oeq
         } else {
@@ -402,11 +342,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
         let is_equal = self.ir.compare(equal, a, b);
         let byte = |value| ir::Value::int(Type::I8, value as u128);
         let not_less = self.ir.select(is_equal, byte(0), byte(1));
-        let value = self.ir.select(is_less, byte(-1i8 as u8), not_less);
-        Operand {
-            value: Value::Scalar(value),
-            shape: result,
-        }
+        self.ir.select(is_less, byte(-1i8 as u8), not_less)
     }
 
     fn unary(&mut self, operation: UnOp, operand: &Operand, result: Shape) -> Operand {
@@ -437,37 +373,18 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
             }
             (_, value) => panic!("unary operation on {value:?}"),
         };
-        Operand {
-            value: Value::Scalar(value),
-            shape: result,
-        }
+        Operand::immediate(value, result)
     }
 
     fn cast(&mut self, kind: CastKind, operand: &Operand, result: Shape) -> Operand {
-        let scalars = match (operand.shape.repr(), result.repr()) {
-            (ValueRepr::Scalar(from), ValueRepr::Scalar(to)) => Some((*from, *to)),
-            _ => None,
-        };
-        let scalar_value = |value| Operand {
-            value: Value::Scalar(value),
-            shape: result.clone(),
-        };
-        let same = |value: &Value| Operand {
-            value: value.clone(),
-            shape: result.clone(),
-        };
-        match kind {
+        let value = match kind {
             CastKind::IntToInt => {
-                let (from, to) = scalars.expect("integer cast");
-                let to = layout::immediate_type(to);
-                scalar_value(
-                    self.ir
-                        .resize(operand.scalar(), to, layout::is_signed(from)),
-                )
+                let signed = layout::is_signed(operand.shape.scalar());
+                let to = layout::immediate_type(result.scalar());
+                Value::Scalar(self.ir.resize(operand.scalar(), to, signed))
             }
             CastKind::IntToFloat => {
-                let (from, to) = scalars.expect("integer to float cast");
-                let operation = if layout::is_signed(from) {
+                let operation = if layout::is_signed(operand.shape.scalar()) {
                     Conversion::SIToFP
                 } else {
                     Conversion::UIToFP
@@ -478,32 +395,32 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                     }
                     value => value,
                 };
-                scalar_value(self.ir.cast(operation, value, layout::immediate_type(to)))
+                let to = layout::immediate_type(result.scalar());
+                Value::Scalar(self.ir.cast(operation, value, to))
             }
             CastKind::FloatToFloat => {
-                let (from, to) = scalars.expect("float cast");
-                let (from, to) = (layout::immediate_type(from), layout::immediate_type(to));
+                let from = layout::immediate_type(operand.shape.scalar());
+                let to = layout::immediate_type(result.scalar());
                 let operation = if from.bits() < to.bits() {
                     Conversion::FPExt
                 } else {
                     Conversion::FPTrunc
                 };
-                scalar_value(self.ir.cast(operation, operand.scalar(), to))
+                Value::Scalar(self.ir.cast(operation, operand.scalar(), to))
             }
             CastKind::FloatToInt => {
-                let (_, to) = scalars.expect("float to integer cast");
-                scalar_value(self.saturating_float_to_int(operand.scalar(), to))
+                Value::Scalar(self.saturating_float_to_int(operand.scalar(), result.scalar()))
             }
             CastKind::PtrToPtr | CastKind::FnPtrToPtr => match (&operand.value, result.repr()) {
-                (Value::Pair(pointer, _), ValueRepr::Scalar(_)) => scalar_value(pointer.clone()),
-                (value, _) => same(value),
+                (Value::Pair(pointer, _), ValueRepr::Scalar(_)) => Value::Scalar(pointer.clone()),
+                (value, _) => value.clone(),
             },
-            CastKind::PointerExposeAddress => scalar_value(self.ir.cast(
+            CastKind::PointerExposeAddress => Value::Scalar(self.ir.cast(
                 Conversion::PtrToInt,
                 operand.scalar(),
                 Type::I64,
             )),
-            CastKind::PointerWithExposedProvenance => scalar_value(self.ir.cast(
+            CastKind::PointerWithExposedProvenance => Value::Scalar(self.ir.cast(
                 Conversion::IntToPtr,
                 operand.scalar(),
                 Type::byte_pointer(),
@@ -518,28 +435,31 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                 match source {
                     Some(TyKind::RigidTy(RigidTy::Array(_, length))) => {
                         let length = ir::Value::i64(length.eval_target_usize().unwrap_or(0));
-                        Operand {
-                            value: Value::Pair(operand.scalar(), length),
-                            shape: result.clone(),
-                        }
+                        Value::Pair(operand.scalar(), length)
                     }
-                    Some(TyKind::RigidTy(RigidTy::Slice(_) | RigidTy::Str)) => same(&operand.value),
+                    Some(TyKind::RigidTy(RigidTy::Slice(_) | RigidTy::Str)) => {
+                        operand.value.clone()
+                    }
                     _ => {
                         self.unsupported("unsizing to trait objects (dynamic dispatch)");
-                        Operand::zst(result)
+                        Value::Zst
                     }
                 }
             }
             CastKind::PointerCoercion(
                 PointerCoercion::MutToConstPointer | PointerCoercion::ArrayToPointer,
-            ) => same(&operand.value),
+            ) => operand.value.clone(),
             CastKind::PointerCoercion(..) => {
                 self.unsupported("function pointers");
-                Operand::zst(result)
+                Value::Zst
             }
             CastKind::Transmute | CastKind::Subtype | CastKind::BoxDerefTransmute => {
-                self.transmute(operand, result)
+                return self.transmute(operand, result);
             }
+        };
+        Operand {
+            value,
+            shape: result,
         }
     }
 
@@ -603,8 +523,8 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                 (index.saturating_sub(start) as u128).wrapping_add(*niche_start)
             }
         };
-        let (scalar, field) = (*tag, *tag_field);
-        let (pointer, align) = self.tag_address(place, field);
+        let scalar = *tag;
+        let (pointer, align) = self.interior(place, shape.offset(*tag_field).bytes() as u64);
         let value = match layout::immediate_type(scalar) {
             ty if ty.is_pointer() => ir::Value::address(value as u64),
             ty => ir::Value::int(ty, value),
@@ -614,25 +534,16 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
 
     fn discriminant(&mut self, place: &Place, result: Shape) -> Operand {
         let shape = &place.shape;
-        let ValueRepr::Scalar(target) = result.repr().clone() else {
-            unreachable!()
-        };
-        let target_type = layout::immediate_type(target);
+        let target_type = layout::immediate_type(result.scalar());
         let constant = |value: u128| ir::Value::int(target_type.clone(), value);
         let (tag_scalar, tag_field, encoding) = match &shape.layout.variants {
             VariantsShape::Empty => {
-                return Operand {
-                    value: Value::Scalar(ir::Value::undef(target_type)),
-                    shape: result,
-                };
+                return Operand::immediate(ir::Value::undef(target_type), result);
             }
             VariantsShape::Single { index } => {
                 let value = discriminant_value(shape, *index)
                     .unwrap_or_else(|| variant_position(shape, *index).unwrap_or(0) as u128);
-                return Operand {
-                    value: Value::Scalar(constant(value)),
-                    shape: result,
-                };
+                return Operand::immediate(constant(value), result);
             }
             VariantsShape::Multiple {
                 tag,
@@ -641,7 +552,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                 ..
             } => (*tag, *tag_field, tag_encoding.clone()),
         };
-        let (pointer, align) = self.tag_address(place, tag_field);
+        let (pointer, align) = self.interior(place, shape.offset(tag_field).bytes() as u64);
         let tag = self.load_scalar(pointer, tag_scalar, align);
         let tag = match tag {
             tag if tag.ty.is_pointer() => self.ir.cast(Conversion::PtrToInt, tag, Type::I64),
@@ -671,10 +582,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                 self.ir.select(is_niche, tagged, untagged)
             }
         };
-        Operand {
-            value: Value::Scalar(value),
-            shape: result,
-        }
+        Operand::immediate(value, result)
     }
 }
 
@@ -691,6 +599,29 @@ pub fn variant_position(shape: &Shape, variant: VariantIdx) -> Option<usize> {
         .variants
         .iter()
         .position(|candidate| *candidate == variant)
+}
+
+/// The predicate comparing operands of the given kind, when `operation` is a comparison.
+fn predicate(operation: BinOp, float: bool, signed: bool) -> Option<Predicate> {
+    Some(match (operation, float, signed) {
+        (BinOp::Eq, true, _) => Predicate::Oeq,
+        (BinOp::Ne, true, _) => Predicate::Une,
+        (BinOp::Lt, true, _) => Predicate::Olt,
+        (BinOp::Le, true, _) => Predicate::Ole,
+        (BinOp::Gt, true, _) => Predicate::Ogt,
+        (BinOp::Ge, true, _) => Predicate::Oge,
+        (BinOp::Eq, ..) => Predicate::Eq,
+        (BinOp::Ne, ..) => Predicate::Ne,
+        (BinOp::Lt, _, true) => Predicate::Slt,
+        (BinOp::Le, _, true) => Predicate::Sle,
+        (BinOp::Gt, _, true) => Predicate::Sgt,
+        (BinOp::Ge, _, true) => Predicate::Sge,
+        (BinOp::Lt, ..) => Predicate::Ult,
+        (BinOp::Le, ..) => Predicate::Ule,
+        (BinOp::Gt, ..) => Predicate::Ugt,
+        (BinOp::Ge, ..) => Predicate::Uge,
+        _ => return None,
+    })
 }
 
 /// The LLVM operation of a checked `BinOp`.

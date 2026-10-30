@@ -15,9 +15,9 @@ mod certificate;
 mod diagnostic;
 mod engine;
 mod kernel;
-mod policy;
 mod proof;
 mod render;
+mod support;
 mod symbolic;
 
 pub use certificate::Certificate;

@@ -9,7 +9,7 @@ use super::{
 };
 use crate::{
     policy::{self, Strictness},
-    stable::{CrateDef, Instance, Sess},
+    stable::{CrateDef, Instance, Session},
 };
 
 #[derive(Serialize, Deserialize)]
@@ -22,7 +22,7 @@ pub struct Warning {
 }
 
 impl Warning {
-    pub fn emit(&self, sess: Sess<'_>, functions: &[Instance]) {
+    pub fn emit(&self, sess: Session<'_>, functions: &[Instance]) {
         let instance = functions
             .iter()
             .find(|instance| instance.name() == self.function)

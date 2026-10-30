@@ -5,13 +5,15 @@
 //! follows the profile of the calling crate, as it does for host code: a release build wraps, a
 //! debug build checks. Division and remainder by zero are always checked.
 
-use std::env;
+use std::{env, sync::LazyLock};
 
-use crate::stable::{AssertMessage, RuntimeChecks, Sess};
+use crate::stable::{AssertMessage, RuntimeChecks, Session};
 
 /// Whether unchecked arithmetic is instrumented. `GPURS_OVERFLOW_CHECKS` overrides the profile.
 pub fn overflow_checks() -> bool {
-    env::var("GPURS_OVERFLOW_CHECKS").map_or(true, |value| value != "0")
+    static CHECKS: LazyLock<bool> =
+        LazyLock::new(|| env::var("GPURS_OVERFLOW_CHECKS").map_or(true, |value| value != "0"));
+    *CHECKS
 }
 
 /// Whether this assertion is an arithmetic overflow check that the profile leaves unchecked.
@@ -25,7 +27,7 @@ pub fn unchecked_overflow(message: &AssertMessage) -> bool {
 
 /// The value of a `RuntimeChecks` operand. Library `unsafe` preconditions are checked only in
 /// a debug build of the calling crate, as on the host.
-pub fn runtime_check(sess: Sess<'_>, checks: &RuntimeChecks) -> bool {
+pub fn runtime_check(sess: Session<'_>, checks: &RuntimeChecks) -> bool {
     match checks {
         RuntimeChecks::OverflowChecks => sess.overflow_checks(),
         RuntimeChecks::UbChecks => overflow_checks(),
@@ -34,7 +36,7 @@ pub fn runtime_check(sess: Sess<'_>, checks: &RuntimeChecks) -> bool {
 }
 
 /// The value of the `ub_checks`, `contract_checks`, or `overflow_checks` intrinsic.
-pub fn intrinsic_check(sess: Sess<'_>, name: &str) -> bool {
+pub fn intrinsic_check(sess: Session<'_>, name: &str) -> bool {
     runtime_check(
         sess,
         &match name {
@@ -58,11 +60,13 @@ pub enum Strictness {
 }
 
 pub fn strictness() -> Strictness {
-    match env::var("GPURS_STRICTNESS").as_deref() {
-        Ok("error") => Strictness::Error,
-        Ok("omit") => Strictness::Omit,
-        _ => Strictness::Warn,
-    }
+    static STRICTNESS: LazyLock<Strictness> =
+        LazyLock::new(|| match env::var("GPURS_STRICTNESS").as_deref() {
+            Ok("error") => Strictness::Error,
+            Ok("omit") => Strictness::Omit,
+            _ => Strictness::Warn,
+        });
+    *STRICTNESS
 }
 
 /// Whether every kernel also gets an instrumented entry point: in debug builds, or when

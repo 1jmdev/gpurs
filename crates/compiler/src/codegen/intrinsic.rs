@@ -9,10 +9,10 @@ use super::{
     place::{Operand, Place, Value},
 };
 use crate::{
-    attributes, paths, stable,
+    attributes, call_graph, stable,
     stable::{
-        BinOp, CrateDef, GenericArgKind, Instance, MachineSize, RigidTy, Scalar, TyConst,
-        TyConstKind, TyKind, ValueRepr,
+        BinOp, CrateDef, GenericArgKind, Instance, RigidTy, Scalar, Ty, TyConst, TyConstKind,
+        TyKind, ValueRepr,
     },
 };
 
@@ -29,16 +29,10 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
             self.primitive((*primitive).clone(), arguments, destination);
             return true;
         }
-        if let Some(name) = paths::math(self.sess, instance.def.def_id())
+        if let Some(name) = call_graph::math(self.sess, instance.def.def_id())
             && let Some(value) = self.math(&name, arguments)
         {
-            self.store(
-                destination,
-                &Operand {
-                    value,
-                    shape: destination.shape.clone(),
-                },
-            );
+            self.assign(destination, value);
             return true;
         }
         let Some(name) = instance.intrinsic_name() else {
@@ -56,14 +50,9 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
             | "prefetch_write_data"
             | "prefetch_read_instruction"
             | "prefetch_write_instruction" => return true,
-            "assert_inhabited" | "assert_zero_valid" | "assert_mem_uninitialized_valid" => {
-                let ty = instance.args().0[0].ty().copied().unwrap();
-                let valid = match name {
-                    "assert_zero_valid" => self.sess.zeroable(ty),
-                    "assert_inhabited" => true,
-                    _ => true,
-                };
-                if !valid {
+            "assert_inhabited" | "assert_mem_uninitialized_valid" => return true,
+            "assert_zero_valid" => {
+                if !self.sess.zeroable(type_argument(instance)) {
                     self.error("invalid value initialization in GPU code");
                 }
                 return true;
@@ -71,16 +60,10 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
             "ub_checks" | "contract_checks" | "overflow_checks" => Value::Scalar(ir::Value::bool(
                 crate::policy::intrinsic_check(self.sess, name),
             )),
-            "black_box" | "likely" | "unlikely" | "read_via_copy" => {
-                if name == "read_via_copy" {
-                    self.load(&Place::new(
-                        arguments[0].scalar(),
-                        destination.shape.clone(),
-                    ))
-                    .value
-                } else {
-                    arguments[0].value.clone()
-                }
+            "black_box" | "likely" | "unlikely" => arguments[0].value.clone(),
+            "read_via_copy" => {
+                let source = Place::new(arguments[0].scalar(), destination.shape.clone());
+                self.load(&source).value
             }
             "write_via_move" => {
                 self.store(
@@ -90,7 +73,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                 return true;
             }
             "size_of_val" | "min_align_of_val" | "align_of_val" => {
-                let ty = instance.args().0[0].ty().copied().unwrap();
+                let ty = type_argument(instance);
                 let layout = self.shape_of(ty);
                 let size = match ty.kind() {
                     TyKind::RigidTy(RigidTy::Slice(element)) => {
@@ -120,10 +103,8 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                     operands.push(ir::Value::bool(false));
                 }
                 let value = self.ir.call(format!("llvm.{operation}.{ty}"), ty, operands);
-                let ValueRepr::Scalar(result) = destination.shape.repr().clone() else {
-                    unreachable!()
-                };
-                Value::Scalar(self.ir.resize(value, layout::immediate_type(result), false))
+                let result = layout::immediate_type(destination.shape.scalar());
+                Value::Scalar(self.ir.resize(value, result, false))
             }
             "rotate_left" | "rotate_right" => {
                 let value = arguments[0].scalar();
@@ -148,9 +129,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                 Value::Scalar(self.ir.binary(Binary::Or, Flags::empty(), first, second))
             }
             "saturating_add" | "saturating_sub" => {
-                let ValueRepr::Scalar(scalar) = arguments[0].shape.repr().clone() else {
-                    unreachable!()
-                };
+                let scalar = arguments[0].shape.scalar();
                 let ty = layout::immediate_type(scalar);
                 let operation = if name == "saturating_add" {
                     BinOp::Add
@@ -180,10 +159,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                 Value::Scalar(self.ir.select(overflow, limit, value))
             }
             "exact_div" | "unchecked_div" | "unchecked_rem" => {
-                let ValueRepr::Scalar(scalar) = arguments[0].shape.repr().clone() else {
-                    unreachable!()
-                };
-                let operation = match (name, layout::is_signed(scalar)) {
+                let operation = match (name, layout::is_signed(arguments[0].shape.scalar())) {
                     ("unchecked_rem", true) => Binary::SRem,
                     ("unchecked_rem", false) => Binary::URem,
                     (_, true) => Binary::SDiv,
@@ -280,7 +256,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                 return true;
             }
             "volatile_load" | "volatile_store" => {
-                let layout = self.shape_of(instance.args().0[0].ty().copied().unwrap());
+                let layout = self.shape_of(type_argument(instance));
                 let ValueRepr::Scalar(scalar) = layout.repr().clone() else {
                     self.unsupported("aggregate volatile operations");
                     return true;
@@ -324,21 +300,12 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                 );
                 Value::Scalar(location.generic())
             }
-            name => {
-                if let Some(value) = self.math(name, arguments) {
-                    value
-                } else {
-                    return false;
-                }
-            }
-        };
-        self.store(
-            destination,
-            &Operand {
-                value,
-                shape: destination.shape.clone(),
+            name => match self.math(name, arguments) {
+                Some(value) => value,
+                None => return false,
             },
-        );
+        };
+        self.assign(destination, value);
         true
     }
 
@@ -360,13 +327,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                 for (axis, name) in ["x", "y", "z"].into_iter().enumerate() {
                     let value = self.extended_register(&format!("{prefix}.{name}"));
                     let field = self.field_place(destination, axis);
-                    self.store(
-                        &field,
-                        &Operand {
-                            value: Value::Scalar(value),
-                            shape: field.shape.clone(),
-                        },
-                    );
+                    self.assign(&field, Value::Scalar(value));
                 }
                 return;
             }
@@ -379,11 +340,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
             }
             Lowering::Register(register) => self.extended_register(&register),
             Lowering::Index => {
-                let registers = [
-                    "tid.x", "tid.y", "tid.z", "ctaid.x", "ctaid.y", "ctaid.z", "ntid.x", "ntid.y",
-                    "ntid.z", "nctaid.x", "nctaid.y", "nctaid.z",
-                ]
-                .map(|name| self.extended_register(name));
+                let registers = GEOMETRY.map(|name| self.extended_register(name));
                 self.linear_index(&registers)
             }
             Lowering::Barrier => return self.barrier(),
@@ -395,11 +352,8 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                         CallOperand::I32(value) => ir::Value::i32(*value),
                     })
                     .collect();
-                let ValueRepr::Scalar(result) = destination.shape.repr().clone() else {
-                    unreachable!()
-                };
-                self.ir
-                    .call(symbol, layout::immediate_type(result), operands)
+                let result = layout::immediate_type(destination.shape.scalar());
+                self.ir.call(symbol, result, operands)
             }
             Lowering::Assembly { text, constraints } => {
                 let effects =
@@ -429,11 +383,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                         .assembly(&text, &constraints, effects, result, operands);
                     for (index, (offset, scalar)) in leaves.into_iter().enumerate() {
                         let value = self.ir.extract(result.clone(), index as u32);
-                        let pointer = self.offset(destination.pointer.clone(), offset);
-                        let align = layout::restrict_align(
-                            destination.align,
-                            MachineSize::from_bits(offset as usize * 8),
-                        );
+                        let (pointer, align) = self.interior(destination, offset);
                         self.store_scalar(pointer, value, scalar, align);
                     }
                     return;
@@ -469,11 +419,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                             0 => shared.clone(),
                             _ => ir::Value::int(layout::immediate_type(scalar), 0),
                         };
-                        let pointer = self.offset(destination.pointer.clone(), offset);
-                        let align = layout::restrict_align(
-                            destination.align,
-                            MachineSize::from_bits(offset as usize * 8),
-                        );
+                        let (pointer, align) = self.interior(destination, offset);
                         self.store_scalar(pointer, value, scalar, align);
                     }
                     return;
@@ -481,13 +427,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
             }
             Lowering::Body => unreachable!(),
         };
-        self.store(
-            destination,
-            &Operand {
-                value: Value::Scalar(value),
-                shape: destination.shape.clone(),
-            },
-        );
+        self.assign(destination, Value::Scalar(value));
     }
 
     /// The linear thread index from the twelve geometry registers, in `tid`, `ctaid`, `ntid`,
@@ -528,11 +468,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
         self.scalars(&operand.shape)
             .into_iter()
             .map(|(offset, scalar)| {
-                let pointer = self.offset(place.pointer.clone(), offset);
-                let align = layout::restrict_align(
-                    place.align,
-                    MachineSize::from_bits(offset as usize * 8),
-                );
+                let (pointer, align) = self.interior(&place, offset);
                 self.load_scalar(pointer, scalar, align)
             })
             .collect()
@@ -666,10 +602,8 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
         if name.ends_with("fence") {
             return self.ir.fence(order, name == "atomic_singlethreadfence");
         }
-        let layout = self.shape_of(instance.args().0[0].ty().copied().unwrap());
-        let ValueRepr::Scalar(scalar) = layout.repr().clone() else {
-            unreachable!()
-        };
+        let layout = self.shape_of(type_argument(instance));
+        let scalar = layout.scalar();
         // Atomics on pointers operate on their address bits.
         let pointer_value = layout::immediate_type(scalar).is_pointer();
         let values: Vec<_> = arguments[1..]
@@ -713,13 +647,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                     false => value,
                 };
                 let success = self.ir.extract(result, 1);
-                return self.store(
-                    destination,
-                    &Operand {
-                        value: Value::Pair(value, success),
-                        shape: destination.shape.clone(),
-                    },
-                );
+                return self.assign(destination, Value::Pair(value, success));
             }
             name => {
                 let operation = match name {
@@ -745,20 +673,26 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                 .cast(Conversion::IntToPtr, value, Type::byte_pointer()),
             false => value,
         };
-        self.store(
-            destination,
-            &Operand {
-                value: Value::Scalar(value),
-                shape: destination.shape.clone(),
-            },
-        );
+        self.assign(destination, Value::Scalar(value));
     }
 
     /// Size of the pointee type, the first generic argument of a pointer intrinsic.
     fn element_size(&self, instance: Instance) -> u64 {
-        let ty = instance.args().0[0].ty().copied().unwrap();
-        self.shape_of(ty).size().bytes() as u64
+        self.shape_of(type_argument(instance)).size().bytes() as u64
     }
+}
+
+/// The special registers of the launch geometry, in `tid`, `ctaid`, `ntid`, `nctaid` order.
+pub(super) const GEOMETRY: [&str; 12] = [
+    "tid.x", "tid.y", "tid.z", "ctaid.x", "ctaid.y", "ctaid.z", "ntid.x", "ntid.y", "ntid.z",
+    "nctaid.x", "nctaid.y", "nctaid.z",
+];
+
+/// The first generic argument of an intrinsic, which is a type.
+fn type_argument(instance: Instance) -> Ty {
+    *instance.args().0[0]
+        .ty()
+        .expect("the first generic argument of the intrinsic is a type")
 }
 
 fn ordering(value: u64) -> Ordering {

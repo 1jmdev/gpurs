@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, rc::Rc};
+use std::collections::BTreeMap;
 
 use gpurs_artifact::Parameter;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
@@ -9,7 +9,7 @@ use super::{
 use crate::{
     kernel::KernelParameter,
     stable,
-    stable::{Body, Instance, RigidTy, Sess, Span},
+    stable::{Instance, RigidTy, Session, Span},
     verify::{
         engine::{Engine, Variable},
         render::Names,
@@ -18,7 +18,7 @@ use crate::{
 };
 
 pub struct Analysis<'a, 'sess> {
-    pub sess: Sess<'sess>,
+    pub sess: Session<'sess>,
     pub kernel: Instance,
     pub parameters: &'a [KernelParameter],
     pub scalars: Vec<u32>,
@@ -52,7 +52,7 @@ pub struct Analysis<'a, 'sess> {
 }
 
 impl<'a, 'sess> Analysis<'a, 'sess> {
-    pub fn new(sess: Sess<'sess>, kernel: Instance, parameters: &'a [KernelParameter]) -> Self {
+    pub fn new(sess: Session<'sess>, kernel: Instance, parameters: &'a [KernelParameter]) -> Self {
         let body = sess.body(kernel);
         let blocks = body.blocks.len();
         let span = body.span;
@@ -105,7 +105,7 @@ impl<'a, 'sess> Analysis<'a, 'sess> {
 
     /// Analyzes the kernel body twice: once to a fixpoint, once collecting obligations.
     pub fn run(&mut self) -> Option<State> {
-        let body = self.body(self.kernel);
+        let body = self.sess.body(self.kernel);
         let mut slots = vec![Value::default(); body.locals().len()];
         for (index, parameter) in self.parameters.iter().enumerate() {
             slots[1 + index] = match parameter.metadata {
@@ -134,10 +134,6 @@ impl<'a, 'sess> Analysis<'a, 'sess> {
         self.collect = true;
         self.function(self.kernel, context, state)
             .map(|(state, _)| state)
-    }
-
-    pub fn body(&mut self, instance: Instance) -> Rc<Body> {
-        self.sess.body(instance)
     }
 
     /// The context of `instance` called from `parent`, stable across passes.

@@ -37,7 +37,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                 return self.branch(target);
             }
         };
-        let destination = self.place(destination.clone());
+        let destination = self.place(destination);
         let arguments: Vec<_> = arguments
             .iter()
             .map(|argument| self.operand(argument))

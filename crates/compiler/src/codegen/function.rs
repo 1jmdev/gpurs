@@ -11,11 +11,13 @@ use super::{
     unroll::{self, Loop},
 };
 use crate::{
-    attributes, diagnostic, stable,
+    attributes,
+    graph::Graph,
+    stable,
     stable::{
         AssertMessage, BinOp, Body, CrateDef, Instance, Mutability, NonDivergingIntrinsic,
         Operand as MirOperand, Place as MirPlace, ProjectionElem, RETURN_LOCAL, RigidTy, Rvalue,
-        Sess, Span, StatementKind, TerminatorKind, Ty, ValueRepr,
+        Session, Span, StatementKind, TerminatorKind, Ty, ValueRepr,
     },
     verify::Certificate,
 };
@@ -23,7 +25,7 @@ use crate::{
 /// Lowers the MIR body of one monomorphic instance to an NVVM IR function.
 pub struct FunctionBuilder<'m, 'sess> {
     pub module: &'m mut ModuleBuilder<'sess>,
-    pub sess: Sess<'sess>,
+    pub sess: Session<'sess>,
     pub instance: Instance,
     pub body: Rc<Body>,
     pub locals: Vec<Place>,
@@ -84,11 +86,19 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
         Shape::of(self.sess, ty)
     }
 
-    /// The address and alignment of an enum tag, which is not a field of any variant.
-    pub fn tag_address(&mut self, place: &Place, tag_field: usize) -> (ir::Value, u64) {
-        let offset = place.shape.offset(tag_field);
-        let pointer = self.offset(place.pointer.clone(), offset.bytes() as u64);
+    /// The address `offset` bytes into `place`, with the alignment it keeps there.
+    pub fn interior(&mut self, place: &Place, offset: u64) -> (ir::Value, u64) {
+        let pointer = self.offset(place.pointer.clone(), offset);
         (pointer, layout::restrict_align(place.align, offset))
+    }
+
+    /// Stores `value`, which has the layout of `destination`, into it.
+    pub fn assign(&mut self, destination: &Place, value: Value) {
+        let operand = Operand {
+            value,
+            shape: destination.shape.clone(),
+        };
+        self.store(destination, &operand);
     }
 
     /// The element layout of an array, slice, reference, or single-field aggregate.
@@ -115,9 +125,8 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
     }
 
     pub fn unsupported(&self, what: &str) {
-        diagnostic::error(
-            self.sess,
-            self.span,
+        self.sess.error_help(
+self.span,
             format!("{what} is not supported in GPU code"),
             "use a supported Rust operation or move this operation to the host before launching the kernel",
         );
@@ -179,20 +188,17 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
 
     /// The IR block of copy `copy` of `block`, queued for lowering when new.
     fn instance(&mut self, block: usize, copy: Vec<u64>) -> ir::Block {
-        if copy.iter().all(|&index| index == 0) {
-            if !self.copies.contains_key(&(block, copy.clone())) {
-                self.copies
-                    .insert((block, copy.clone()), self.blocks[block]);
-                self.pending.push((block, copy));
-            }
-            return self.blocks[block];
-        }
-        if let Some(&target) = self.copies.get(&(block, copy.clone())) {
+        let key = (block, copy);
+        if let Some(&target) = self.copies.get(&key) {
             return target;
         }
-        let target = self.ir.fresh_block(&format!("bb{block}.copy"));
-        self.copies.insert((block, copy.clone()), target);
-        self.pending.push((block, copy));
+        let target = if key.1.iter().all(|&index| index == 0) {
+            self.blocks[block]
+        } else {
+            self.ir.fresh_block(&format!("bb{block}.copy"))
+        };
+        self.copies.insert(key.clone(), target);
+        self.pending.push(key);
         target
     }
 
@@ -274,7 +280,8 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
         let entry = self.instance(0, entry);
         self.ir.branch(entry);
 
-        let reachable = reachable_blocks(&self.body);
+        let body = self.body.clone();
+        let reachable = Graph::of(&body).reachable();
         for block in self
             .certificate
             .iter()
@@ -296,19 +303,17 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
             self.block = block;
             self.ir.position(self.copies[&(block, copy.clone())]);
             self.copy = copy;
-            if !reachable.contains(block) {
+            if !reachable[block] {
                 self.ir.unreachable();
                 continue;
             }
-            for statement in self.body.blocks[block].statements.clone() {
+            for statement in &body.blocks[block].statements {
                 self.span = statement.source_info.span;
                 self.statement(&statement.kind);
             }
-            self.span = self.body.blocks[block].terminator.source_info.span;
-            self.terminator(
-                &self.body.blocks[block].terminator.kind.clone(),
-                &signature.result,
-            );
+            let terminator = &body.blocks[block].terminator;
+            self.span = terminator.source_info.span;
+            self.terminator(&terminator.kind, &signature.result);
         }
         self.module.ir.define(self.ir);
     }
@@ -316,23 +321,22 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
     fn statement(&mut self, statement: &StatementKind) {
         match statement {
             StatementKind::Assign(destination, rvalue) => {
-                let place = self.place(destination.clone());
-                let rvalue = rvalue.clone();
-                self.rvalue(&place, &rvalue);
+                let place = self.place(destination);
+                self.rvalue(&place, rvalue);
             }
             StatementKind::SetDiscriminant {
                 place,
                 variant_index,
             } => {
-                let place = self.place(place.clone());
+                let place = self.place(place);
                 self.set_discriminant(&place, *variant_index);
             }
             StatementKind::Intrinsic(intrinsic) => match intrinsic {
                 NonDivergingIntrinsic::Assume(_) => {}
                 NonDivergingIntrinsic::CopyNonOverlapping(copy) => {
-                    let source = self.operand(&copy.src.clone());
-                    let destination = self.operand(&copy.dst.clone());
-                    let count = self.operand(&copy.count.clone());
+                    let source = self.operand(&copy.src);
+                    let destination = self.operand(&copy.dst);
+                    let count = self.operand(&copy.count);
                     let pointee = destination
                         .shape
                         .ty
@@ -461,7 +465,7 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
             TerminatorKind::Drop { place, target, .. } => {
                 let ty = self.place_type(place);
                 if self.sess.needs_drop(ty) {
-                    let place = self.place(place.clone());
+                    let place = self.place(place);
                     let argument = Operand {
                         value: self.address(&place),
                         shape: self.shape_of(Ty::new_ptr(ty, Mutability::Mut)),
@@ -588,8 +592,9 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
             .iter()
             .map(|local| self.load(&self.locals[*local].clone()))
             .collect();
+        let body = self.body.clone();
         for block in first {
-            for statement in self.body.blocks[block].statements.clone() {
+            for statement in &body.blocks[block].statements {
                 self.statement(&statement.kind);
             }
         }
@@ -601,7 +606,7 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
             self.store(&self.locals[*local].clone(), original);
         }
         for block in second {
-            for statement in self.body.blocks[block].statements.clone() {
+            for statement in &body.blocks[block].statements {
                 self.statement(&statement.kind);
             }
         }
@@ -639,81 +644,25 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
     pub fn operand(&mut self, operand: &MirOperand) -> Operand {
         match operand {
             MirOperand::Copy(place) | MirOperand::Move(place) => {
-                let place = self.place(place.clone());
+                let place = self.place(place);
                 self.load(&place)
             }
             MirOperand::Constant(constant) => self.constant(constant),
             MirOperand::RuntimeChecks(checks) => {
                 let value = crate::policy::runtime_check(self.sess, checks);
-                Operand {
-                    value: Value::Scalar(ir::Value::bool(value)),
-                    shape: self.shape_of(Ty::bool_ty()),
-                }
+                Operand::immediate(ir::Value::bool(value), self.shape_of(Ty::bool_ty()))
             }
         }
     }
 
     /// The type of a MIR place, following its projections.
     pub fn place_type(&self, place: &MirPlace) -> Ty {
-        let mut ty = self
-            .body
-            .local_decl(place.local)
-            .unwrap_or_else(|| panic!("no declaration for local {}", place.local))
-            .ty;
-        for element in &place.projection {
-            ty = match element {
-                ProjectionElem::Deref => {
-                    ty.kind()
-                        .builtin_deref(true)
-                        .unwrap_or_else(|| panic!("dereference of non-pointer"))
-                        .ty
-                }
-                ProjectionElem::Field(_, field) => *field,
-                ProjectionElem::Index(_)
-                | ProjectionElem::ConstantIndex { .. }
-                | ProjectionElem::Subslice { .. } => match stable::rigid(ty) {
-                    RigidTy::Array(element, _) | RigidTy::Slice(element) => element,
-                    RigidTy::Ref(_, element, _) | RigidTy::RawPtr(element, _) => {
-                        match stable::rigid(element) {
-                            RigidTy::Array(element, _) | RigidTy::Slice(element) => element,
-                            _ => element,
-                        }
-                    }
-                    _ => ty,
-                },
-                ProjectionElem::Downcast(..) => ty,
-                ProjectionElem::OpaqueCast(cast) => *cast,
-            };
-        }
-        ty
+        place
+            .ty(self.body.locals())
+            .expect("places of monomorphic MIR have types")
     }
 }
 
 fn argument_index(argument_count: usize, local: usize) -> Option<usize> {
     (1..=argument_count).contains(&local).then(|| local - 1)
-}
-
-struct Reachable {
-    bits: Vec<u64>,
-}
-
-impl Reachable {
-    fn contains(&self, block: usize) -> bool {
-        self.bits[block / 64] & (1 << (block % 64)) != 0
-    }
-}
-
-fn reachable_blocks(body: &Body) -> Reachable {
-    let mut bits = vec![0u64; body.blocks.len().div_ceil(64)];
-    let mut pending = vec![0usize];
-    while let Some(block) = pending.pop() {
-        if bits[block / 64] & (1 << (block % 64)) != 0 {
-            continue;
-        }
-        bits[block / 64] |= 1 << (block % 64);
-        for successor in body.blocks[block].terminator.successors() {
-            pending.push(successor);
-        }
-    }
-    Reachable { bits }
 }

@@ -4,7 +4,7 @@ use super::{
     Access, Analysis, Kind, Obligation, Origin, Pointer, Region, State, Value, arithmetic, state,
 };
 use crate::{
-    attributes, call_graph, diagnostic, paths,
+    attributes, call_graph,
     stable::{CrateDef, Instance, Operand, Place, RigidTy, Ty, TyKind},
     verify::symbolic::{self, Atom, Polynomial, Predicate, Relation, Requirement},
 };
@@ -27,11 +27,7 @@ impl Analysis<'_, '_> {
         let resolved = self.operand_type(function).and_then(|ty| match ty.kind() {
             TyKind::RigidTy(RigidTy::FnDef(definition, generics)) => {
                 let instance = Instance::resolve(definition, &generics).ok()?;
-                Some((
-                    instance,
-                    paths::path(self.sess, definition.def_id()),
-                    generics,
-                ))
+                Some((instance, self.sess.path(definition.def_id()), generics))
             }
             _ => None,
         });
@@ -39,7 +35,7 @@ impl Analysis<'_, '_> {
             self.forget(&values, state);
             return self.result(Value::varying(2), destination, state);
         };
-        let path = paths::path(self.sess, instance.def.def_id());
+        let path = self.sess.path(instance.def.def_id());
         let receiver = generics
             .0
             .first()
@@ -122,7 +118,7 @@ impl Analysis<'_, '_> {
             self.forget(&arguments, state);
             return Some(Value::varying(2));
         }
-        let body = self.body(instance);
+        let body = self.sess.body(instance);
         let count = body.arg_locals().len();
         if arguments.len() != count
             && let Some(last) = arguments.pop()
@@ -248,7 +244,7 @@ impl Analysis<'_, '_> {
         matches!(
             ty.kind(),
             TyKind::RigidTy(RigidTy::Adt(definition, arguments))
-                if paths::is(self.sess, definition.def_id(), "core::ops::range::Range")
+                if self.sess.is(definition.def_id(), "core::ops::range::Range")
                     && arguments.0.first().and_then(|argument| argument.ty())
                         .and_then(|element| arithmetic::integer_kind(*element))
                         .is_some_and(|(signed, _)| !signed)
@@ -435,9 +431,8 @@ impl Analysis<'_, '_> {
         let rows = referent.fields.get(1).and_then(launch);
         let columns = referent.fields.get(2).and_then(launch);
         let (Some((region, index)), Some(rows), Some(columns)) = (data, rows, columns) else {
-            diagnostic::error(
-                self.sess,
-                self.span,
+            self.sess.error_help(
+self.span,
                 "the partitioned matrix may differ between GPU threads",
                 "construct it from kernel parameters, or values computed only from them, so every thread derives the same partition",
             );

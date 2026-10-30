@@ -1,7 +1,7 @@
 use super::{Analysis, Origin, Pointer, State, Value, state};
 use crate::{
     stable,
-    stable::{Operand, Place, ProjectionElem, RigidTy, Ty, TyKind},
+    stable::{Operand, Place, ProjectionElem, RigidTy, Ty},
     verify::symbolic::Polynomial,
 };
 
@@ -15,7 +15,6 @@ pub(super) enum Location {
 impl Analysis<'_, '_> {
     pub(super) fn locate(&mut self, place: &Place, state: &State) -> Location {
         let mut location = Location::Slot(self.frame().base + place.local, Vec::new());
-        let mut ty = self.frame().body.locals()[place.local].ty;
         for projection in &place.projection {
             location = match (location, projection) {
                 (location, ProjectionElem::Deref) => {
@@ -86,13 +85,7 @@ impl Analysis<'_, '_> {
                 }
                 (location, _) => location,
             };
-            ty = match projection {
-                ProjectionElem::Deref => ty.kind().builtin_deref(true).map_or(ty, |p| p.ty),
-                ProjectionElem::Field(_, field) => *field,
-                _ => ty,
-            };
         }
-        let _ = ty;
         location
     }
 
@@ -198,25 +191,9 @@ impl Analysis<'_, '_> {
 
     /// The type of a place of the current frame, following its projections.
     pub fn place_type(&self, place: &Place) -> Ty {
-        let mut ty = self.frame().body.locals()[place.local].ty;
-        for element in &place.projection {
-            ty = match element {
-                ProjectionElem::Deref => ty
-                    .kind()
-                    .builtin_deref(true)
-                    .map_or(ty, |pointee| pointee.ty),
-                ProjectionElem::Field(_, field) => *field,
-                ProjectionElem::Downcast(..) => ty,
-                ProjectionElem::OpaqueCast(cast) => *cast,
-                _ => match ty.kind() {
-                    TyKind::RigidTy(RigidTy::Array(element, _) | RigidTy::Slice(element)) => {
-                        element
-                    }
-                    _ => ty,
-                },
-            };
-        }
-        ty
+        place
+            .ty(self.frame().body.locals())
+            .expect("places of monomorphic MIR have types")
     }
 
     pub fn operand_type(&self, operand: &Operand) -> Option<Ty> {

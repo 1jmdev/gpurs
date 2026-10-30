@@ -2,8 +2,9 @@ use gpurs_artifact::{Compatibility, Convergence, Lowering, Memory, Proof};
 use rustc_data_structures::fx::FxHashSet;
 
 use crate::{
-    attributes, call_graph, diagnostic, paths,
-    stable::{Body, CrateDef, Instance, InstanceKind, RigidTy, Sess, Span, TerminatorKind, TyKind},
+    attributes, call_graph,
+    graph::Graph,
+    stable::{CrateDef, Instance, InstanceKind, RigidTy, Session, Span, TerminatorKind, TyKind},
 };
 
 #[derive(Default)]
@@ -13,7 +14,7 @@ pub struct Effects {
 }
 
 /// Rejects unsupported call graphs and determines which asynchronous exit protocols they require.
-pub fn verify(sess: Sess<'_>, root: Instance) -> Effects {
+pub fn check(sess: Session<'_>, root: Instance) -> Effects {
     let mut effects = Effects::default();
     visit(
         sess,
@@ -26,15 +27,14 @@ pub fn verify(sess: Sess<'_>, root: Instance) -> Effects {
 }
 
 fn visit(
-    sess: Sess<'_>,
+    sess: Session<'_>,
     instance: Instance,
     active: &mut Vec<Instance>,
     checked: &mut FxHashSet<Instance>,
     effects: &mut Effects,
 ) {
     if active.contains(&instance) {
-        diagnostic::error(
-            sess,
+        sess.error_help(
             instance.def.def_id().span(),
             format!("recursive GPU call to `{}`", instance.name()),
             "replace the recursive call with a loop; GPU call graphs must be acyclic",
@@ -59,7 +59,8 @@ fn visit(
         active.pop();
         return;
     };
-    for block in reachable(body) {
+    let reachable = Graph::of(body).reachable();
+    for block in (0..body.blocks.len()).filter(|&block| reachable[block]) {
         let terminator = &body.blocks[block].terminator;
         match &terminator.kind {
             TerminatorKind::Call {
@@ -72,8 +73,7 @@ fn visit(
                     continue;
                 };
                 let TyKind::RigidTy(RigidTy::FnDef(..)) = ty.kind() else {
-                    diagnostic::error(
-                        sess,
+                    sess.error_help(
                         terminator.source_info.span,
                         "indirect function calls are not supported in GPU code",
                         "call a #[gpu] function directly or use a generic parameter so the compiler can resolve the callee",
@@ -81,17 +81,16 @@ fn visit(
                     continue;
                 };
                 let Some(&callee) = function.calls.get(&block) else {
-                    diagnostic::error(
-                        sess,
+                    sess.error_help(
                         terminator.source_info.span,
                         "cannot resolve GPU callee",
                         "use a directly resolved GPU function",
                     );
                     continue;
                 };
-                let path = paths::path(sess, callee.def.def_id());
+                let path = sess.path(callee.def.def_id());
                 if attributes::is_device(sess, instance.def.def_id())
-                    && (paths::is(sess, callee.def.def_id(), "core::mem::forget")
+                    && (sess.is(callee.def.def_id(), "core::mem::forget")
                         || path.starts_with("core::mem::manually_drop::")
                         || path.starts_with("core::mem::maybe_uninit::"))
                     && callee
@@ -101,8 +100,7 @@ fn visit(
                         .filter_map(|argument| argument.ty())
                         .any(|ty| sess.needs_drop(*ty))
                 {
-                    diagnostic::error(
-                        sess,
+                    sess.error_help(
                         terminator.source_info.span,
                         "GPU resources cannot bypass destructor cleanup",
                         "let the resource leave scope normally, or complete its operation",
@@ -125,9 +123,8 @@ fn visit(
                                 .skip(1)
                                 .any(|caller| attributes::is_device(sess, caller.def.def_id())))
                 {
-                    diagnostic::error(
-                        sess,
-                        terminator.source_info.span,
+                    sess.error_help(
+terminator.source_info.span,
                         "cannot verify shared memory or collective participation inside this device helper",
                         "keep shared-memory declarations and collective operations in the kernel body so their synchronization phases can be verified",
                     );
@@ -142,8 +139,7 @@ fn visit(
                         Compatibility::Architecture => "a",
                         Compatibility::Family => "f",
                     };
-                    diagnostic::error(
-                        sess,
+                    sess.error_help(
                         terminator.source_info.span,
                         format!(
                             "`{}` requires sm_{}{suffix}",
@@ -174,17 +170,16 @@ fn visit(
     active.pop();
 }
 
-fn allowed(sess: Sess<'_>, instance: Instance, span: Span) -> bool {
+fn allowed(sess: Session<'_>, instance: Instance, span: Span) -> bool {
     if matches!(instance.kind, InstanceKind::Virtual { .. }) {
-        diagnostic::error(
-            sess,
+        sess.error_help(
             span,
             "dynamic dispatch is not supported in GPU code",
             "replace dyn Trait with a generic parameter bounded by the trait",
         );
         return false;
     }
-    let path = paths::path(sess, instance.def.def_id());
+    let path = sess.path(instance.def.def_id());
     let approved = attributes::is_device(sess, instance.def.def_id())
         || call_graph::leaf(sess, instance)
         || path.starts_with("gpurs::gpu::")
@@ -217,24 +212,11 @@ fn allowed(sess: Sess<'_>, instance: Instance, span: Span) -> bool {
             .iter()
             .any(|prefix| path.starts_with(prefix));
     if !approved {
-        diagnostic::error(
-            sess,
-            span,
+        sess.error_help(
+span,
             format!("`{}` is unavailable in GPU code", instance.name()),
             "annotate this function or its implementation with #[gpu]; host-only operations must stay outside the kernel",
         );
     }
     approved
-}
-
-fn reachable(body: &Body) -> Vec<usize> {
-    let mut seen = std::collections::BTreeSet::new();
-    let mut pending = vec![0usize];
-    while let Some(block) = pending.pop() {
-        if block >= body.blocks.len() || !seen.insert(block) {
-            continue;
-        }
-        pending.extend(body.blocks[block].terminator.successors());
-    }
-    seen.into_iter().collect()
 }

@@ -1,9 +1,9 @@
-use gpurs_artifact::{Clause, Extent, Parameter};
+use gpurs_artifact::{Clause, Extent, Parameter, Value};
 
 use crate::{
     layout::{self, PassMode, Shape},
-    stable::{Instance, Sess},
-    verify::{Certificate, Warning},
+    stable::{Instance, Session},
+    verify::Certificate,
 };
 
 #[derive(Clone)]
@@ -15,9 +15,10 @@ pub struct KernelParameter {
 pub struct KernelPlan {
     pub instance: Instance,
     pub key: String,
-    pub symbol: String,
     pub parameters: Vec<KernelParameter>,
     pub extent: Extent,
+    /// The per-thread result a launch returns, when the kernel returns one.
+    pub result: Option<Value>,
     pub requirements: Vec<Clause>,
     pub preconditions: Vec<Clause>,
     /// The checks the certified entry point omits; `None` when it does not exist.
@@ -30,9 +31,6 @@ pub struct KernelPlan {
     pub uses_index: bool,
     /// Whether the kernel issues asynchronous copies, which must land before the block exits.
     pub asynchronous: bool,
-    /// The kernel's entry in the `*.preconditions` report.
-    pub summary: String,
-    pub warnings: Vec<Warning>,
 }
 
 #[derive(Clone)]
@@ -42,7 +40,7 @@ pub struct Signature {
 }
 
 impl Signature {
-    pub fn of(sess: Sess<'_>, instance: Instance) -> Self {
+    pub fn of(sess: Session<'_>, instance: Instance) -> Self {
         let body = sess.body(instance);
         let shape = |ty| {
             let shape = Shape::of(sess, ty);

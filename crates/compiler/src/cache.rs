@@ -12,7 +12,7 @@ use crate::{
     call_graph,
     codegen::ModuleBuilder,
     nvvm,
-    stable::{Instance, Sess},
+    stable::{Instance, Session},
     verify::{self, Warning},
 };
 
@@ -52,7 +52,7 @@ impl Cache {
 
     pub fn kernel(
         &mut self,
-        sess: Sess<'_>,
+        sess: Session<'_>,
         root: Instance,
         configured: bool,
         key: &str,
@@ -97,21 +97,14 @@ impl Cache {
             sess.abort_if_errors();
             lowered
         } else {
-            let plan = verify::kernel(
-                sess,
-                root,
-                configured,
-                key.to_owned(),
-                "gpurs_kernel".to_owned(),
-            );
+            let verified = verify::kernel(sess, root, configured, key.to_owned());
             sess.abort_if_errors();
-            let mut plan = plan.unwrap();
-            for warning in &plan.warnings {
+            let (plan, summary, warnings) =
+                verified.expect("verification without errors produces a plan");
+            for warning in &warnings {
                 warning.emit(sess, &functions);
             }
             sess.abort_if_errors();
-            let summary = std::mem::take(&mut plan.summary);
-            let warnings = std::mem::take(&mut plan.warnings);
             let mut module = ModuleBuilder::new(sess);
             let mut kernel = module.kernel(plan);
             let (ir, shared) = module.finish();

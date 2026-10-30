@@ -1,5 +1,6 @@
 use crate::stable::{
-    FieldsShape, LayoutShape, MachineSize, Scalar, Sess, Ty, ValueRepr, VariantIdx, VariantsShape,
+    FieldsShape, LayoutShape, MachineSize, Scalar, Session, Ty, ValueRepr, VariantIdx,
+    VariantsShape,
 };
 
 /// The layout of one fully monomorphized value, in the form the backend consumes.
@@ -13,7 +14,7 @@ pub struct Shape {
 }
 
 impl Shape {
-    pub fn of(sess: Sess<'_>, ty: Ty) -> Shape {
+    pub fn of(sess: Session<'_>, ty: Ty) -> Shape {
         let layout = match ty.layout() {
             Ok(layout) => layout.shape(),
             Err(error) => panic!(
@@ -49,6 +50,14 @@ impl Shape {
         self.layout.is_unsized()
     }
 
+    /// The scalar of a value held in one register.
+    pub fn scalar(&self) -> Scalar {
+        match self.repr() {
+            ValueRepr::Scalar(scalar) => *scalar,
+            repr => panic!("`{:?}` is not a scalar: {repr:?}", self.ty.kind()),
+        }
+    }
+
     pub fn repr(&self) -> &ValueRepr {
         #[cfg(gpurs_api_value_repr)]
         let repr = &self.layout.value_repr;
@@ -80,7 +89,7 @@ impl Shape {
     }
 
     /// The layout of field `field` of the active variant.
-    pub fn field(&self, sess: Sess<'_>, field: usize) -> Shape {
+    pub fn field(&self, sess: Session<'_>, field: usize) -> Shape {
         Shape::of(
             sess,
             sess.field_type(self.ty, self.variant.unwrap_or(0), field),

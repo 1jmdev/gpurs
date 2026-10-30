@@ -9,12 +9,13 @@ mod call;
 mod constant;
 mod function;
 mod intrinsic;
-pub(crate) mod ir;
+mod ir;
 mod kernel;
-pub(crate) mod layout;
+mod layout;
 mod module;
 mod place;
 mod rvalue;
+mod shared_memory;
 mod unroll;
 
 pub use module::ModuleBuilder;

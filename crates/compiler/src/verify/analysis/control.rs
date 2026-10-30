@@ -2,7 +2,8 @@ use rustc_data_structures::fx::FxHashSet;
 
 use super::{Analysis, Kind, Obligation, Region, State, Value, arithmetic};
 use crate::{
-    diagnostic, policy,
+    graph::Graph,
+    policy,
     stable::{AssertMessage, BinOp, Body, TerminatorKind},
     verify::symbolic::{Atom, Fact, Polynomial, Predicate, Relation, Requirement},
 };
@@ -290,32 +291,24 @@ impl Analysis<'_, '_> {
         {
             return;
         }
-        let body = self.body(self.kernel);
+        let body = self.sess.body(self.kernel);
         let count = body.blocks.len();
-        let all: FxHashSet<_> = (0..=count).collect();
-        let mut postdominators = vec![all; count + 1];
-        postdominators[count] = FxHashSet::from_iter([count]);
-        loop {
-            let mut changed = false;
-            for block in (0..count).rev() {
-                let successors = normal_successors(&body, block);
-                let successors = if successors.is_empty() {
-                    vec![count]
-                } else {
-                    successors
-                };
-                let mut next = postdominators[successors[0]].clone();
-                for successor in &successors[1..] {
-                    next.retain(|block| postdominators[*successor].contains(block));
-                }
-                next.insert(block);
-                changed |= next != postdominators[block];
-                postdominators[block] = next;
+        // Normal edges reversed, entered at a virtual exit that blocks without successors reach.
+        let mut reversed = vec![Vec::new(); count + 1];
+        for block in 0..count {
+            let successors = normal_successors(&body, block);
+            if successors.is_empty() {
+                reversed[count].push(block);
             }
-            if !changed {
-                break;
+            for successor in successors {
+                reversed[successor].push(block);
             }
         }
+        let postdominators = Graph::new(count, reversed).dominators();
+        // Blocks that never exit are postdominated by every block.
+        let postdominates = |first: usize, second: usize| {
+            !postdominators.is_reachable(second) || postdominators.dominates(first, second)
+        };
         for (block, state) in states.iter().enumerate() {
             let Some(state) = state else { continue };
             let TerminatorKind::SwitchInt { discr, targets } = &body.blocks[block].terminator.kind
@@ -336,8 +329,9 @@ impl Analysis<'_, '_> {
                         Relation::Zero,
                     ))
                 });
-            let mut reconvergence = postdominators[block].clone();
-            reconvergence.remove(&block);
+            let reconvergence: FxHashSet<usize> = (0..count)
+                .filter(|&candidate| candidate != block && postdominates(candidate, block))
+                .collect();
             for successor in normal_successors(&body, block) {
                 for (target, controls) in self.controls.iter_mut().enumerate() {
                     if reachable(&body, successor, target, &reconvergence) {
@@ -347,12 +341,11 @@ impl Analysis<'_, '_> {
             }
             for &(collective, permitted, span) in &self.collectives {
                 if value.variance > permitted
-                    && !postdominators[block].contains(&collective)
+                    && !postdominates(collective, block)
                     && reachable(&body, block, collective, &reconvergence)
                 {
-                    diagnostic::error(
-                        self.sess,
-                        span,
+                    self.sess.error_help(
+span,
                         format!(
                             "threads may reach this GPU collective on different control-flow paths in `{}`",
                             self.kernel.name()

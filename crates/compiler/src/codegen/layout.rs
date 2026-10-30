@@ -1,6 +1,6 @@
 use super::ir::Type;
 pub use crate::layout::{PassMode, Shape};
-use crate::stable::{FloatLength, IntegerLength, MachineSize, Primitive, Scalar};
+use crate::stable::{FloatLength, IntegerLength, Primitive, Scalar};
 
 pub fn primitive(scalar: Scalar) -> Primitive {
     match scalar {
@@ -67,12 +67,10 @@ pub fn parameter_types(mode: PassMode) -> Vec<Type> {
     }
 }
 
-/// Alignment of a field at `offset` inside an object aligned to `align`.
-pub fn restrict_align(align: u64, offset: MachineSize) -> u64 {
-    if offset.bytes() == 0 {
-        align
-    } else {
-        let bytes = offset.bytes() as u64;
-        align.min(1 << bytes.trailing_zeros()).max(1)
+/// Alignment of a field `offset` bytes inside an object aligned to `align`.
+pub fn restrict_align(align: u64, offset: u64) -> u64 {
+    match offset {
+        0 => align,
+        offset => align.min(1 << offset.trailing_zeros()),
     }
 }

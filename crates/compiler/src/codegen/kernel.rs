@@ -1,35 +1,35 @@
 use gpurs_artifact::{
     self as artifact, Entry, Kernel, PARAMETERS_OFFSET, RESULT_OFFSET, STATUS_OFFSET, SharedMemory,
-    Value,
 };
 
 use super::{
     function::FunctionBuilder,
+    intrinsic::GEOMETRY,
     ir::{self, Access, Binary, Conversion, Flags, Type},
     module::ModuleBuilder,
     place::Place,
 };
-use crate::{kernel::KernelPlan, layout::Shape, stable, stable::RigidTy};
+use crate::kernel::KernelPlan;
 
 impl<'sess> ModuleBuilder<'sess> {
     pub fn kernel(&mut self, plan: KernelPlan) -> Kernel {
         let certified = plan.certificate.clone().map(|certificate| {
             let root = self.function(plan.instance, Some(certificate.clone()), false);
-            self.entry(&plan, &plan.symbol, root, false, plan.status);
+            self.entry(&plan, SYMBOL, root, false, plan.status);
             let linear = plan.uses_index.then(|| {
-                let symbol = format!("{}_linear", plan.symbol);
+                let symbol = format!("{SYMBOL}_linear");
                 let root = self.function(plan.instance, Some(certificate), true);
                 self.entry(&plan, &symbol, root, true, plan.status);
                 symbol
             });
             Entry {
-                symbol: plan.symbol.clone(),
+                symbol: SYMBOL.to_owned(),
                 linear,
                 status: plan.status,
             }
         });
         let instrumented = plan.instrumented.then(|| {
-            let symbol = format!("{}_instrumented", plan.symbol);
+            let symbol = format!("{SYMBOL}_instrumented");
             let root = self.function(plan.instance, None, false);
             self.entry(&plan, &symbol, root, false, true);
             Entry {
@@ -38,7 +38,6 @@ impl<'sess> ModuleBuilder<'sess> {
                 status: true,
             }
         });
-        let signature = self.signature(plan.instance);
         Kernel {
             key: plan.key,
             name: plan.instance.name(),
@@ -48,10 +47,7 @@ impl<'sess> ModuleBuilder<'sess> {
                 .map(|parameter| parameter.metadata)
                 .collect(),
             extent: plan.extent,
-            result: (!is_unit(&signature.result.1)).then_some(Value {
-                size: signature.result.1.size().bytes() as u64,
-                align: signature.result.1.align(),
-            }),
+            result: plan.result,
             requirements: plan.requirements,
             preconditions: plan.preconditions,
             certified,
@@ -76,14 +72,10 @@ impl<'sess> ModuleBuilder<'sess> {
             .unwrap_or(8)
             .max(8);
         let signature = self.signature(plan.instance);
-        let result = (!is_unit(&signature.result.1)).then_some(Value {
-            size: signature.result.1.size().bytes() as u64,
-            align: signature.result.1.align(),
-        });
         let argument_offset = if status {
             0
         } else {
-            let start = if result.is_some() {
+            let start = if plan.result.is_some() {
                 RESULT_OFFSET
             } else {
                 PARAMETERS_OFFSET
@@ -100,10 +92,6 @@ impl<'sess> ModuleBuilder<'sess> {
         let arguments = function
             .ir
             .cast(Conversion::BitCast, arguments, Type::byte_pointer());
-        let raw = [
-            "tid.x", "tid.y", "tid.z", "ctaid.x", "ctaid.y", "ctaid.z", "ntid.x", "ntid.y",
-            "ntid.z", "nctaid.x", "nctaid.y", "nctaid.z",
-        ];
         if status {
             // Every thread stores the same pointer, so each reads a valid one.
             let pointer = function.offset(arguments.clone(), STATUS_OFFSET);
@@ -124,8 +112,8 @@ impl<'sess> ModuleBuilder<'sess> {
             .collect();
         let destination = function.temporary(signature.result.1.clone());
         function.invoke_named(&root, plan.instance, &operands, &destination);
-        if let Some(result) = result {
-            let registers = raw
+        if let Some(result) = plan.result {
+            let registers = GEOMETRY
                 .map(|register| function.special_register(register))
                 .map(|value| function.ir.cast(Conversion::ZExt, value, Type::I64));
             let index = function.linear_index(&registers);
@@ -159,6 +147,5 @@ impl<'sess> ModuleBuilder<'sess> {
     }
 }
 
-fn is_unit(shape: &Shape) -> bool {
-    matches!(stable::rigid(shape.ty), RigidTy::Tuple(fields) if fields.is_empty())
-}
+/// The entry point of the certified copy; the other copies extend it with a suffix.
+const SYMBOL: &str = "gpurs_kernel";

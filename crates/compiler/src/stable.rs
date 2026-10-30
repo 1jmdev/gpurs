@@ -4,7 +4,7 @@
 //! interface does not yet expose (reachable instances, stable fingerprints, definition paths,
 //! type printing, diagnostics) go through the bridge in this module and nowhere else.
 
-use std::{env, ops::ControlFlow, rc::Rc};
+use std::{cell::RefCell, env, ops::ControlFlow, rc::Rc};
 
 use gpurs_artifact::Target;
 #[cfg(gpurs_api_value_repr)]
@@ -12,7 +12,7 @@ use rustc_ast::attr::AttributeExt;
 use rustc_const_eval::util;
 use rustc_data_structures::{
     fingerprint::Fingerprint,
-    fx::FxHashSet,
+    fx::{FxHashMap, FxHashSet},
     stable_hash::{StableHash, StableHasher},
 };
 pub use rustc_middle::ty::TyCtxt;
@@ -51,7 +51,21 @@ use rustc_public::{
     visitor::{Visitable, Visitor},
 };
 
-use crate::{kernel::Signature, queries::SESSION};
+use crate::{call_graph::Function, kernel::Signature};
+
+/// Per-session caches of derived queries, keyed by stable-interface identities.
+#[derive(Default)]
+pub struct Queries {
+    pub functions: RefCell<FxHashMap<Instance, Rc<Function>>>,
+    pub primitives: RefCell<FxHashMap<DefId, Option<Rc<gpurs_artifact::Primitive>>>>,
+    bodies: RefCell<FxHashMap<Instance, Rc<Body>>>,
+    signatures: RefCell<FxHashMap<Instance, Rc<Signature>>>,
+    paths: RefCell<FxHashMap<DefId, Rc<str>>>,
+}
+
+thread_local! {
+    pub static QUERIES: Queries = Queries::default();
+}
 
 #[derive(Default)]
 struct FingerprintInputs {
@@ -105,9 +119,6 @@ pub struct Session<'tcx> {
     pub target: Target,
 }
 
-/// A borrowed session; one lifetime keeps it usable in structs and impl blocks.
-pub type Sess<'a> = Session<'a>;
-
 impl<'tcx> Session<'tcx> {
     pub fn new(tcx: TyCtxt<'tcx>) -> Self {
         Session {
@@ -120,7 +131,7 @@ impl<'tcx> Session<'tcx> {
     }
 
     pub fn body(&self, instance: Instance) -> Rc<Body> {
-        SESSION.with(|queries| {
+        QUERIES.with(|queries| {
             queries
                 .bodies
                 .borrow_mut()
@@ -131,7 +142,7 @@ impl<'tcx> Session<'tcx> {
     }
 
     pub fn signature(&self, instance: Instance) -> Rc<Signature> {
-        SESSION.with(|queries| {
+        QUERIES.with(|queries| {
             queries
                 .signatures
                 .borrow_mut()
@@ -266,17 +277,24 @@ impl<'tcx> Session<'tcx> {
     }
 
     /// `crate::module::item`, with impl blocks rendered as `{impl#N}`.
-    pub fn path(&self, def: DefId) -> String {
-        let def = self.internal_def(def);
-        format!(
-            "{}{}",
-            self.tcx.crate_name(def.krate),
-            self.tcx.def_path(def).to_string_no_crate_verbose()
-        )
+    pub fn path(&self, def: DefId) -> Rc<str> {
+        QUERIES.with(|queries| {
+            queries
+                .paths
+                .borrow_mut()
+                .entry(def)
+                .or_insert_with(|| {
+                    let def = self.internal_def(def);
+                    let krate = self.tcx.crate_name(def.krate);
+                    let path = self.tcx.def_path(def).to_string_no_crate_verbose();
+                    format!("{krate}{path}").into()
+                })
+                .clone()
+        })
     }
 
     /// The value `module_path!()` produces for an item defined in `def`'s module.
-    pub fn module_path(&self, def: DefId) -> String {
+    pub fn module_path(&self, def: DefId) -> Rc<str> {
         let def = self.internal_def(def);
         let Some(local) = def.as_local() else {
             return self.path(rustc_internal::stable(def));
@@ -286,7 +304,7 @@ impl<'tcx> Session<'tcx> {
     }
 
     pub fn is(&self, def: DefId, expected: &str) -> bool {
-        self.path(def) == expected
+        *self.path(def) == *expected
     }
 
     pub fn is_local(&self, def: DefId) -> bool {
@@ -505,9 +523,17 @@ impl<'tcx> Session<'tcx> {
     }
 }
 
-/// Runs `f` inside the stable interface for `tcx`.
+/// Runs `f` inside the stable interface for `tcx`, discarding the session's caches after it.
 pub fn run<T>(tcx: TyCtxt<'_>, f: impl FnOnce() -> T) -> T {
-    rustc_internal::run(tcx, f).expect("stable compiler interface")
+    let result = rustc_internal::run(tcx, f).expect("stable compiler interface");
+    QUERIES.with(|queries| {
+        queries.functions.take();
+        queries.primitives.take();
+        queries.bodies.take();
+        queries.signatures.take();
+        queries.paths.take();
+    });
+    result
 }
 
 /// The bytes of an allocation, with uninitialized bytes read as zero.

@@ -2,7 +2,6 @@ use rustc_data_structures::fx::FxHashSet;
 
 use super::{Analysis, Region, control};
 use crate::{
-    diagnostic,
     stable::BinOp,
     verify::{
         proof::{self, Comparison, Proofs},
@@ -12,7 +11,7 @@ use crate::{
 
 impl Analysis<'_, '_> {
     pub fn races(&mut self) {
-        let body = self.body(self.kernel);
+        let body = self.sess.body(self.kernel);
         for index in 0..self.accesses.len() {
             if !self.accesses[index].write {
                 continue;
@@ -30,8 +29,7 @@ impl Analysis<'_, '_> {
                 )
             });
             if !access.atomic && access.partition.is_none() && injective.is_none() {
-                diagnostic::error(
-                    self.sess,
+                self.sess.error_help(
                     access.span,
                     format!(
                         "multiple GPU threads may write the same memory location in `{}`",
@@ -71,8 +69,7 @@ impl Analysis<'_, '_> {
                 }
                 if access.partition.is_some() || other.partition.is_some() {
                     if access.partition != other.partition {
-                        diagnostic::error(
-                            self.sess,
+                        self.sess.error_help(
                             other.span,
                             "GPU memory accesses may race with a partitioned matrix",
                             "access the matrix only through one partition built from the same data and dimensions",
@@ -105,8 +102,7 @@ impl Analysis<'_, '_> {
                 if !separated
                     && (access.origin.index != other.origin.index || access.atomic != other.atomic)
                 {
-                    diagnostic::error(
-                        self.sess,
+                    self.sess.error_help(
                         other.span,
                         "GPU memory accesses may race",
                         "use the same distinct per-thread index, or separate shared-memory phases with gpu::sync_block()",
@@ -188,8 +184,7 @@ impl Analysis<'_, '_> {
                         }
                     }
                 }
-                None => diagnostic::error(
-                    self.sess,
+                None => self.sess.error_help(
                     access.span,
                     "shared memory may be read before it is initialized",
                     "initialize every shared-memory element, then call gpu::sync_block() before other threads read it",
