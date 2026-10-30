@@ -101,6 +101,14 @@ impl<'sess> ModuleBuilder<'sess> {
         }
         self.ir.define(self.failure("gpurs.fail", true));
         self.ir.define(self.failure("gpurs.record", false));
+        if self.shared.dynamic {
+            self.shared.required.dynamic_bytes =
+                self.shared.required.dynamic_bytes.next_multiple_of(16);
+            let mut offset = ir::Function::new("gpurs.dynamic_offset", Type::I64, vec![]);
+            offset.inline = true;
+            offset.ret(Some(ir::Value::i64(self.shared.required.dynamic_bytes)));
+            self.ir.define(offset);
+        }
         (self.ir.to_string(), self.shared.required)
     }
 

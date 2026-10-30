@@ -28,6 +28,7 @@ macro_rules! assembly {
     };
 }
 
+pub mod asynchronous;
 pub mod atomic;
 pub mod bit;
 pub mod convert;
@@ -35,11 +36,12 @@ pub mod float;
 mod float16;
 pub mod integer;
 pub(crate) mod intrinsics;
-mod shared;
+pub mod shared;
+pub mod synchronization;
 pub mod tensor;
 mod thread;
 pub mod warp;
 
 pub use float16::{BFloat16, Half};
-pub use shared::{SharedArray, shared_array};
+pub use shared::{SharedArray, SharedRegion, dynamic_shared, shared_array};
 pub use thread::{Block, Dim3, block_dim, block_id, grid_dim, index, sync_block, thread_id};

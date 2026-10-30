@@ -1,4 +1,4 @@
-//! Warp-level collectives. All 32 lanes of a warp must participate.
+//! Warp-level collectives. Unless a mask is explicit, all 32 lanes must participate.
 
 use std::ops::Add;
 
@@ -324,3 +324,32 @@ pub fn reduce_sum_group(mut value: f32, lanes: usize) -> f32 {
     }
     value
 }
+
+/// Synchronizes all 32 lanes and orders their prior memory accesses. Every lane participates.
+#[primitive(
+    lowering = Assembly {
+        text: "bar.warp.sync -1;",
+        constraints: "~{memory}",
+    },
+    architecture = 70,
+    convergence = Warp,
+    memory = Encapsulated,
+    proof = Uniform
+)]
+pub fn sync();
+
+/// Synchronizes the selected lanes and orders memory accesses among those participants.
+/// # Safety
+/// Each caller's bit must be set. All non-exited lanes in `mask` must execute this operation
+/// with the same mask; keep participating lanes converged. Excluded lanes gain no visibility.
+#[primitive(
+    lowering = Assembly {
+        text: "bar.warp.sync $0;",
+        constraints: "r,~{memory}",
+    },
+    architecture = 70,
+    convergence = None,
+    memory = Encapsulated,
+    proof = Varying
+)]
+pub unsafe fn sync_mask(mask: u32);

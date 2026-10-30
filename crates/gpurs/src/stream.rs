@@ -23,7 +23,8 @@ pub struct Stream {
 pub struct LaunchConfig {
     pub grid: [usize; 3],
     pub block: [usize; 3],
-    /// Dynamic shared memory in bytes.
+    /// Total dynamic shared memory in bytes, including the compiler-reserved prefix.
+    /// `gpu::shared::dynamic_shared` exposes the remaining launch-time scratch storage.
     pub shared_bytes: usize,
 }
 

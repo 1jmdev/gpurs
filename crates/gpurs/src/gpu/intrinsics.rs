@@ -165,6 +165,7 @@ asynchronous! {
     wait_group_4 "cp.async.wait_group 4;";
     wait_group_5 "cp.async.wait_group 5;";
     wait_group_6 "cp.async.wait_group 6;";
+    wait_group_7 "cp.async.wait_group 7;";
 }
 
 #[track_caller]
@@ -172,3 +173,15 @@ asynchronous! {
 pub fn host() -> ! {
     panic!("GPU built-ins can only be called from #[gpu] code running on the GPU")
 }
+
+#[primitive(
+    lowering = Assembly {
+        text: "fence.mbarrier_init.release.cluster;",
+        constraints: "~{memory}",
+    },
+    architecture = 90,
+    convergence = None,
+    memory = Encapsulated,
+    proof = Uniform
+)]
+pub fn barrier_fence_initialization();

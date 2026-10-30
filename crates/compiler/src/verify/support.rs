@@ -1,4 +1,4 @@
-use gpurs_artifact::{Compatibility, Lowering, Memory};
+use gpurs_artifact::{Compatibility, Lowering};
 use rustc_data_structures::fx::FxHashSet;
 
 use crate::{
@@ -112,7 +112,8 @@ fn visit(
                     matches!(&primitive.lowering, Lowering::Assembly { text, .. } if text.starts_with("cp.async."))
                 });
                 effects.tensor |= primitive.as_ref().is_some_and(|primitive| {
-                    primitive.architecture >= 90 && primitive.memory != Memory::None
+                    matches!(&primitive.lowering, Lowering::Assembly { text, .. }
+                        if text.contains("wgmma.") || text.contains("tcgen05."))
                 });
                 if let Some(primitive) = primitive
                     && !sess

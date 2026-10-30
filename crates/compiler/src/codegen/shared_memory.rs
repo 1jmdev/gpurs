@@ -11,6 +11,7 @@ type Site = (Instance, usize, Vec<u64>, CallPath);
 
 pub struct SharedAllocations {
     pub required: SharedMemory,
+    pub dynamic: bool,
     slots: FxHashMap<Site, (Value, u64)>,
 }
 
@@ -22,6 +23,7 @@ impl Default for SharedAllocations {
                 dynamic_bytes: 0,
             },
             slots: FxHashMap::default(),
+            dynamic: false,
         }
     }
 }

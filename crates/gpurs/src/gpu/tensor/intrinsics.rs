@@ -1,6 +1,7 @@
 use gpurs_macros::primitive;
 
 use super::Accumulator;
+pub use crate::gpu::intrinsics::barrier_fence_initialization;
 
 macro_rules! encapsulated {
     ($($convergence:ident $architecture:literal $compatibility:ident $text:literal $constraints:literal
@@ -25,8 +26,6 @@ macro_rules! encapsulated {
 encapsulated! {
     None 80 Generic "mbarrier.init.shared::cta.b64 [$0], $1;" "r,r,~{memory}"
     fn barrier_initialize(barrier: u32, count: u32);
-    None 90 Generic "fence.mbarrier_init.release.cluster;" "~{memory}"
-    fn barrier_fence_initialization();
     None 90 Generic "mbarrier.expect_tx.relaxed.cta.shared::cta.b64 [$0], $1;" "r,r,~{memory}"
     fn barrier_expect(barrier: u32, bytes: u32);
     None 90 Generic "mbarrier.arrive.shared::cta.b64 _, [$0];" "r,~{memory}"

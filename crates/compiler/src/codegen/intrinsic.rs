@@ -344,6 +344,32 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                 self.linear_index(&registers)
             }
             Lowering::Barrier => return self.barrier(),
+            Lowering::DynamicShared => {
+                self.module.shared.dynamic = true;
+                let base = self
+                    .module
+                    .ir
+                    .external("gpurs_dynamic", Type::bytes(0), 3, 16);
+                let base = self
+                    .ir
+                    .cast(Conversion::AddrSpaceCast, base, Type::byte_pointer());
+                let offset = self.ir.call("gpurs.dynamic_offset", Type::I64, vec![]);
+                let pointer = self.ir.offset(base, offset.clone(), false);
+                let total = self.ir.assembly(
+                    "mov.u32 $0, %dynamic_smem_size;",
+                    "=r",
+                    false,
+                    Type::I32,
+                    vec![],
+                );
+                let total = self.ir.cast(Conversion::ZExt, total, Type::I64);
+                let length = self.ir.binary(Binary::Sub, Flags::empty(), total, offset);
+                let field = self.field_place(destination, 0);
+                self.assign(&field, Value::Scalar(pointer));
+                let field = self.field_place(destination, 1);
+                self.assign(&field, Value::Scalar(length));
+                return;
+            }
             Lowering::Call { symbol, operands } => {
                 let operands = operands
                     .iter()

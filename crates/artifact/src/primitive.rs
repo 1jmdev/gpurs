@@ -45,6 +45,7 @@ pub enum Lowering {
     Index,
     Barrier,
     SharedArray,
+    DynamicShared,
     /// Compiled from its Rust body; the definition still governs verification.
     Body,
 }
