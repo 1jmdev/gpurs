@@ -46,7 +46,7 @@ pub(crate) use error::GpuResult as Result;
 pub use error::{Error, GpuResult};
 pub use gpu::{BFloat16, Half};
 pub use gpurs_driver::{Context, ContextGuard, KernelNodeParameters, Ownership};
-pub use gpurs_macros::{gpu, unsafe_primitive};
+pub use gpurs_macros::{embed, gpu, unsafe_primitive};
 pub use graph::{CaptureStream, Graph, GraphExec};
 pub use indexed::DeviceIndexed;
 pub use interop::{Event, ExternalAccess};

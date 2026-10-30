@@ -15,6 +15,9 @@ pub(crate) const COMPILER_LIBRARY: &str = env!("GPURS_COMPILER_LIBRARY");
 /// Delegates the private compilation to the gpurs compiler library.
 pub(crate) fn run_wrapper() -> i32 {
     let mut arguments: Vec<_> = env::args_os().collect();
+    if env::var_os("GPURS_LIBRARY_VIEW").is_some() {
+        return run_library(&arguments);
+    }
     let target = env::var("CARGO_PKG_NAME").ok() == env::var("GPURS_PACKAGE").ok()
         && arguments
             .windows(2)
@@ -123,6 +126,10 @@ pub(crate) fn run_wrapper() -> i32 {
             .arg("--target-dir")
             .arg(&directory)
             .env("RUSTC", &arguments[1])
+            .env("RUSTC_WRAPPER", env::current_exe().unwrap())
+            .env("GPURS_WRAPPER", "1")
+            .env("GPURS_LIBRARY_VIEW", "1")
+            .env("GLIBC_TUNABLES", "glibc.rtld.optional_static_tls=65536")
             .env("RUSTC_BOOTSTRAP", "1")
             .env(
                 "CARGO_ENCODED_RUSTFLAGS",
@@ -184,6 +191,42 @@ pub(crate) fn run_wrapper() -> i32 {
             }
         }
     }
+    compiler_entry(b"gpurs_compiler_main", &arguments)
+}
+
+/// Compiles a crate of the device-view check build. Crates that use gpurs keep their host
+/// launchers beside the device view, so launches inside libraries remain discoverable.
+fn run_library(arguments: &[std::ffi::OsString]) -> i32 {
+    let gpurs = arguments
+        .windows(2)
+        .any(|pair| pair[0] == "--extern" && pair[1].to_string_lossy().starts_with("gpurs="));
+    let internal = env::var("CARGO_PKG_NAME").is_ok_and(|name| name.starts_with("gpurs"));
+    if !gpurs || internal {
+        return Command::new(&arguments[1])
+            .args(&arguments[2..])
+            .status()
+            .unwrap_or_else(|error| build::fail(&format!("cannot run rustc: {error}")))
+            .code()
+            .unwrap_or(1);
+    }
+    let mut library = Vec::with_capacity(arguments.len());
+    let mut remaining = arguments.iter();
+    while let Some(argument) = remaining.next() {
+        if argument == "--cfg"
+            && remaining
+                .as_slice()
+                .first()
+                .is_some_and(|value| value == "gpurs_device")
+        {
+            remaining.next();
+        } else if argument != "--cfg=gpurs_device" {
+            library.push(argument.clone());
+        }
+    }
+    compiler_entry(b"gpurs_library_main", &library)
+}
+
+fn compiler_entry(symbol: &[u8], arguments: &[std::ffi::OsString]) -> i32 {
     let arguments: Vec<CString> = arguments
         .iter()
         .map(|argument| {
@@ -198,7 +241,7 @@ pub(crate) fn run_wrapper() -> i32 {
             build::fail(&format!("cannot load the gpurs compiler: {error}"))
         });
         let entry: Symbol<unsafe extern "C" fn(c_int, *const *const c_char) -> c_int> = library
-            .get(b"gpurs_compiler_main")
+            .get(symbol)
             .unwrap_or_else(|error| build::fail(&error.to_string()));
         let code = entry(pointers.len() as c_int, pointers.as_ptr());
         mem::forget(library);

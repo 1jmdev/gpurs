@@ -346,6 +346,34 @@ impl<'tcx> Session<'tcx> {
             .map(rustc_internal::stable)
     }
 
+    /// The device definition `module::__gpurs_device::tail` of a dependency crate.
+    pub fn external_device(&self, module: &str, tail: &str) -> Option<DefId> {
+        let mut segments = module.split("::");
+        let name = segments.next()?;
+        let krate = *self
+            .tcx
+            .crates(())
+            .iter()
+            .find(|krate| self.tcx.crate_name(**krate).as_str() == name)?;
+        let mut current = krate.as_def_id();
+        for segment in segments.chain(["__gpurs_device"]) {
+            current = self
+                .tcx
+                .module_children(current)
+                .iter()
+                .find(|child| child.ident.as_str() == segment)?
+                .res
+                .opt_def_id()?;
+        }
+        self.tcx
+            .module_children(current)
+            .iter()
+            .filter(|child| child.ident.as_str() == tail)
+            .filter_map(|child| child.res.opt_def_id())
+            .map(rustc_internal::stable)
+            .find(|definition| self.tool_attr(*definition, "device").as_deref() == Some(tail))
+    }
+
     /// The value of a registered `#[gpurs_tool::name = "..."]` attribute on `def`.
     pub fn tool_attr(&self, def: DefId, name: &str) -> Option<String> {
         let internal = self.internal_def(def);

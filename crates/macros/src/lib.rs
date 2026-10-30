@@ -40,6 +40,13 @@ pub fn gpu(attribute: TokenStream, item: TokenStream) -> TokenStream {
     .into()
 }
 
+/// Embeds the GPU kernels this executable launches, including those of its dependencies. Use it
+/// once in an executable that defines no `#[gpu]` item of its own.
+#[proc_macro]
+pub fn embed(_: TokenStream) -> TokenStream {
+    compilation::artifact().into()
+}
+
 #[doc(hidden)]
 #[proc_macro]
 pub fn compilation(item: TokenStream) -> TokenStream {

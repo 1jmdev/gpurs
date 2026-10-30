@@ -35,6 +35,35 @@ pub unsafe extern "C" fn gpurs_compiler_main(
     session(&device_arguments(&arguments[1..]), &mut DeviceView)
 }
 
+/// Compiles a library crate of the device-view check build with the gpurs source view, so
+/// its host launchers and device definitions coexist like those of the selected executable.
+///
+/// # Safety
+/// `arguments` must point to `count` NUL-terminated strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gpurs_library_main(
+    count: c_int,
+    arguments: *const *const c_char,
+) -> c_int {
+    let arguments: Vec<String> = (0..count as usize)
+        // SAFETY: guaranteed by the caller.
+        .map(|index| {
+            unsafe { CStr::from_ptr(*arguments.add(index)) }
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    session(&arguments[1..], &mut LibraryView)
+}
+
+struct LibraryView;
+
+impl Callbacks for LibraryView {
+    fn config(&mut self, config: &mut rustc_interface::interface::Config) {
+        config.file_loader = Some(Box::new(crate::source::Source));
+    }
+}
+
 fn session(arguments: &[String], callbacks: &mut (dyn Callbacks + Send)) -> c_int {
     #[cfg(gpurs_api_compiler_entrypoint)]
     use rustc_driver::compiler_entrypoint as run_compiler;

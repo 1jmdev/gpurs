@@ -199,8 +199,10 @@ pub(crate) fn device_item(item: Item, fast_math: bool) -> Result<Tokens> {
             function
                 .attrs
                 .push(parse_quote!(#[gpurs_tool::device = #tail]));
+            function.attrs.push(marker("device", &tail));
             if fast_math {
                 function.attrs.push(parse_quote!(#[gpurs_tool::fast_math]));
+                function.attrs.push(marker("fast_math", ""));
             }
             function.vis = parse_quote!(pub(super));
             DevicePaths.visit_item_fn_mut(&mut function);
@@ -229,8 +231,10 @@ pub(crate) fn device_item(item: Item, fast_math: bool) -> Result<Tokens> {
                 method
                     .attrs
                     .push(parse_quote!(#[gpurs_tool::device = #tail]));
+                method.attrs.push(marker("device", &tail));
                 if method_fast_math {
                     method.attrs.push(parse_quote!(#[gpurs_tool::fast_math]));
+                    method.attrs.push(marker("fast_math", ""));
                 }
                 if implementation.trait_.is_none() && matches!(method.vis, Visibility::Inherited) {
                     method.vis = parse_quote!(pub(super));
@@ -241,6 +245,12 @@ pub(crate) fn device_item(item: Item, fast_math: bool) -> Result<Tokens> {
         }
         _ => unreachable!(),
     }
+}
+
+/// The documentation form of a tool attribute, which dependency metadata always retains.
+fn marker(name: &str, value: &str) -> syn::Attribute {
+    let text = format!("<!-- gpurs::{name}={value} -->");
+    parse_quote!(#[doc = #text])
 }
 
 pub(crate) fn artifact() -> Tokens {

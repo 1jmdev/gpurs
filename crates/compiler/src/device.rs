@@ -50,13 +50,21 @@ impl DeviceView {
         let mut modules = Vec::new();
         let mut report = String::new();
         for launch in &host.launches {
-            let Some((definition, _)) = definitions.iter().find(|(definition, tail)| {
-                *tail == launch.tail
-                    && sess
-                        .module_path(definition.def_id())
-                        .strip_suffix("::__gpurs_device")
-                        == Some(launch.module.as_str())
-            }) else {
+            let Some(definition) = definitions
+                .iter()
+                .find(|(definition, tail)| {
+                    *tail == launch.tail
+                        && sess
+                            .module_path(definition.def_id())
+                            .strip_suffix("::__gpurs_device")
+                            == Some(launch.module.as_str())
+                })
+                .map(|(definition, _)| *definition)
+                .or_else(|| {
+                    sess.external_device(&launch.module, &launch.tail)
+                        .map(rustc_public::CrateItem)
+                })
+            else {
                 sess.err(format!(
                     "GPU definition for `{}` was not found in the device view",
                     launch.key
