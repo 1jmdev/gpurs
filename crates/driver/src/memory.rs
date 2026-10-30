@@ -1,46 +1,68 @@
 use std::{ffi::c_void, mem::MaybeUninit, ptr};
 
 use crate::{
-    Stream,
+    Result, Stream,
     ffi::{self, DevicePointer},
 };
 
 pub fn allocate(bytes: usize) -> DevicePointer {
+    try_allocate(bytes).unwrap_or_else(|error| panic!("{error}"))
+}
+
+pub fn try_allocate(bytes: usize) -> Result<DevicePointer> {
     let mut pointer = 0;
     // SAFETY: the out-pointer references a valid local.
-    ffi::check(
+    ffi::result(
         unsafe { ffi::cuMemAlloc_v2(&mut pointer, bytes.max(1)) },
         "cuMemAlloc",
-    );
-    pointer
+    )?;
+    Ok(pointer)
 }
 
 /// # Safety
 /// No queued or future device work may access `pointer`.
 pub unsafe fn free(pointer: DevicePointer) {
+    unsafe { try_free(pointer) }.unwrap_or_else(|error| panic!("{error}"))
+}
+
+/// # Safety
+/// The resource and lifetime requirements of [`free`] apply.
+pub unsafe fn try_free(pointer: DevicePointer) -> Result<()> {
     // SAFETY: guaranteed by the caller.
-    ffi::check(unsafe { ffi::cuMemFree_v2(pointer) }, "cuMemFree");
+    ffi::result(unsafe { ffi::cuMemFree_v2(pointer) }, "cuMemFree")?;
+    Ok(())
 }
 
 /// Stream-ordered allocation; other streams must order after `stream` before use.
 pub fn allocate_async(bytes: usize, stream: &Stream) -> DevicePointer {
+    try_allocate_async(bytes, stream).unwrap_or_else(|error| panic!("{error}"))
+}
+
+pub fn try_allocate_async(bytes: usize, stream: &Stream) -> Result<DevicePointer> {
     let mut pointer = 0;
     // SAFETY: the out-pointer references a valid local.
-    ffi::check(
+    ffi::result(
         unsafe { ffi::cuMemAllocAsync(&mut pointer, bytes.max(1), stream.raw) },
         "cuMemAllocAsync",
-    );
-    pointer
+    )?;
+    Ok(pointer)
 }
 
 /// # Safety
 /// All work accessing `pointer` must be ordered before `stream`'s current position.
 pub unsafe fn free_async(pointer: DevicePointer, stream: &Stream) {
+    unsafe { try_free_async(pointer, stream) }.unwrap_or_else(|error| panic!("{error}"))
+}
+
+/// # Safety
+/// The resource and lifetime requirements of [`free_async`] apply.
+pub unsafe fn try_free_async(pointer: DevicePointer, stream: &Stream) -> Result<()> {
     // SAFETY: guaranteed by the caller.
-    ffi::check(
+    ffi::result(
         unsafe { ffi::cuMemFreeAsync(pointer, stream.raw) },
         "cuMemFreeAsync",
-    );
+    )?;
+    Ok(())
 }
 
 /// Copies host memory to the device.
@@ -53,11 +75,22 @@ pub unsafe fn copy_to_device_async(
     source: &[MaybeUninit<u8>],
     stream: &Stream,
 ) {
+    unsafe { try_copy_to_device_async(destination, source, stream) }
+        .unwrap_or_else(|error| panic!("{error}"))
+}
+
+/// # Safety
+/// The resource and lifetime requirements of [`copy_to_device_async`] apply.
+pub unsafe fn try_copy_to_device_async(
+    destination: DevicePointer,
+    source: &[MaybeUninit<u8>],
+    stream: &Stream,
+) -> Result<()> {
     if source.is_empty() {
-        return;
+        return Ok(());
     }
     // SAFETY: guaranteed by the caller; the source slice is valid for reads.
-    ffi::check(
+    ffi::result(
         unsafe {
             ffi::cuMemcpyHtoDAsync_v2(
                 destination,
@@ -67,7 +100,8 @@ pub unsafe fn copy_to_device_async(
             )
         },
         "cuMemcpyHtoDAsync",
-    );
+    )?;
+    Ok(())
 }
 
 /// # Safety
@@ -77,11 +111,22 @@ pub unsafe fn copy_from_device_async(
     source: DevicePointer,
     stream: &Stream,
 ) {
+    unsafe { try_copy_from_device_async(destination, source, stream) }
+        .unwrap_or_else(|error| panic!("{error}"))
+}
+
+/// # Safety
+/// The resource and lifetime requirements of [`copy_from_device_async`] apply.
+pub unsafe fn try_copy_from_device_async(
+    destination: &mut [MaybeUninit<u8>],
+    source: DevicePointer,
+    stream: &Stream,
+) -> Result<()> {
     if destination.is_empty() {
-        return;
+        return Ok(());
     }
     // SAFETY: guaranteed by the caller.
-    ffi::check(
+    ffi::result(
         unsafe {
             ffi::cuMemcpyDtoHAsync_v2(
                 destination.as_mut_ptr().cast::<c_void>(),
@@ -91,7 +136,8 @@ pub unsafe fn copy_from_device_async(
             )
         },
         "cuMemcpyDtoHAsync",
-    );
+    )?;
+    Ok(())
 }
 
 /// Synchronous copy, ordered after all previously completed work.
@@ -99,8 +145,17 @@ pub unsafe fn copy_from_device_async(
 /// # Safety
 /// `source` must reference at least `destination.len()` readable device bytes.
 pub unsafe fn copy_from_device(destination: &mut [MaybeUninit<u8>], source: DevicePointer) {
+    unsafe { try_copy_from_device(destination, source) }.unwrap_or_else(|error| panic!("{error}"))
+}
+
+/// # Safety
+/// The resource and lifetime requirements of [`copy_from_device`] apply.
+pub unsafe fn try_copy_from_device(
+    destination: &mut [MaybeUninit<u8>],
+    source: DevicePointer,
+) -> Result<()> {
     // SAFETY: guaranteed by the caller.
-    ffi::check(
+    ffi::result(
         unsafe {
             ffi::cuMemcpyDtoH_v2(
                 destination.as_mut_ptr().cast::<c_void>(),
@@ -109,7 +164,8 @@ pub unsafe fn copy_from_device(destination: &mut [MaybeUninit<u8>], source: Devi
             )
         },
         "cuMemcpyDtoH",
-    );
+    )?;
+    Ok(())
 }
 
 /// Sets `bytes` bytes to `value`.
@@ -117,14 +173,27 @@ pub unsafe fn copy_from_device(destination: &mut [MaybeUninit<u8>], source: Devi
 /// # Safety
 /// `destination` must hold `bytes` bytes until the fill completes.
 pub unsafe fn fill_async(destination: DevicePointer, value: u8, bytes: usize, stream: &Stream) {
+    unsafe { try_fill_async(destination, value, bytes, stream) }
+        .unwrap_or_else(|error| panic!("{error}"))
+}
+
+/// # Safety
+/// The resource and lifetime requirements of [`fill_async`] apply.
+pub unsafe fn try_fill_async(
+    destination: DevicePointer,
+    value: u8,
+    bytes: usize,
+    stream: &Stream,
+) -> Result<()> {
     if bytes == 0 {
-        return;
+        return Ok(());
     }
     // SAFETY: guaranteed by the caller.
-    ffi::check(
+    ffi::result(
         unsafe { ffi::cuMemsetD8Async(destination, value, bytes, stream.raw) },
         "cuMemsetD8Async",
-    );
+    )?;
+    Ok(())
 }
 
 /// # Safety
@@ -135,11 +204,24 @@ pub unsafe fn copy_device_async(
     bytes: usize,
     stream: &Stream,
 ) {
+    unsafe { try_copy_device_async(destination, source, bytes, stream) }
+        .unwrap_or_else(|error| panic!("{error}"))
+}
+
+/// # Safety
+/// The resource and lifetime requirements of [`copy_device_async`] apply.
+pub unsafe fn try_copy_device_async(
+    destination: DevicePointer,
+    source: DevicePointer,
+    bytes: usize,
+    stream: &Stream,
+) -> Result<()> {
     // SAFETY: guaranteed by the caller.
-    ffi::check(
+    ffi::result(
         unsafe { ffi::cuMemcpyDtoDAsync_v2(destination, source, bytes, stream.raw) },
         "cuMemcpyDtoDAsync",
-    );
+    )?;
+    Ok(())
 }
 
 /// # Safety
@@ -150,21 +232,38 @@ pub unsafe fn fill_words_async(
     count: usize,
     stream: &Stream,
 ) {
+    unsafe { try_fill_words_async(destination, value, count, stream) }
+        .unwrap_or_else(|error| panic!("{error}"))
+}
+
+/// # Safety
+/// The resource and lifetime requirements of [`fill_words_async`] apply.
+pub unsafe fn try_fill_words_async(
+    destination: DevicePointer,
+    value: u32,
+    count: usize,
+    stream: &Stream,
+) -> Result<()> {
     // SAFETY: guaranteed by the caller.
-    ffi::check(
+    ffi::result(
         unsafe { ffi::cuMemsetD32Async(destination, value, count, stream.raw) },
         "cuMemsetD32Async",
-    );
+    )?;
+    Ok(())
 }
 
 pub fn allocate_host(bytes: usize) -> *mut c_void {
+    try_allocate_host(bytes).unwrap_or_else(|error| panic!("{error}"))
+}
+
+pub fn try_allocate_host(bytes: usize) -> Result<*mut c_void> {
     let mut pointer = ptr::null_mut();
     // SAFETY: the out-pointer references a valid local; portable storage works across contexts.
-    ffi::check(
+    ffi::result(
         unsafe { ffi::cuMemHostAlloc(&mut pointer, bytes.max(1), 1) },
         "cuMemHostAlloc",
-    );
-    pointer
+    )?;
+    Ok(pointer)
 }
 
 /// # Safety
@@ -177,11 +276,18 @@ pub unsafe fn free_host(pointer: *mut c_void) {
 /// # Safety
 /// The range must remain allocated at this address until unregistered.
 pub unsafe fn register_host(pointer: *mut c_void, bytes: usize) {
+    unsafe { try_register_host(pointer, bytes) }.unwrap_or_else(|error| panic!("{error}"))
+}
+
+/// # Safety
+/// The resource and lifetime requirements of [`register_host`] apply.
+pub unsafe fn try_register_host(pointer: *mut c_void, bytes: usize) -> Result<()> {
     // SAFETY: guaranteed by the caller; portable registration works across contexts.
-    ffi::check(
+    ffi::result(
         unsafe { ffi::cuMemHostRegister_v2(pointer, bytes, 1) },
         "cuMemHostRegister",
-    );
+    )?;
+    Ok(())
 }
 
 /// # Safety
@@ -206,9 +312,26 @@ pub fn tensor_map(
     [rows, columns]: [u64; 2],
     [box_rows, box_columns]: [u32; 2],
 ) -> TensorDescriptor {
+    try_tensor_map(
+        element_type,
+        element_bytes,
+        address,
+        [rows, columns],
+        [box_rows, box_columns],
+    )
+    .unwrap_or_else(|error| panic!("{error}"))
+}
+
+pub fn try_tensor_map(
+    element_type: i32,
+    element_bytes: u64,
+    address: DevicePointer,
+    [rows, columns]: [u64; 2],
+    [box_rows, box_columns]: [u32; 2],
+) -> Result<TensorDescriptor> {
     let mut map = TensorDescriptor([0; 16]);
     // SAFETY: the out-pointer and the arrays are valid for the duration of the call.
-    ffi::check(
+    ffi::result(
         unsafe {
             ffi::cuTensorMapEncodeTiled(
                 &mut map,
@@ -226,6 +349,21 @@ pub fn tensor_map(
             )
         },
         "cuTensorMapEncodeTiled",
-    );
-    map
+    )?;
+    Ok(map)
+}
+
+/// # Safety
+/// The pointer must be a host allocation with no outstanding accesses.
+pub unsafe fn try_free_host(pointer: *mut c_void) -> Result<()> {
+    ffi::result(unsafe { ffi::cuMemFreeHost(pointer) }, "cuMemFreeHost")
+}
+
+/// # Safety
+/// The pointer must be registered host memory with no outstanding accesses.
+pub unsafe fn try_unregister_host(pointer: *mut c_void) -> Result<()> {
+    ffi::result(
+        unsafe { ffi::cuMemHostUnregister(pointer) },
+        "cuMemHostUnregister",
+    )
 }

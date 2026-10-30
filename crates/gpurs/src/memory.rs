@@ -2,7 +2,7 @@ use std::{
     alloc::Layout,
     any::Any,
     ffi::c_void,
-    mem::MaybeUninit,
+    mem::{self, MaybeUninit},
     ops::{Deref, DerefMut},
     rc::Rc,
     slice,
@@ -11,7 +11,7 @@ use std::{
 use gpurs_driver as driver;
 
 use crate::{
-    Buffer, DeviceSlice, DeviceSliceMut, DeviceValue, Gpu, Stream,
+    Buffer, DeviceSlice, DeviceSliceMut, DeviceValue, Error, Gpu, Result, Stream,
     device::Device,
     launch,
     tracking::{self, Access, Allocation, Status},
@@ -48,6 +48,7 @@ pub struct Transfer<T> {
     accesses: Vec<Access>,
     statuses: Vec<Rc<Status>>,
     finished: bool,
+    sequence: u64,
 }
 
 impl Gpu {
@@ -58,12 +59,21 @@ impl Gpu {
 
     /// Allocates uninitialized bytes with the requested alignment.
     pub fn allocate(&self, layout: Layout) -> DeviceAllocation {
-        let _context = self.device.context.enter();
+        self.try_allocate(layout)
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    pub fn try_allocate(&self, layout: Layout) -> Result<DeviceAllocation> {
+        let _context = self.device.context.try_enter()?;
         let bytes = layout
             .size()
             .checked_add(layout.align() - 1)
-            .expect("aligned GPU allocation exceeds the addressable byte count");
-        let base = driver::allocate_async(bytes, &self.device.transfer);
+            .ok_or_else(|| {
+                Error::InvalidOperation(
+                    "aligned GPU allocation exceeds the addressable byte count".to_owned(),
+                )
+            })?;
+        let base = driver::try_allocate_async(bytes, &self.device.transfer)?;
         let mut allocation = Allocation::new(
             self.device.clone(),
             base.next_multiple_of(layout.align() as u64),
@@ -76,7 +86,7 @@ impl Gpu {
             &[Access::recovering(&allocation, 0..layout.size())],
             &[],
         );
-        DeviceAllocation { allocation }
+        Ok(DeviceAllocation { allocation })
     }
 
     /// Adopts allocator-owned storage without freeing its address through CUDA.
@@ -103,32 +113,41 @@ impl Gpu {
 
     /// Allocates page-locked storage and copies verified host values into it.
     pub fn pin<T>(&self, data: &[T]) -> PinnedBuffer<T> {
-        launch::verified::<T>(&self.device);
-        let host = self.pinned_uninit::<T>(data.len());
+        self.try_pin(data).unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    pub fn try_pin<T>(&self, data: &[T]) -> Result<PinnedBuffer<T>> {
+        launch::try_verified::<T>(&self.device)?;
+        let host = self.try_pinned_uninit::<T>(data.len())?;
         // SAFETY: storage holds the slice, including padding, and does not overlap it.
         unsafe {
             host.pointer
                 .cast::<T>()
                 .copy_from_nonoverlapping(data.as_ptr(), data.len())
         };
-        PinnedBuffer {
+        Ok(PinnedBuffer {
             storage: host.storage,
             pointer: host.pointer.cast(),
             len: host.len,
-        }
+        })
     }
 
     /// Registers an owned vector in place; its address stays fixed until unregistered.
-    pub fn register<T: 'static>(&self, mut data: Vec<T>) -> PinnedBuffer<T> {
-        launch::verified::<T>(&self.device);
+    pub fn register<T: 'static>(&self, data: Vec<T>) -> PinnedBuffer<T> {
+        self.try_register(data)
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    pub fn try_register<T: 'static>(&self, mut data: Vec<T>) -> Result<PinnedBuffer<T>> {
+        launch::try_verified::<T>(&self.device)?;
         if size_of_val(&*data) == 0 {
-            return self.pin(&data);
+            return self.try_pin(&data);
         }
-        let _context = self.device.context.enter();
+        let _context = self.device.context.try_enter()?;
         let pointer = data.as_mut_ptr();
         // SAFETY: the vector is retained, and its capacity is never changed.
-        unsafe { driver::register_host(pointer.cast(), size_of_val(&*data)) };
-        PinnedBuffer {
+        unsafe { driver::try_register_host(pointer.cast(), size_of_val(&*data))? };
+        Ok(PinnedBuffer {
             pointer,
             len: data.len(),
             storage: HostStorage {
@@ -136,19 +155,22 @@ impl Gpu {
                 registered: Some(Box::new(data)),
                 device: self.device.clone(),
             },
-        }
+        })
     }
 
-    fn pinned_uninit<T>(&self, len: usize) -> PinnedBuffer<MaybeUninit<T>> {
-        let _context = self.device.context.enter();
-        let bytes = Layout::array::<T>(len).expect("pinned allocation exceeds the host size range");
-        let pointer = driver::allocate_host(
-            bytes
-                .size()
-                .checked_add(bytes.align() - 1)
-                .expect("aligned pinned allocation exceeds the host size range"),
-        );
-        PinnedBuffer {
+    fn try_pinned_uninit<T>(&self, len: usize) -> Result<PinnedBuffer<MaybeUninit<T>>> {
+        let _context = self.device.context.try_enter()?;
+        let bytes = Layout::array::<T>(len).map_err(|_| {
+            Error::InvalidOperation("pinned allocation exceeds the host size range".to_owned())
+        })?;
+        let pointer = driver::try_allocate_host(
+            bytes.size().checked_add(bytes.align() - 1).ok_or_else(|| {
+                Error::InvalidOperation(
+                    "aligned pinned allocation exceeds the host size range".to_owned(),
+                )
+            })?,
+        )?;
+        Ok(PinnedBuffer {
             pointer: pointer
                 .map_addr(|address| address.next_multiple_of(bytes.align()))
                 .cast(),
@@ -158,7 +180,7 @@ impl Gpu {
                 registered: None,
                 device: self.device.clone(),
             },
-        }
+        })
     }
 }
 
@@ -267,7 +289,7 @@ impl<T> DerefMut for PinnedBuffer<T> {
 
 impl Drop for HostStorage {
     fn drop(&mut self) {
-        let _context = self.device.context.enter();
+        let _context = self.device.context.try_enter();
         // SAFETY: transfer completion precedes destruction of its owned storage.
         unsafe {
             if self.registered.is_some() {
@@ -282,55 +304,72 @@ impl Drop for HostStorage {
 impl<T> Transfer<T> {
     /// Polls CUDA completion without waiting or exposing host storage.
     pub fn is_complete(&self) -> bool {
-        let _context = self.accesses[0].allocation.device.context.enter();
+        self.try_is_complete()
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    pub fn try_is_complete(&self) -> Result<bool> {
+        let _context = self.accesses[0].allocation.device.context.try_enter()?;
         self.event
             .as_ref()
             .expect("transfer was submitted")
-            .is_complete()
+            .try_is_complete()
+            .map_err(Error::from)
     }
 
     /// Waits for this transfer and returns its storage, reporting kernel failures.
     pub fn wait(mut self) -> T {
-        self.finish();
-        tracking::observe(&self.statuses);
-        self.data.take().expect("transfer owns its result")
+        self.try_wait().unwrap_or_else(|error| panic!("{error}"))
     }
 
-    fn finish(&mut self) {
+    /// Retains the completion handle and its storage when observation fails.
+    pub fn try_wait(&mut self) -> Result<T> {
+        self.finish()?;
+        tracking::try_observe(&self.statuses)?;
+        self.data.take().ok_or_else(|| {
+            Error::InvalidOperation("transfer storage was already returned".to_owned())
+        })
+    }
+
+    fn finish(&mut self) -> Result<()> {
         if self.finished {
-            return;
+            return Ok(());
         }
-        let _context = self.accesses[0].allocation.device.context.enter();
+        let _context = self.accesses[0].allocation.device.context.try_enter()?;
         if let Some(event) = &self.event {
-            event.synchronize();
+            event.try_synchronize()?;
         } else {
-            self.stream.synchronize();
+            self.stream.try_synchronize()?;
         }
+        self.stream
+            .completed
+            .set(self.stream.completed.get().max(self.sequence));
         self.finished = true;
+        Ok(())
     }
 }
 
 impl<T> Drop for Transfer<T> {
     fn drop(&mut self) {
-        self.finish();
+        if self.finish().is_err() {
+            mem::forget(self.data.take());
+            mem::forget(mem::take(&mut self.accesses));
+            mem::forget(mem::take(&mut self.statuses));
+        }
     }
 }
 
 impl Stream {
-    fn transfer<T>(
+    fn try_transfer<T>(
         &self,
         accesses: Vec<Access>,
         data: T,
-        submit: impl FnOnce(&mut T),
-    ) -> Transfer<T> {
-        let _context = self.device.context.enter();
-        for access in &accesses {
-            assert!(
-                Rc::ptr_eq(&self.device, &access.allocation.device),
-                "transfer allocation belongs to another GPU"
-            );
-        }
-        let statuses = tracking::order(&self.raw, &accesses);
+        submit: impl FnOnce(&mut T) -> Result<()>,
+    ) -> Result<Transfer<T>> {
+        let _context = self.device.context.try_enter()?;
+        self.maintain()?;
+        self.check_external(&accesses)?;
+        let statuses = tracking::try_order(&self.raw, &accesses)?;
         let mut transfer = Transfer {
             data: Some(data),
             event: None,
@@ -338,30 +377,38 @@ impl Stream {
             accesses,
             statuses,
             finished: false,
+            sequence: 0,
         };
-        submit(transfer.data.as_mut().expect("transfer owns its storage"));
+        submit(transfer.data.as_mut().expect("transfer owns its storage"))?;
         tracking::complete(&self.raw, &transfer.accesses, &transfer.statuses);
-        transfer.event = Some(self.raw.record());
-        transfer
+        transfer.sequence = self.raw.submitted.get();
+        transfer.event = Some(self.raw.try_record()?);
+        Ok(transfer)
     }
 
     /// Copies equal-length, nonoverlapping device ranges without host staging.
-    pub fn copy<T>(
+    pub fn try_copy<T>(
         &self,
         destination: &mut impl DeviceSliceMut<T>,
         source: &impl DeviceSlice<T>,
-    ) -> Transfer<()> {
+    ) -> Result<Transfer<()>> {
         let destination = destination.span();
         let source = source.span();
-        assert_eq!(destination.len, source.len, "device copy lengths differ");
+        if destination.len != source.len {
+            return Err(Error::InvalidOperation(
+                "device copy lengths differ".to_owned(),
+            ));
+        }
         let target = destination.bytes::<T>();
         let origin = source.bytes::<T>();
-        assert!(
-            !Rc::ptr_eq(destination.allocation, source.allocation)
-                || !tracking::overlaps(&target, &origin),
-            "device copy ranges overlap"
-        );
-        self.transfer(
+        if Rc::ptr_eq(destination.allocation, source.allocation)
+            && tracking::overlaps(&target, &origin)
+        {
+            return Err(Error::InvalidOperation(
+                "device copy ranges overlap".to_owned(),
+            ));
+        }
+        self.try_transfer(
             vec![
                 Access::read(source.allocation, origin.clone()),
                 Access::recovering(destination.allocation, target.clone()),
@@ -370,13 +417,14 @@ impl Stream {
             |_| {
                 // SAFETY: checked ranges are retained and ordered until completion.
                 unsafe {
-                    driver::copy_device_async(
+                    driver::try_copy_device_async(
                         destination.allocation.pointer + target.start as u64,
                         source.allocation.pointer + origin.start as u64,
                         target.len(),
                         &self.raw,
-                    );
+                    )?;
                 }
+                Ok(())
             },
         )
     }
@@ -384,44 +432,63 @@ impl Stream {
     /// Copies host values into an existing allocation or view, recovering overwritten bytes.
     /// The host slice may be reused when this returns.
     pub fn copy_from_host<T>(&self, destination: &mut impl DeviceSliceMut<T>, source: &[T]) {
+        self.try_copy_from_host(destination, source)
+            .unwrap_or_else(|error| panic!("{error}"));
+    }
+
+    pub fn try_copy_from_host<T>(
+        &self,
+        destination: &mut impl DeviceSliceMut<T>,
+        source: &[T],
+    ) -> Result<()> {
         let gpu = Gpu {
             device: self.device.clone(),
         };
-        self.upload(destination, gpu.pin(source)).wait();
+        self.try_upload(destination, gpu.try_pin(source)?)?
+            .try_wait()
+            .map(|_| ())
     }
 
     /// Enqueues a direct pinned upload, returning host storage through the completion handle.
-    pub fn upload<T>(
+    pub fn try_upload<T>(
         &self,
         destination: &mut impl DeviceSliceMut<T>,
         source: PinnedBuffer<T>,
-    ) -> Transfer<PinnedBuffer<T>> {
+    ) -> Result<Transfer<PinnedBuffer<T>>> {
         let destination = destination.span();
-        assert_eq!(destination.len, source.len, "host upload lengths differ");
+        if destination.len != source.len {
+            return Err(Error::InvalidOperation(
+                "host upload lengths differ".to_owned(),
+            ));
+        }
         let range = destination.bytes::<T>();
-        self.transfer(
+        self.try_transfer(
             vec![Access::recovering(destination.allocation, range.clone())],
             source,
             |host| {
                 // SAFETY: the transfer owns pinned storage and retains the destination.
                 unsafe {
-                    driver::copy_to_device_async(
+                    driver::try_copy_to_device_async(
                         destination.allocation.pointer + range.start as u64,
                         slice::from_raw_parts(host.pointer.cast(), range.len()),
                         &self.raw,
-                    );
+                    )?;
                 }
+                Ok(())
             },
         )
     }
 
     /// Enqueues a download to new pinned storage without synchronizing the stream.
-    pub fn download<T>(&self, source: &impl DeviceSlice<T>) -> Transfer<PinnedBuffer<T>> {
+    pub fn try_download<T>(
+        &self,
+        source: &impl DeviceSlice<T>,
+    ) -> Result<Transfer<PinnedBuffer<T>>> {
         let gpu = Gpu {
             device: self.device.clone(),
         };
-        let host = gpu.pinned_uninit::<T>(source.len());
-        self.download_into(
+        let host = gpu.try_pinned_uninit::<T>(source.len())?;
+        self.try_download_into(
             source,
             PinnedBuffer {
                 storage: host.storage,
@@ -432,27 +499,66 @@ impl Stream {
     }
 
     /// Enqueues a download into existing pinned storage, returning it on completion.
-    pub fn download_into<T>(
+    pub fn try_download_into<T>(
         &self,
         source: &impl DeviceSlice<T>,
         destination: PinnedBuffer<T>,
-    ) -> Transfer<PinnedBuffer<T>> {
+    ) -> Result<Transfer<PinnedBuffer<T>>> {
         let source = source.span();
-        assert_eq!(source.len, destination.len, "host download lengths differ");
+        if source.len != destination.len {
+            return Err(Error::InvalidOperation(
+                "host download lengths differ".to_owned(),
+            ));
+        }
         let range = source.bytes::<T>();
-        self.transfer(
+        self.try_transfer(
             vec![Access::read(source.allocation, range.clone())],
             destination,
             |host| {
                 // SAFETY: the transfer owns the destination and retains the source.
                 unsafe {
-                    driver::copy_from_device_async(
+                    driver::try_copy_from_device_async(
                         slice::from_raw_parts_mut(host.pointer.cast(), range.len()),
                         source.allocation.pointer + range.start as u64,
                         &self.raw,
-                    );
+                    )?;
                 }
+                Ok(())
             },
         )
+    }
+}
+
+impl Stream {
+    pub fn copy<T>(
+        &self,
+        destination: &mut impl DeviceSliceMut<T>,
+        source: &impl DeviceSlice<T>,
+    ) -> Transfer<()> {
+        self.try_copy(destination, source)
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    pub fn upload<T>(
+        &self,
+        destination: &mut impl DeviceSliceMut<T>,
+        source: PinnedBuffer<T>,
+    ) -> Transfer<PinnedBuffer<T>> {
+        self.try_upload(destination, source)
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    pub fn download<T>(&self, source: &impl DeviceSlice<T>) -> Transfer<PinnedBuffer<T>> {
+        self.try_download(source)
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    pub fn download_into<T>(
+        &self,
+        source: &impl DeviceSlice<T>,
+        destination: PinnedBuffer<T>,
+    ) -> Transfer<PinnedBuffer<T>> {
+        self.try_download_into(source, destination)
+            .unwrap_or_else(|error| panic!("{error}"))
     }
 }

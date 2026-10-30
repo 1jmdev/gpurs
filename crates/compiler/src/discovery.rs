@@ -83,7 +83,7 @@ impl HostView {
 
     fn scan(&mut self, sess: Session<'_>, instance: Instance) {
         let def = instance.def.def_id();
-        if sess.is(def, "gpurs::launch::verified") {
+        if sess.is(def, "gpurs::launch::try_verified") {
             let arguments = instance.args();
             let Some(ty) = arguments.0.first().and_then(|argument| argument.ty()) else {
                 return;
@@ -155,7 +155,9 @@ impl HostView {
                 .and_then(|argument| argument.ty())
                 .is_some_and(|stream| {
                     matches!(stream.kind(), TyKind::RigidTy(RigidTy::Adt(adt, _))
-                        if sess.is(adt.def_id(), "gpurs::stream::ConfiguredStream"))
+                        if sess.is(adt.def_id(), "gpurs::stream::ConfiguredStream")
+                            || sess.is(adt.def_id(), "gpurs::stream::FallibleStream")
+                            || sess.is(adt.def_id(), "gpurs::graph::CaptureStream"))
                 });
             let launch = Launch {
                 key: format!("{module}::{tail}{suffix}"),

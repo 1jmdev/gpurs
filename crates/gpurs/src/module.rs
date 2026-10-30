@@ -2,7 +2,9 @@ use std::{ffi::c_void, rc::Rc};
 
 use gpurs_driver as driver;
 
-use crate::{Event, ExternalAccess, Gpu, LaunchConfig, Stream, device::Device};
+use crate::{
+    Error, Event, ExternalAccess, Gpu, LaunchConfig, Result, Stream, device::Device, tracking,
+};
 
 /// An externally compiled module; final release waits for context work to finish.
 #[derive(Clone)]
@@ -18,16 +20,22 @@ struct ModuleInner {
 pub struct Kernel {
     module: Module,
     function: driver::Function,
+    name: String,
 }
 
 impl Gpu {
     /// Loads PTX through CUDA's driver JIT for the current GPU.
     pub fn load_ptx(&self, ptx: &str) -> Module {
-        let _context = self.device.context.enter();
-        Module(Rc::new(ModuleInner {
-            raw: driver::Module::load_ptx(ptx),
+        self.try_load_ptx(ptx)
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    pub fn try_load_ptx(&self, ptx: &str) -> Result<Module> {
+        let _context = self.device.context.try_enter()?;
+        Ok(Module(Rc::new(ModuleInner {
+            raw: driver::Module::try_load_ptx(ptx)?,
             device: self.device.clone(),
-        }))
+        })))
     }
 
     /// Loads an external CUBIN or fat binary.
@@ -35,11 +43,17 @@ impl Gpu {
     /// # Safety
     /// The bytes must contain a complete valid CUDA module image, including its headers.
     pub unsafe fn load_module(&self, image: &[u8]) -> Module {
-        let _context = self.device.context.enter();
-        Module(Rc::new(ModuleInner {
-            raw: driver::Module::load(image),
+        unsafe { self.try_load_module(image) }.unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    /// # Safety
+    /// `image` must satisfy the complete-module contract of `load_module`.
+    pub unsafe fn try_load_module(&self, image: &[u8]) -> Result<Module> {
+        let _context = self.device.context.try_enter()?;
+        Ok(Module(Rc::new(ModuleInner {
+            raw: driver::Module::try_load(image)?,
             device: self.device.clone(),
-        }))
+        })))
     }
 }
 
@@ -49,10 +63,16 @@ impl Module {
     }
 
     pub fn kernel(&self, name: &str) -> Kernel {
-        Kernel {
+        self.try_kernel(name)
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    pub fn try_kernel(&self, name: &str) -> Result<Kernel> {
+        Ok(Kernel {
             module: self.clone(),
-            function: self.0.raw.function(name),
-        }
+            name: name.to_owned(),
+            function: self.0.raw.try_function(name)?,
+        })
     }
 }
 
@@ -89,30 +109,63 @@ impl Kernel {
         parameters: &mut [*mut c_void],
         accesses: &[ExternalAccess],
     ) -> Event {
-        assert!(
-            Rc::ptr_eq(&self.module.0.device, &stream.device),
-            "kernel and stream contexts differ",
-        );
-        unsafe {
-            stream.submit_external(accesses, |_| {
-                self.function.launch_parameters(
-                    config
-                        .grid
-                        .map(|value| u32::try_from(value).expect("grid exceeds CUDA range")),
-                    config
-                        .block
-                        .map(|value| u32::try_from(value).expect("block exceeds CUDA range")),
-                    u32::try_from(config.shared_bytes).expect("shared memory exceeds CUDA range"),
-                    &stream.raw,
-                    parameters,
-                );
-            })
+        unsafe { self.try_launch(stream, config, parameters, accesses) }
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    /// # Safety
+    /// Parameters, geometry, accesses, and retained resources obey `launch`'s contract.
+    pub unsafe fn try_launch(
+        &self,
+        stream: &Stream,
+        config: LaunchConfig,
+        parameters: &mut [*mut c_void],
+        accesses: &[ExternalAccess],
+    ) -> Result<Event> {
+        if !Rc::ptr_eq(&self.module.0.device, &stream.device) {
+            return Err(Error::InvalidOperation(
+                "kernel and stream contexts differ".to_owned(),
+            ));
         }
+        let dimensions = |values: [usize; 3]| -> Result<[u32; 3]> {
+            let [x, y, z] = values;
+            Ok([
+                u32::try_from(x).map_err(|_| {
+                    Error::InvalidOperation("launch dimension exceeds CUDA range".to_owned())
+                })?,
+                u32::try_from(y).map_err(|_| {
+                    Error::InvalidOperation("launch dimension exceeds CUDA range".to_owned())
+                })?,
+                u32::try_from(z).map_err(|_| {
+                    Error::InvalidOperation("launch dimension exceeds CUDA range".to_owned())
+                })?,
+            ])
+        };
+        let grid = dimensions(config.grid)?;
+        let block = dimensions(config.block)?;
+        let shared = u32::try_from(config.shared_bytes)
+            .map_err(|_| Error::InvalidOperation("shared memory exceeds CUDA range".to_owned()))?;
+        let _context = stream.device.context.try_enter()?;
+        stream.maintain()?;
+        let accesses: Vec<_> = accesses.iter().map(|access| access.0.clone()).collect();
+        stream.check_external(&accesses)?;
+        let statuses = tracking::try_order(&stream.raw, &accesses)?;
+        unsafe {
+            self.function
+                .try_launch_parameters(grid, block, shared, &stream.raw, parameters)
+                .map_err(|source| Error::Launch {
+                    kernel: self.name.clone(),
+                    source,
+                })?
+        };
+        tracking::complete(&stream.raw, &accesses, &statuses);
+        stream.retain_statuses(&statuses);
+        stream.try_record_statuses(statuses)
     }
 }
 
 impl Drop for ModuleInner {
     fn drop(&mut self) {
-        self.device.context.synchronize();
+        let _ = self.device.context.try_synchronize();
     }
 }

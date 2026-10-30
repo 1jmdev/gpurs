@@ -178,18 +178,7 @@ unsafe extern "C" {
     ) -> CUresult;
 }
 
-/// Panics with a descriptive message unless `result` is `CUDA_SUCCESS`.
-#[track_caller]
-pub fn check(result: CUresult, operation: &str) {
-    if result != CUDA_SUCCESS {
-        panic!(
-            "CUDA driver call `{operation}` failed: {}",
-            describe(result)
-        );
-    }
-}
-
-pub fn describe(result: CUresult) -> String {
+pub fn describe(result: CUresult) -> (String, String) {
     let mut name = ptr::null();
     let mut description = ptr::null();
     // SAFETY: the driver writes pointers to static strings or leaves them null.
@@ -202,7 +191,18 @@ pub fn describe(result: CUresult) -> String {
         (!pointer.is_null()).then(|| unsafe { CStr::from_ptr(pointer) }.to_string_lossy())
     };
     match (text(name), text(description)) {
-        (Some(name), Some(description)) => format!("{name} ({description})"),
-        _ => format!("error code {result}"),
+        (Some(name), Some(description)) => (name.into_owned(), description.into_owned()),
+        _ => (
+            "CUDA_ERROR_UNKNOWN".to_owned(),
+            format!("error code {result}"),
+        ),
+    }
+}
+
+pub fn result(code: CUresult, operation: &'static str) -> crate::Result<()> {
+    if code == CUDA_SUCCESS {
+        Ok(())
+    } else {
+        Err(crate::Error::new(operation, code))
     }
 }

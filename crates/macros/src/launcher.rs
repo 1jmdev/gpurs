@@ -23,11 +23,11 @@ pub(crate) fn launcher(
     match receiver {
         Some(true) => {
             inputs.push(quote!(&mut self));
-            arguments.push(quote!(__launch.reference_mut(self);));
+            arguments.push(quote!(__launch.reference_mut(self)?;));
         }
         Some(false) => {
             inputs.push(quote!(&self));
-            arguments.push(quote!(__launch.reference(self);));
+            arguments.push(quote!(__launch.reference(self)?;));
         }
         None => {}
     }
@@ -47,23 +47,23 @@ pub(crate) fn launcher(
                         let element = &slice.elem;
                         (
                             quote!(&#lifetime mut impl ::gpurs::DeviceSliceMut<#element>),
-                            quote!(__launch.slice_mut(#argument);),
+                            quote!(__launch.slice_mut(#argument)?;),
                         )
                     }
                     (Type::Slice(slice), false) => {
                         let element = &slice.elem;
                         (
                             quote!(&#lifetime impl ::gpurs::DeviceSlice<#element>),
-                            quote!(__launch.slice(#argument);),
+                            quote!(__launch.slice(#argument)?;),
                         )
                     }
                     (element, true) => (
                         quote!(&#lifetime mut impl ::gpurs::DeviceReferenceMut<#element>),
-                        quote!(__launch.reference_mut(#argument);),
+                        quote!(__launch.reference_mut(#argument)?;),
                     ),
                     (element, false) => (
                         quote!(&#lifetime impl ::gpurs::DeviceReference<#element>),
-                        quote!(__launch.reference(#argument);),
+                        quote!(__launch.reference(#argument)?;),
                     ),
                 }
             }
@@ -77,7 +77,16 @@ pub(crate) fn launcher(
             quote!(-> <__S as ::gpurs::Launch>::Output<#result>),
             quote!(__launch.finish::<#result>()),
         ),
-        _ => (quote!(), quote!(__launch.finish_unit())),
+        _ => (
+            quote!(-> <__S as ::gpurs::Launch>::Unit),
+            quote!(__launch.finish_unit()),
+        ),
+    };
+    let resolve = match &signature.output {
+        ReturnType::Type(_, result) if !is_unit(result) => {
+            quote!(<__S as ::gpurs::Launch>::output(__result))
+        }
+        _ => quote!(<__S as ::gpurs::Launch>::unit(__result)),
     };
     let generic_parameters = signature.generics.params.iter();
     let where_clause = &signature.generics.where_clause;
@@ -89,19 +98,22 @@ pub(crate) fn launcher(
                     ::gpurs::__private::KernelCache::new()
                 };
             }
-            let mut __launch = __KERNEL.with(|cache| {
-                ::gpurs::__private::kernel::<__S, (#(#generics,)*)>(
-                    stream,
-                    ::core::module_path!(),
-                    #tail,
-                    cache,
-                )
-            });
-            // SAFETY: the generated launcher preserves the verified kernel's parameter and result types.
-            unsafe {
-                #(#arguments)*
-                #finish
-            }
+            let __result = (|| {
+                let mut __launch = __KERNEL.with(|cache| {
+                    ::gpurs::__private::kernel::<__S, (#(#generics,)*)>(
+                        stream,
+                        ::core::module_path!(),
+                        #tail,
+                        cache,
+                    )
+                })?;
+                // SAFETY: the generated launcher preserves the verified kernel's parameter and result types.
+                unsafe {
+                    #(#arguments)*
+                    #finish
+                }
+            })();
+            #resolve
         }
     }
 }

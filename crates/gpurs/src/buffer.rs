@@ -10,6 +10,7 @@ use std::{
 use gpurs_driver as driver;
 
 use crate::{
+    Error, Result,
     stream::Stream,
     tracking::{self, Access, Allocation},
 };
@@ -97,7 +98,12 @@ impl<T> Buffer<T> {
     /// Panics if a launch that produced these contents failed.
     #[track_caller]
     pub fn download(&self) -> Vec<T> {
-        download(self.whole())
+        self.try_download()
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    pub fn try_download(&self) -> Result<Vec<T>> {
+        try_download(self.whole())
     }
 
     #[track_caller]
@@ -141,7 +147,15 @@ impl<T> Buffer<T> {
     where
         T: Copy,
     {
-        fill(self.whole(), stream, value)
+        self.try_fill(stream, value)
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    pub fn try_fill(&mut self, stream: &Stream, value: T) -> Result<()>
+    where
+        T: Copy,
+    {
+        try_fill(self.whole(), stream, value)
     }
 
     pub(crate) fn whole(&self) -> Span<'_> {
@@ -154,39 +168,73 @@ impl<T> Buffer<T> {
 }
 
 impl<T> View<'_, T> {
+    pub fn try_download(&self) -> Result<Vec<T>> {
+        try_download(self.span)
+    }
+
     #[track_caller]
     pub fn download(&self) -> Vec<T> {
-        download(self.span)
+        self.try_download()
+            .unwrap_or_else(|error| panic!("{error}"))
     }
 }
 
 impl<T> ViewMut<'_, T> {
+    pub fn try_download(&self) -> Result<Vec<T>> {
+        try_download(self.span)
+    }
+
     #[track_caller]
     pub fn download(&self) -> Vec<T> {
-        download(self.span)
+        self.try_download()
+            .unwrap_or_else(|error| panic!("{error}"))
     }
 
     pub fn fill(&mut self, stream: &Stream, value: T)
     where
         T: Copy,
     {
-        fill(self.span, stream, value)
+        self.try_fill(stream, value)
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    pub fn try_fill(&mut self, stream: &Stream, value: T) -> Result<()>
+    where
+        T: Copy,
+    {
+        try_fill(self.span, stream, value)
     }
 }
 
 impl<T> DeviceValue<T> {
+    pub fn try_read(&self) -> Result<T> {
+        Ok(self
+            .buffer
+            .try_download()?
+            .pop()
+            .expect("device values hold one element"))
+    }
+
     /// Copies the value to the host after the work writing it finished.
     #[track_caller]
     pub fn read(&self) -> T {
-        read(&self.buffer)
+        self.try_read().unwrap_or_else(|error| panic!("{error}"))
     }
 }
 
 impl<T> Pending<T> {
+    pub fn try_read(&self) -> Result<T> {
+        Ok(self
+            .buffer
+            .try_download()?
+            .pop()
+            .expect("device values hold one element"))
+    }
+
     /// Waits for the launch and returns its result, panicking if the launch failed.
     #[track_caller]
     pub fn read(&self) -> T {
-        read(&self.buffer)
+        self.try_read().unwrap_or_else(|error| panic!("{error}"))
     }
 }
 
@@ -222,86 +270,82 @@ impl<'a> Span<'a> {
 }
 
 #[track_caller]
-fn download<T>(span: Span<'_>) -> Vec<T> {
-    let _context = span.allocation.device.context.enter();
+fn try_download<T>(span: Span<'_>) -> Result<Vec<T>> {
+    let _context = span.allocation.device.context.try_enter()?;
     let stream = &span.allocation.device.download;
     let range = span.bytes::<T>();
-    let sources = tracking::order(stream, &[Access::read(span.allocation, range.clone())]);
+    let sources = tracking::try_order(stream, &[Access::read(span.allocation, range.clone())])?;
     let mut host = Vec::<T>::with_capacity(span.len);
     // SAFETY: the spare capacity holds `range.len()` bytes and stays untouched until the
     // stream is synchronized below; the source range lies inside the allocation.
     unsafe {
         let destination =
             slice::from_raw_parts_mut(host.as_mut_ptr().cast::<MaybeUninit<u8>>(), range.len());
-        driver::copy_from_device_async(
+        driver::try_copy_from_device_async(
             destination,
             span.allocation.pointer + range.start as u64,
             stream,
-        );
+        )?;
     }
-    stream.synchronize();
-    tracking::observe(&sources);
+    stream.try_synchronize()?;
+    tracking::try_observe(&sources)?;
     // SAFETY: the copy initialized every element with bytes of a verified transfer type.
     unsafe { host.set_len(span.len) };
-    host
+    Ok(host)
 }
 
-#[track_caller]
-fn read<T>(buffer: &Buffer<T>) -> T {
-    download(buffer.whole())
-        .pop()
-        .expect("device values hold one element")
-}
-
-fn fill<T: Copy>(span: Span<'_>, stream: &Stream, value: T) {
-    assert!(
-        Rc::ptr_eq(&stream.device, &span.allocation.device),
-        "fill allocation belongs to another GPU"
-    );
-    let _context = stream.device.context.enter();
+fn try_fill<T: Copy>(span: Span<'_>, stream: &Stream, value: T) -> Result<()> {
+    if !Rc::ptr_eq(&stream.device, &span.allocation.device) {
+        return Err(Error::InvalidOperation(
+            "fill allocation belongs to another GPU".to_owned(),
+        ));
+    }
+    let _context = stream.device.context.try_enter()?;
+    stream.maintain()?;
     let access = Access::recovering(span.allocation, span.bytes::<T>());
-    tracking::order(&stream.raw, slice::from_ref(&access));
+    tracking::try_order(&stream.raw, slice::from_ref(&access))?;
     let pointer = span.allocation.pointer + access.range.start as u64;
     match any::type_name::<T>() {
         "u8" | "i8" | "bool" => {
             // SAFETY: these primitives have one initialized byte; the range is retained.
             unsafe {
-                driver::fill_async(
+                driver::try_fill_async(
                     pointer,
                     (&value as *const T).cast::<u8>().read(),
                     span.len,
                     &stream.raw,
-                );
+                )?;
             }
         }
         "u32" | "i32" | "f32" | "char" => {
             // SAFETY: these primitives have four initialized bytes and four-byte alignment.
             unsafe {
-                driver::fill_words_async(
+                driver::try_fill_words_async(
                     pointer,
                     (&value as *const T).cast::<u32>().read_unaligned(),
                     span.len,
                     &stream.raw,
-                );
+                )?;
             }
         }
         _ => {
             let host = vec![value; span.len];
             // SAFETY: verified bytes may include padding; the source lives until synchronization.
             unsafe {
-                driver::copy_to_device_async(
+                driver::try_copy_to_device_async(
                     pointer,
                     slice::from_raw_parts(
                         host.as_ptr().cast::<MaybeUninit<u8>>(),
                         size_of_val(&*host),
                     ),
                     &stream.raw,
-                );
+                )?;
             }
-            stream.raw.synchronize();
+            stream.raw.try_synchronize()?;
         }
     }
     tracking::complete(&stream.raw, &[access], &[]);
+    Ok(())
 }
 
 impl<T> sealed::Sealed<T> for Buffer<T> {

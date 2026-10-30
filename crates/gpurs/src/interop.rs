@@ -3,7 +3,7 @@ use std::{ffi::c_void, rc::Rc, time::Duration};
 use gpurs_driver as driver;
 
 use crate::{
-    DeviceSlice, DeviceSliceMut, Stream,
+    DeviceSlice, DeviceSliceMut, Error, Result, Stream,
     device::Device,
     tracking::{self, Access, Status},
 };
@@ -41,10 +41,13 @@ impl ExternalAccess {
 }
 
 /// A recorded stream position retaining its context and inherited failure statuses.
+#[derive(Clone)]
 pub struct Event {
-    pub(crate) raw: driver::Event,
+    pub(crate) raw: Rc<driver::Event>,
     pub(crate) device: Rc<Device>,
     pub(crate) statuses: Vec<Rc<Status>>,
+    pub(crate) stream: Rc<driver::Stream>,
+    pub(crate) sequence: u64,
 }
 
 impl Event {
@@ -53,18 +56,34 @@ impl Event {
     }
 
     pub fn is_complete(&self) -> bool {
-        let _context = self.device.context.enter();
-        if !self.raw.is_complete() {
-            return false;
+        self.try_is_complete()
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    pub fn try_is_complete(&self) -> Result<bool> {
+        let _context = self.device.context.try_enter()?;
+        if !self.raw.try_is_complete()? {
+            return Ok(false);
         }
-        tracking::observe(&self.statuses);
-        true
+        self.stream
+            .completed
+            .set(self.stream.completed.get().max(self.sequence));
+        tracking::try_observe(&self.statuses)?;
+        Ok(true)
     }
 
     pub fn synchronize(&self) {
-        let _context = self.device.context.enter();
-        self.raw.synchronize();
-        tracking::observe(&self.statuses);
+        self.try_synchronize()
+            .unwrap_or_else(|error| panic!("{error}"));
+    }
+
+    pub fn try_synchronize(&self) -> Result<()> {
+        let _context = self.device.context.try_enter()?;
+        self.raw.try_synchronize()?;
+        self.stream
+            .completed
+            .set(self.stream.completed.get().max(self.sequence));
+        tracking::try_observe(&self.statuses)
     }
 
     /// Both events must be timed records in this context and have completed.
@@ -84,24 +103,40 @@ impl Stream {
 
     /// Reports completion and observes failures when the stream is idle.
     pub fn is_complete(&self) -> bool {
-        let _context = self.device.context.enter();
-        if !self.raw.is_complete() {
-            return false;
+        self.try_is_complete()
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    pub fn try_is_complete(&self) -> Result<bool> {
+        let _context = self.device.context.try_enter()?;
+        if !self.raw.try_is_complete()? {
+            return Ok(false);
         }
-        tracking::observe(&self.launched.borrow());
-        true
+        self.try_synchronize()?;
+        Ok(true)
     }
 
     pub fn record(&self) -> Event {
-        self.record_statuses(self.launched.borrow().clone())
+        self.record_statuses(self.statuses())
     }
 
     pub(crate) fn record_statuses(&self, statuses: Vec<Rc<Status>>) -> Event {
-        Event {
-            raw: self.raw.record(),
+        self.try_record_statuses(statuses)
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    pub fn try_record(&self) -> Result<Event> {
+        self.try_record_statuses(self.statuses())
+    }
+
+    pub(crate) fn try_record_statuses(&self, statuses: Vec<Rc<Status>>) -> Result<Event> {
+        Ok(Event {
+            raw: self.raw.try_event()?,
             device: self.device.clone(),
+            stream: self.raw.clone(),
+            sequence: self.raw.submitted.get(),
             statuses,
-        }
+        })
     }
 
     pub fn record_timed(&self) -> Event {
@@ -110,21 +145,28 @@ impl Stream {
 
     fn record_event(&self, raw: driver::Event) -> Event {
         Event {
-            raw,
+            raw: Rc::new(raw),
             device: self.device.clone(),
-            statuses: self.launched.borrow().clone(),
+            stream: self.raw.clone(),
+            sequence: self.raw.submitted.get(),
+            statuses: self.statuses(),
         }
     }
 
     pub fn wait(&self, event: &Event) {
-        assert!(
-            Rc::ptr_eq(&self.device, &event.device),
-            "event contexts differ"
-        );
-        self.raw.wait(&event.raw);
-        self.launched
-            .borrow_mut()
-            .extend(event.statuses.iter().cloned());
+        self.try_wait(event)
+            .unwrap_or_else(|error| panic!("{error}"));
+    }
+
+    pub fn try_wait(&self, event: &Event) -> Result<()> {
+        if !Rc::ptr_eq(&self.device, &event.device) {
+            return Err(Error::InvalidOperation("event contexts differ".to_owned()));
+        }
+        self.raw.try_wait(&event.raw)?;
+        self.raw.submitted.set(self.raw.submitted.get() + 1);
+        self.retain_statuses(&event.statuses);
+        self.maintain()?;
+        Ok(())
     }
 
     /// Orders external work after declared dependencies, then records its effects.
@@ -142,22 +184,52 @@ impl Stream {
         accesses: &[ExternalAccess],
         submit: impl FnOnce(*mut c_void),
     ) -> Event {
-        let _context = self.device.context.enter();
-        let accesses: Vec<_> = accesses.iter().map(|access| access.0.clone()).collect();
-        self.check_external(&accesses);
-        let statuses = tracking::order(&self.raw, &accesses);
-        submit(self.as_raw());
-        tracking::complete(&self.raw, &accesses, &statuses);
-        self.launched.borrow_mut().extend(statuses.iter().cloned());
-        self.record_statuses(statuses)
+        unsafe {
+            self.try_submit_external(accesses, |stream| {
+                submit(stream);
+                Ok(())
+            })
+        }
+        .unwrap_or_else(|error| panic!("{error}"))
     }
 
-    pub(crate) fn check_external(&self, accesses: &[Access]) {
-        for access in accesses {
-            assert!(
-                Rc::ptr_eq(&self.device, &access.allocation.device),
-                "external storage belongs to another GPU handle",
-            );
+    /// # Safety
+    /// The submission contract is identical to `submit_external`. An error may follow a
+    /// submitted prefix; every declared range remains a dependency in that case.
+    pub unsafe fn try_submit_external(
+        &self,
+        accesses: &[ExternalAccess],
+        submit: impl FnOnce(*mut c_void) -> Result<()>,
+    ) -> Result<Event> {
+        let _context = self.device.context.try_enter()?;
+        self.maintain()?;
+        let accesses: Vec<_> = accesses.iter().map(|access| access.0.clone()).collect();
+        self.check_external(&accesses)?;
+        let mut conservative = accesses.clone();
+        for access in &mut conservative {
+            access.recovers = false;
         }
+        let mut failures = tracking::try_order(&self.raw, &conservative)?;
+        let statuses = tracking::try_order(&self.raw, &accesses)?;
+        if let Err(error) = submit(self.as_raw()) {
+            failures.push(Status::submission_error(error.clone()));
+            tracking::complete(&self.raw, &conservative, &failures);
+            self.retain_statuses(&failures);
+            return Err(error);
+        }
+        tracking::complete(&self.raw, &accesses, &statuses);
+        self.retain_statuses(&statuses);
+        self.try_record_statuses(statuses)
+    }
+
+    pub(crate) fn check_external(&self, accesses: &[Access]) -> Result<()> {
+        for access in accesses {
+            if !Rc::ptr_eq(&self.device, &access.allocation.device) {
+                return Err(Error::InvalidOperation(
+                    "external storage belongs to another GPU handle".to_owned(),
+                ));
+            }
+        }
+        Ok(())
     }
 }

@@ -2,16 +2,16 @@ use std::{
     any::Any,
     cell::{Cell, RefCell},
     ffi::c_void,
-    mem::MaybeUninit,
+    mem::{self, MaybeUninit},
     rc::Rc,
 };
 
 use gpurs_driver as driver;
 
 use crate::{
-    Buffer, Event, ExternalAccess, Launch, LaunchConfig, Ownership, Stream,
+    Buffer, Error, Event, ExternalAccess, Launch, LaunchConfig, Ownership, Result, Stream,
     device::Device,
-    stream::sealed,
+    stream::{FallibleStream, sealed},
     tracking::{self, Access, Status},
 };
 
@@ -55,13 +55,24 @@ impl Stream {
     /// capture queue are captured. Kernels must write existing storage and return `()`;
     /// allocations, transfers, and host side effects in the closure run immediately.
     pub fn capture(&self, record: impl FnOnce(&CaptureStream<'_>)) -> Graph {
-        let _context = self.device.context.enter();
+        self.try_capture(|stream| {
+            record(stream);
+            Ok(())
+        })
+        .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    pub fn try_capture(
+        &self,
+        record: impl FnOnce(&CaptureStream<'_>) -> Result<()>,
+    ) -> Result<Graph> {
+        let _context = self.device.context.try_enter()?;
         let kernels = RefCell::new(Vec::new());
         record(&CaptureStream {
             stream: self,
             config: None,
             kernels: &kernels,
-        });
+        })?;
         let mut kernels = kernels.into_inner();
         let accesses = kernels
             .iter()
@@ -71,31 +82,32 @@ impl Stream {
             .iter()
             .filter_map(|kernel| kernel.status.clone())
             .collect();
-        let stream = driver::Stream::new();
+        let stream = driver::Stream::try_new()?;
         let raw = unsafe {
-            driver::Graph::capture(&stream, || {
+            driver::Graph::try_capture(&stream, || {
                 for kernel in &mut kernels {
                     if let Some(status) = &kernel.status {
-                        driver::fill_async(status.pointer, 0, 4, &stream);
+                        driver::try_fill_async(status.pointer, 0, 4, &stream)?;
                     }
-                    kernel.function.launch(
+                    kernel.function.try_launch(
                         kernel.config.grid.map(|value| value as u32),
                         kernel.config.block.map(|value| value as u32),
                         kernel.config.shared_bytes as u32,
                         &stream,
                         &mut kernel.arguments,
-                    );
+                    )?;
                 }
-            })
+                Ok(())
+            })?
         };
-        Graph(Rc::new(GraphInner {
+        Ok(Graph(Rc::new(GraphInner {
             raw,
             device: self.device.clone(),
             accesses,
             statuses,
             _resources: Box::new(kernels),
             pending: RefCell::default(),
-        }))
+        })))
     }
 
     /// Captures external CUDA work, retaining declared allocations and additional resources.
@@ -113,7 +125,8 @@ impl Stream {
     ) -> Graph {
         let _context = self.device.context.enter();
         let accesses: Vec<_> = accesses.into_iter().map(|access| access.0).collect();
-        self.check_external(&accesses);
+        self.check_external(&accesses)
+            .unwrap_or_else(|error| panic!("{error}"));
         let stream = driver::Stream::new();
         let raw = unsafe { driver::Graph::capture(&stream, || capture(stream.as_raw())) };
         Graph(Rc::new(GraphInner {
@@ -138,7 +151,8 @@ impl Stream {
     ) -> Graph {
         let _context = self.device.context.enter();
         let accesses: Vec<_> = accesses.into_iter().map(|access| access.0).collect();
-        self.check_external(&accesses);
+        self.check_external(&accesses)
+            .unwrap_or_else(|error| panic!("{error}"));
         Graph(Rc::new(GraphInner {
             raw: unsafe { driver::Graph::from_raw(raw, ownership) },
             device: self.device.clone(),
@@ -151,6 +165,14 @@ impl Stream {
 }
 
 impl CaptureStream<'_> {
+    pub fn fallible(&self) -> FallibleStream<'_> {
+        FallibleStream {
+            stream: self.stream,
+            config: self.config,
+            capture: Some(self.kernels),
+        }
+    }
+
     pub fn with_launch(&self, config: LaunchConfig) -> CaptureStream<'_> {
         CaptureStream {
             stream: self.stream,
@@ -163,8 +185,14 @@ impl CaptureStream<'_> {
 impl Launch for CaptureStream<'_> {
     type Output<T> = Buffer<T>;
 
-    fn output<T>(buffer: Buffer<T>) -> Buffer<T> {
-        buffer
+    type Unit = ();
+
+    fn output<T>(buffer: Result<Buffer<T>>) -> Buffer<T> {
+        buffer.unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    fn unit(result: Result<()>) {
+        result.unwrap_or_else(|error| panic!("{error}"));
     }
 }
 
@@ -189,16 +217,26 @@ impl Graph {
     }
 
     pub fn instantiate(&self) -> GraphExec {
-        GraphExec {
-            raw: self.0.raw.instantiate(),
+        self.try_instantiate()
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    pub fn try_instantiate(&self) -> Result<GraphExec> {
+        Ok(GraphExec {
+            raw: self.0.raw.try_instantiate()?,
             graph: self.clone(),
             pending: RefCell::default(),
-        }
+        })
     }
 
     /// Native kernel nodes; CUDA does not guarantee enumeration order.
     pub fn kernel_nodes(&self) -> Vec<*mut c_void> {
-        self.0.raw.kernel_nodes()
+        self.try_kernel_nodes()
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    pub fn try_kernel_nodes(&self) -> Result<Vec<*mut c_void>> {
+        Ok(self.0.raw.try_kernel_nodes()?)
     }
 }
 
@@ -211,45 +249,64 @@ impl GraphExec {
 
     /// Orders declared dependencies and launches; prior replay failures are observed first.
     pub fn launch(&self, stream: &Stream) -> Event {
-        assert!(
-            Rc::ptr_eq(&self.graph.0.device, &stream.device),
-            "graph and stream contexts differ",
-        );
-        self.finish();
-        let _context = stream.device.context.enter();
-        let mut statuses = tracking::order(&stream.raw, &self.graph.0.accesses);
+        self.try_launch(stream)
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    pub fn try_launch(&self, stream: &Stream) -> Result<Event> {
+        if !Rc::ptr_eq(&self.graph.0.device, &stream.device) {
+            return Err(Error::InvalidOperation(
+                "graph and stream contexts differ".to_owned(),
+            ));
+        }
+        stream.maintain()?;
+        self.try_finish()?;
+        let _context = stream.device.context.try_enter()?;
+        let mut statuses = tracking::try_order(&stream.raw, &self.graph.0.accesses)?;
         statuses.extend(self.graph.0.statuses.iter().map(|status| {
             Rc::new(Status {
                 pointer: status.pointer,
                 chunk: status.chunk,
                 kernel: status.kernel.clone(),
                 observed: Cell::new(None),
+                reported: Cell::new(false),
+                slot: status.slot.clone(),
+                error: None,
             })
         }));
-        unsafe { self.raw.launch(&stream.raw) };
+        unsafe { self.raw.try_launch(&stream.raw)? };
         tracking::complete(&stream.raw, &self.graph.0.accesses, &statuses);
-        stream
-            .launched
-            .borrow_mut()
-            .extend(statuses.iter().cloned());
-        *self.pending.borrow_mut() = Some(stream.record_statuses(statuses.clone()));
-        *self.graph.0.pending.borrow_mut() = Some(stream.record_statuses(statuses.clone()));
-        stream.record_statuses(statuses)
+        stream.retain_statuses(&statuses);
+        let event = match stream.try_record_statuses(statuses.clone()) {
+            Ok(event) => event,
+            Err(error) => {
+                stream.raw.try_synchronize()?;
+                tracking::read_statuses(&statuses)?;
+                return Err(error);
+            }
+        };
+        *self.pending.borrow_mut() = Some(event.clone());
+        *self.graph.0.pending.borrow_mut() = Some(event.clone());
+        Ok(event)
     }
 
     /// Recapture with new verified arguments, then update compatible graph topology.
     /// Returns CUDA's update result; zero means success. Failure preserves this executable.
     pub fn update(&mut self, graph: &Graph) -> i32 {
-        self.finish();
-        assert!(
-            Rc::ptr_eq(&self.graph.0.device, &graph.0.device),
-            "graph contexts differ",
-        );
-        let result = self.raw.update(&graph.0.raw);
+        self.try_update(graph)
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    pub fn try_update(&mut self, graph: &Graph) -> Result<i32> {
+        self.try_finish()?;
+        if !Rc::ptr_eq(&self.graph.0.device, &graph.0.device) {
+            return Err(Error::InvalidOperation("graph contexts differ".to_owned()));
+        }
+        let result = self.raw.try_update(&graph.0.raw)?;
         if result == 0 {
             self.graph = graph.clone();
         }
-        result
+        Ok(result)
     }
 
     /// Updates a native kernel node using CUDA's individual-parameter pointer ABI.
@@ -264,37 +321,63 @@ impl GraphExec {
         node: *mut c_void,
         parameters: &driver::KernelNodeParameters,
     ) {
-        self.finish();
-        unsafe { self.raw.set_kernel(node, parameters) };
+        unsafe { self.try_set_kernel(node, parameters) }.unwrap_or_else(|error| panic!("{error}"));
     }
 
-    fn finish(&self) {
-        let _context = self.graph.0.device.context.enter();
-        for event in self
-            .graph
-            .0
-            .pending
-            .take()
-            .into_iter()
-            .chain(self.pending.take())
-        {
-            event.raw.synchronize();
-            tracking::observe(
-                &event
-                    .statuses
-                    .iter()
-                    .filter(|status| status.observed.get().is_none())
-                    .cloned()
-                    .collect::<Vec<_>>(),
-            );
+    /// # Safety
+    /// The node, parameter ABI, resources, effects, and status pointers obey `set_kernel`.
+    pub unsafe fn try_set_kernel(
+        &mut self,
+        node: *mut c_void,
+        parameters: &driver::KernelNodeParameters,
+    ) -> Result<()> {
+        self.try_finish()?;
+        unsafe { self.raw.try_set_kernel(node, parameters)? };
+        Ok(())
+    }
+
+    fn try_finish(&self) -> Result<()> {
+        let _context = self.graph.0.device.context.try_enter()?;
+        for pending in [&self.graph.0.pending, &self.pending] {
+            if let Some(event) = pending.borrow().as_ref() {
+                event.raw.try_synchronize()?;
+                event
+                    .stream
+                    .completed
+                    .set(event.stream.completed.get().max(event.sequence));
+                tracking::read_statuses(&event.statuses)?;
+            }
         }
+        let mut result = Ok(());
+        for pending in [&self.graph.0.pending, &self.pending] {
+            if let Some(event) = pending.take() {
+                result = result.and(
+                    event
+                        .statuses
+                        .iter()
+                        .filter(|status| !status.reported.get())
+                        .try_for_each(|status| status.failure()),
+                );
+            }
+        }
+        result
     }
 }
 
 impl Drop for GraphExec {
     fn drop(&mut self) {
         if let Some(event) = self.pending.get_mut().take() {
-            event.raw.synchronize();
+            let _ = event.raw.try_synchronize();
+        }
+    }
+}
+
+impl Drop for GraphInner {
+    fn drop(&mut self) {
+        if self.device.context.try_synchronize().is_err() {
+            mem::forget(mem::replace(&mut self._resources, Box::new(())));
+            mem::forget(mem::take(&mut self.accesses));
+            mem::forget(mem::take(&mut self.statuses));
         }
     }
 }

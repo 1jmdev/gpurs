@@ -1,6 +1,6 @@
 use std::{ffi::c_void, ptr};
 
-use crate::{Context, Ownership, Stream, ffi};
+use crate::{Context, Ownership, Result, Stream, ffi};
 
 #[derive(Debug)]
 pub struct Graph {
@@ -34,22 +34,44 @@ impl Graph {
     /// The closure must obey CUDA capture restrictions and retain all referenced resources
     /// across every replay. It must not panic or leave joined streams unjoined.
     pub unsafe fn capture(stream: &Stream, submit: impl FnOnce()) -> Self {
-        let context = Context::current();
-        ffi::check(
+        unsafe {
+            Self::try_capture(stream, || {
+                submit();
+                Ok(())
+            })
+        }
+        .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    /// # Safety
+    /// The resource and lifetime requirements of [`Self::capture`] apply.
+    pub unsafe fn try_capture(
+        stream: &Stream,
+        submit: impl FnOnce() -> Result<()>,
+    ) -> Result<Self> {
+        let context = Context::try_current()?;
+        ffi::result(
             unsafe { ffi::cuStreamBeginCapture_v2(stream.raw, 1) },
             "cuStreamBeginCapture",
-        );
-        submit();
+        )?;
+        let submitted = submit();
         let mut raw = ptr::null_mut();
-        ffi::check(
+        let ended = ffi::result(
             unsafe { ffi::cuStreamEndCapture(stream.raw, &mut raw) },
             "cuStreamEndCapture",
         );
-        Self {
+        if submitted.is_err() || ended.is_err() {
+            if !raw.is_null() {
+                unsafe { ffi::cuGraphDestroy(raw) };
+            }
+            submitted?;
+            ended?;
+        }
+        Ok(Self {
             raw,
             context,
             ownership: Ownership::Owned,
-        }
+        })
     }
 
     /// # Safety
@@ -68,40 +90,53 @@ impl Graph {
     }
 
     pub fn instantiate(&self) -> GraphExec {
-        let _context = self.context.enter();
+        self.try_instantiate()
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    pub fn try_instantiate(&self) -> Result<GraphExec> {
+        let _context = self.context.try_enter()?;
         let mut raw = ptr::null_mut();
-        ffi::check(
+        ffi::result(
             unsafe { ffi::cuGraphInstantiateWithFlags(&mut raw, self.raw, 0) },
             "cuGraphInstantiateWithFlags",
-        );
-        GraphExec {
+        )?;
+        Ok(GraphExec {
             raw,
             context: self.context.clone(),
-        }
+        })
     }
 
     pub fn kernel_nodes(&self) -> Vec<*mut c_void> {
-        let _context = self.context.enter();
+        self.try_kernel_nodes()
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    pub fn try_kernel_nodes(&self) -> Result<Vec<*mut c_void>> {
+        let _context = self.context.try_enter()?;
         let mut count = 0;
-        ffi::check(
+        ffi::result(
             unsafe { ffi::cuGraphGetNodes(self.raw, ptr::null_mut(), &mut count) },
             "cuGraphGetNodes",
-        );
+        )?;
         let mut nodes = vec![ptr::null_mut(); count];
-        ffi::check(
+        ffi::result(
             unsafe { ffi::cuGraphGetNodes(self.raw, nodes.as_mut_ptr(), &mut count) },
             "cuGraphGetNodes",
-        );
+        )?;
         nodes.truncate(count);
-        nodes.retain(|&node| {
+        let mut kernels = Vec::new();
+        for node in nodes {
             let mut kind = 0;
-            ffi::check(
+            ffi::result(
                 unsafe { ffi::cuGraphNodeGetType(node, &mut kind) },
                 "cuGraphNodeGetType",
-            );
-            kind == 0
-        });
-        nodes
+            )?;
+            if kind == 0 {
+                kernels.push(node);
+            }
+        }
+        Ok(kernels)
     }
 }
 
@@ -113,40 +148,65 @@ impl GraphExec {
     /// # Safety
     /// The graph's resources and its memory-safety obligations must hold for this replay.
     pub unsafe fn launch(&self, stream: &Stream) {
-        let _context = self.context.enter();
-        ffi::check(
+        unsafe { self.try_launch(stream) }.unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    /// # Safety
+    /// The resource and lifetime requirements of [`Self::launch`] apply.
+    pub unsafe fn try_launch(&self, stream: &Stream) -> Result<()> {
+        let _context = self.context.try_enter()?;
+        ffi::result(
             unsafe { ffi::cuGraphLaunch(self.raw, stream.raw) },
             "cuGraphLaunch",
-        );
+        )?;
+        Ok(())
     }
 
     /// Returns CUDA's update result; zero means success, nonzero leaves the executable intact.
     pub fn update(&mut self, graph: &Graph) -> i32 {
-        let _context = self.context.enter();
+        self.try_update(graph)
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    pub fn try_update(&mut self, graph: &Graph) -> Result<i32> {
+        let _context = self.context.try_enter()?;
         let mut node = ptr::null_mut();
         let mut result = 0;
         let error = unsafe { ffi::cuGraphExecUpdate(self.raw, graph.raw, &mut node, &mut result) };
-        if result == 0 {
-            ffi::check(error, "cuGraphExecUpdate");
+        if error != 910 {
+            ffi::result(error, "cuGraphExecUpdate")?;
         }
-        result
+        Ok(result)
     }
 
     /// # Safety
     /// The node must belong to the instantiating graph. Parameters must satisfy its ABI,
     /// safety obligations, CUDA update restrictions, and resource lifetime requirements.
     pub unsafe fn set_kernel(&mut self, node: *mut c_void, parameters: &KernelNodeParameters) {
-        let _context = self.context.enter();
-        ffi::check(
+        unsafe { self.try_set_kernel(node, parameters) }.unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    /// # Safety
+    /// The resource and lifetime requirements of [`Self::set_kernel`] apply.
+    pub unsafe fn try_set_kernel(
+        &mut self,
+        node: *mut c_void,
+        parameters: &KernelNodeParameters,
+    ) -> Result<()> {
+        let _context = self.context.try_enter()?;
+        ffi::result(
             unsafe { ffi::cuGraphExecKernelNodeSetParams(self.raw, node, parameters) },
             "cuGraphExecKernelNodeSetParams",
-        );
+        )?;
+        Ok(())
     }
 }
 
 impl Drop for Graph {
     fn drop(&mut self) {
-        let _context = self.context.enter();
+        let Ok(_context) = self.context.try_enter() else {
+            return;
+        };
         if self.ownership == Ownership::Owned {
             unsafe { ffi::cuGraphDestroy(self.raw) };
         }
@@ -155,7 +215,9 @@ impl Drop for Graph {
 
 impl Drop for GraphExec {
     fn drop(&mut self) {
-        let _context = self.context.enter();
+        let Ok(_context) = self.context.try_enter() else {
+            return;
+        };
         unsafe { ffi::cuGraphExecDestroy(self.raw) };
     }
 }
