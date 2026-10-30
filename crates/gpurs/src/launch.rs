@@ -221,7 +221,8 @@ impl<S: Launch> KernelLaunch<'_, S> {
         .unwrap_or_else(|| {
             panic!(
                 "kernel `{}` has no instrumented entry point; asynchronous tensor kernels require \
-                 certified execution; for other kernels build in debug or with GPURS_INSTRUMENTED=1",
+                 certified execution; for other kernels build in debug or with \
+                 GPURS_INSTRUMENTED=1",
                 metadata.name
             )
         });

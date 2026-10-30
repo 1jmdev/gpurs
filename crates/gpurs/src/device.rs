@@ -198,8 +198,8 @@ impl Device {
             });
         let Some((index, metadata)) = found else {
             panic!(
-                "kernel `{key}` is not part of this executable's GPU artifact; \
-                 rebuild so gpurs_build::compile discovers the launch"
+                "kernel `{key}` is not part of this executable's GPU artifact; rebuild so \
+                 gpurs_build::compile discovers the launch"
             )
         };
         let module =

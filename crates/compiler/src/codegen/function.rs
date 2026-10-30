@@ -126,9 +126,10 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
 
     pub fn unsupported(&self, what: &str) {
         self.sess.error_help(
-self.span,
+            self.span,
             format!("{what} is not supported in GPU code"),
-            "use a supported Rust operation or move this operation to the host before launching the kernel",
+            "use a supported Rust operation or move this operation to the host before launching \
+             the kernel",
         );
     }
 

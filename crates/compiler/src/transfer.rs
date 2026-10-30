@@ -22,7 +22,8 @@ pub fn check(sess: Session<'_>, ty: Ty) -> Result<(), String> {
     match adt_path(sess, ty).as_deref() {
         Some("gpurs::gpu::tensor::source::TensorMap") => {
             return Err(format!(
-                "`{}` is an opaque GPU descriptor; construct it with Gpu::tensor_map and pass it by shared reference",
+                "`{}` is an opaque GPU descriptor; construct it with Gpu::tensor_map and pass it \
+                 by shared reference",
                 sess.type_name(ty)
             ));
         }

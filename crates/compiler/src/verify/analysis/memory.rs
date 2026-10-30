@@ -35,7 +35,8 @@ impl Analysis<'_, '_> {
                         "multiple GPU threads may write the same memory location in `{}`",
                         self.kernel.name()
                     ),
-                    "use a distinct thread index for each write, an atomic operation, or a verified single-writer guard",
+                    "use a distinct thread index for each write, an atomic operation, or a \
+                     verified single-writer guard",
                 );
             }
             let mut clauses = injective.unwrap_or_default();
@@ -72,7 +73,8 @@ impl Analysis<'_, '_> {
                         self.sess.error_help(
                             other.span,
                             "GPU memory accesses may race with a partitioned matrix",
-                            "access the matrix only through one partition built from the same data and dimensions",
+                            "access the matrix only through one partition built from the same \
+                             data and dimensions",
                         );
                     }
                     continue;
@@ -105,7 +107,8 @@ impl Analysis<'_, '_> {
                     self.sess.error_help(
                         other.span,
                         "GPU memory accesses may race",
-                        "use the same distinct per-thread index, or separate shared-memory phases with gpu::sync_block()",
+                        "use the same distinct per-thread index, or separate shared-memory phases \
+                         with gpu::sync_block()",
                     );
                 }
             }
@@ -187,7 +190,8 @@ impl Analysis<'_, '_> {
                 None => self.sess.error_help(
                     access.span,
                     "shared memory may be read before it is initialized",
-                    "initialize every shared-memory element, then call gpu::sync_block() before other threads read it",
+                    "initialize every shared-memory element, then call gpu::sync_block() before \
+                     other threads read it",
                 ),
             }
         }

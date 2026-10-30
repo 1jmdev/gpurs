@@ -76,7 +76,8 @@ fn visit(
                     sess.error_help(
                         terminator.source_info.span,
                         "indirect function calls are not supported in GPU code",
-                        "call a #[gpu] function directly or use a generic parameter so the compiler can resolve the callee",
+                        "call a #[gpu] function directly or use a generic parameter so the \
+                         compiler can resolve the callee",
                     );
                     continue;
                 };
@@ -124,9 +125,11 @@ fn visit(
                                 .any(|caller| attributes::is_device(sess, caller.def.def_id())))
                 {
                     sess.error_help(
-terminator.source_info.span,
-                        "cannot verify shared memory or collective participation inside this device helper",
-                        "keep shared-memory declarations and collective operations in the kernel body so their synchronization phases can be verified",
+                        terminator.source_info.span,
+                        "cannot verify shared memory or collective participation inside this \
+                         device helper",
+                        "keep shared-memory declarations and collective operations in the kernel \
+                         body so their synchronization phases can be verified",
                     );
                 }
                 if let Some(primitive) = primitive
@@ -213,9 +216,10 @@ fn allowed(sess: Session<'_>, instance: Instance, span: Span) -> bool {
             .any(|prefix| path.starts_with(prefix));
     if !approved {
         sess.error_help(
-span,
+            span,
             format!("`{}` is unavailable in GPU code", instance.name()),
-            "annotate this function or its implementation with #[gpu]; host-only operations must stay outside the kernel",
+            "annotate this function or its implementation with #[gpu]; host-only operations must \
+             stay outside the kernel",
         );
     }
     approved

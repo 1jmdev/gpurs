@@ -26,24 +26,24 @@ fn main() {
     if probe(
         &rustc,
         "value_repr",
-        "#![feature(rustc_private)]\nextern crate rustc_public;\n\
-         pub type Probe = rustc_public::abi::ValueRepr;\n",
+        "#![feature(rustc_private)]\nextern crate rustc_public;\npub type Probe = \
+         rustc_public::abi::ValueRepr;\n",
     ) {
         println!("cargo::rustc-cfg=gpurs_api_value_repr");
     }
     if probe(
         &rustc,
         "compiler_entrypoint",
-        "#![feature(rustc_private)]\nextern crate rustc_driver;\n\
-         pub fn probe() { let _ = rustc_driver::compiler_entrypoint; }\n",
+        "#![feature(rustc_private)]\nextern crate rustc_driver;\npub fn probe() { let _ = \
+         rustc_driver::compiler_entrypoint; }\n",
     ) {
         println!("cargo::rustc-cfg=gpurs_api_compiler_entrypoint");
     }
     if probe(
         &rustc,
         "float_extended",
-        "#![feature(rustc_private)]\nextern crate rustc_public;\n\
-         pub fn probe() { let _ = rustc_public::abi::FloatLength::F16B; }\n",
+        "#![feature(rustc_private)]\nextern crate rustc_public;\npub fn probe() { let _ = \
+         rustc_public::abi::FloatLength::F16B; }\n",
     ) {
         println!("cargo::rustc-cfg=gpurs_api_float_extended");
     }

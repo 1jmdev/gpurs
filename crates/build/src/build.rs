@@ -15,7 +15,8 @@ pub fn compile(architecture: &str) {
     println!("cargo::rustc-check-cfg=cfg(gpurs_device)");
     if architecture.parse::<Target>().is_err() {
         fail(&format!(
-            "GPU architecture must look like `sm_89`, `sm_90a`, or `sm_100f`, found `{architecture}`"
+            "GPU architecture must look like `sm_89`, `sm_90a`, or `sm_100f`, found \
+             `{architecture}`"
         ));
     }
     let directory = PathBuf::from(env::var_os("OUT_DIR").unwrap());

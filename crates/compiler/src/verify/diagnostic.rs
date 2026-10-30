@@ -51,7 +51,8 @@ pub(super) fn report(analysis: &Analysis<'_, '_>, residual: &[&Obligation]) -> V
     let consequence = match policy::strictness() {
         Strictness::Error => format!("kernel `{kernel}` has no certified entry point"),
         _ => format!(
-            "kernel `{kernel}` keeps every runtime check; set GPURS_STRICTNESS=omit to silence this"
+            "kernel `{kernel}` keeps every runtime check; set GPURS_STRICTNESS=omit to silence \
+             this"
         ),
     };
     let mut warnings = Vec::new();
@@ -99,11 +100,9 @@ pub(super) fn report(analysis: &Analysis<'_, '_>, residual: &[&Obligation]) -> V
 fn why(analysis: &Analysis<'_, '_>, obligation: &Obligation) -> String {
     let Some(goal) = &obligation.goal else {
         return match obligation.kind {
-            Kind::Panic => {
-                "the facts on this path do not exclude the panic, and the condition cannot be \
-                 evaluated before launch"
-                    .to_owned()
-            }
+            Kind::Panic => "the facts on this path do not exclude the panic, and the condition \
+                            cannot be evaluated before launch"
+                .to_owned(),
             _ => "the analysis has no symbolic form for the checked values (unsupported operation)"
                 .to_owned(),
         };

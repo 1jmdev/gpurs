@@ -432,9 +432,10 @@ impl Analysis<'_, '_> {
         let columns = referent.fields.get(2).and_then(launch);
         let (Some((region, index)), Some(rows), Some(columns)) = (data, rows, columns) else {
             self.sess.error_help(
-self.span,
+                self.span,
                 "the partitioned matrix may differ between GPU threads",
-                "construct it from kernel parameters, or values computed only from them, so every thread derives the same partition",
+                "construct it from kernel parameters, or values computed only from them, so every \
+                 thread derives the same partition",
             );
             return;
         };

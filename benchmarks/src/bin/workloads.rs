@@ -123,7 +123,8 @@ fn main() {
     let gpu = Gpu::new(0);
     let stream = gpu.stream();
     println!(
-        "workload,size,elements,gpurs_us,cuda_us,ratio,max_abs_error,max_rel_error,gpurs_gflops,cuda_gflops"
+        "workload,size,elements,gpurs_us,cuda_us,ratio,max_abs_error,max_rel_error,gpurs_gflops,\
+         cuda_gflops"
     );
     let sizes = std::env::var("GPURS_BENCHMARK_SIZES")
         .unwrap_or_else(|_| "17,64,129,256,512,1024,2048".into())

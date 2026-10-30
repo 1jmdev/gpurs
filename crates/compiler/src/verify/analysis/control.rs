@@ -345,12 +345,14 @@ impl Analysis<'_, '_> {
                     && reachable(&body, block, collective, &reconvergence)
                 {
                     self.sess.error_help(
-span,
+                        span,
                         format!(
-                            "threads may reach this GPU collective on different control-flow paths in `{}`",
+                            "threads may reach this GPU collective on different control-flow \
+                             paths in `{}`",
                             self.kernel.name()
                         ),
-                        "move block barriers outside thread-dependent branches; warp collectives require every lane of the warp to participate",
+                        "move block barriers outside thread-dependent branches; warp collectives \
+                         require every lane of the warp to participate",
                     );
                 }
             }

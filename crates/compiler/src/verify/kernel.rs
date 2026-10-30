@@ -91,7 +91,8 @@ pub fn kernel(
         sess.error_help(
             span,
             "GPU launch dimensions cannot be inferred",
-            "launch this kernel with stream.with_launch(LaunchConfig { grid, block, shared_bytes })",
+            "launch this kernel with stream.with_launch(LaunchConfig { grid, block, shared_bytes \
+             })",
         );
     }
     if configured || extent != Extent::Single {
@@ -108,7 +109,8 @@ pub fn kernel(
         sess.error_help(
             span,
             "asynchronous tensor kernels require a complete memory-safety and panic proof",
-            "guard data-dependent accesses or move them to another kernel; a failing thread cannot skip collective tensor cleanup",
+            "guard data-dependent accesses or move them to another kernel; a failing thread \
+             cannot skip collective tensor cleanup",
         );
     }
     let warnings = if !certified && policy::strictness() != Strictness::Omit {
