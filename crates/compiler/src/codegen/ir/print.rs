@@ -31,13 +31,21 @@ impl Display for Module {
             } else {
                 "global"
             };
-            writeln!(
-                f,
-                "@{} = internal {space}{kind} {}, align {}",
-                global.name,
-                Typed(&global.initializer),
-                global.align
-            )?;
+            if global.external {
+                writeln!(
+                    f,
+                    "@{} = external {space}{kind} {}, align {}",
+                    global.name, global.initializer.ty, global.align
+                )?;
+            } else {
+                writeln!(
+                    f,
+                    "@{} = internal {space}{kind} {}, align {}",
+                    global.name,
+                    Typed(&global.initializer),
+                    global.align
+                )?;
+            }
         }
         for (name, (result, parameters)) in self.declarations() {
             writeln!(f, "declare {result} @{name}({})", List(&parameters))?;

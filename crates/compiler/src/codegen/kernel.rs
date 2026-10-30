@@ -89,6 +89,7 @@ impl<'sess> ModuleBuilder<'sess> {
             preconditions: plan.preconditions,
             certified,
             instrumented,
+            shared: 0,
         }
     }
 

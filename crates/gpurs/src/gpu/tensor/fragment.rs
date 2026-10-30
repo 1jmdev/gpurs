@@ -6,27 +6,66 @@ use crate::gpu::{
     BFloat16, Half,
     intrinsics::{
         multiply_accumulate_bf16, multiply_accumulate_f16, multiply_accumulate_f16_f16,
-        pack_bfloat16, pack_half,
+        pack_bfloat16, pack_half, warpgroup_multiply_accumulate_bf16,
+        warpgroup_multiply_accumulate_f16,
     },
 };
 
 /// A 16-bit element type of tensor-core operands.
 pub trait Element: Copy + Default + 'static + sealed::Sealed {
+    /// The `CUtensorMapDataType` of the element.
+    #[doc(hidden)]
+    const TENSOR_MAP_TYPE: i32;
+    /// The operand format of `tcgen05.mma.kind::f16`.
+    #[doc(hidden)]
+    const FORMAT: u32;
+
     #[doc(hidden)]
     fn multiply_accumulate(a: [u32; 4], b: [u32; 2], c: [f32; 4]) -> [f32; 4];
+
+    #[doc(hidden)]
+    fn warpgroup_multiply_accumulate(
+        a: u64,
+        b: u64,
+        d: [Accumulator<f32>; 32],
+    ) -> [Accumulator<f32>; 32];
 }
 
 impl Element for Half {
+    const TENSOR_MAP_TYPE: i32 = 6;
+    const FORMAT: u32 = 0;
+
     #[inline]
     fn multiply_accumulate(a: [u32; 4], b: [u32; 2], c: [f32; 4]) -> [f32; 4] {
         multiply_accumulate_f16(a, b, c)
     }
+
+    #[inline]
+    fn warpgroup_multiply_accumulate(
+        a: u64,
+        b: u64,
+        d: [Accumulator<f32>; 32],
+    ) -> [Accumulator<f32>; 32] {
+        warpgroup_multiply_accumulate_f16(a, b, d)
+    }
 }
 
 impl Element for BFloat16 {
+    const TENSOR_MAP_TYPE: i32 = 9;
+    const FORMAT: u32 = 1;
+
     #[inline]
     fn multiply_accumulate(a: [u32; 4], b: [u32; 2], c: [f32; 4]) -> [f32; 4] {
         multiply_accumulate_bf16(a, b, c)
+    }
+
+    #[inline]
+    fn warpgroup_multiply_accumulate(
+        a: u64,
+        b: u64,
+        d: [Accumulator<f32>; 32],
+    ) -> [Accumulator<f32>; 32] {
+        warpgroup_multiply_accumulate_bf16(a, b, d)
     }
 }
 

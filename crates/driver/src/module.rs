@@ -66,6 +66,22 @@ impl Function {
         block as u32
     }
 
+    /// Allows launches with up to `bytes` of dynamic block-shared memory.
+    #[track_caller]
+    pub fn reserve_shared(&self, bytes: u32) {
+        // SAFETY: the function is live; the driver validates the size.
+        ffi::check(
+            unsafe {
+                ffi::cuFuncSetAttribute(
+                    self.raw,
+                    ffi::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                    bytes as i32,
+                )
+            },
+            "cuFuncSetAttribute",
+        );
+    }
+
     /// Launches with a single argument block passed by value as the only kernel parameter.
     ///
     /// # Safety

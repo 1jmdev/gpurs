@@ -87,6 +87,10 @@ fn value(expression: &Expr) -> Result<Value> {
             lit: Lit::Int(number),
             ..
         }) => number.base10_parse::<u64>()?.into(),
+        Expr::Lit(ExprLit {
+            lit: Lit::Bool(flag),
+            ..
+        }) => flag.value.into(),
         Expr::Unary(ExprUnary {
             op: UnOp::Neg(_),
             expr,

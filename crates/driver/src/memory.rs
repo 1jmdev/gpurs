@@ -125,3 +125,38 @@ pub unsafe fn fill_async(destination: DevicePointer, value: u8, bytes: usize, st
         "cuMemsetD8Async",
     );
 }
+
+/// Encodes a TMA descriptor of the row-major `rows`x`columns` matrix of `element_type`
+/// (a `CUtensorMapDataType`) at `address`, copied in 128-byte swizzled `box_rows`x`box_columns`
+/// boxes whose elements outside the matrix read as zero.
+#[track_caller]
+pub fn tensor_map(
+    element_type: i32,
+    element_bytes: u64,
+    address: DevicePointer,
+    [rows, columns]: [u64; 2],
+    [box_rows, box_columns]: [u32; 2],
+) -> [u64; 16] {
+    let mut map = [0; 16];
+    // SAFETY: the out-pointer and the arrays are valid for the duration of the call.
+    ffi::check(
+        unsafe {
+            ffi::cuTensorMapEncodeTiled(
+                &mut map,
+                element_type,
+                2,
+                address,
+                [columns, rows].as_ptr(),
+                [columns * element_bytes].as_ptr(),
+                [box_columns, box_rows].as_ptr(),
+                [1, 1].as_ptr(),
+                0,
+                ffi::CU_TENSOR_MAP_SWIZZLE_128B,
+                ffi::CU_TENSOR_MAP_L2_PROMOTION_L2_256B,
+                0,
+            )
+        },
+        "cuTensorMapEncodeTiled",
+    );
+    map
+}

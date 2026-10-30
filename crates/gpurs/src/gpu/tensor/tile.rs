@@ -73,8 +73,17 @@ impl<T: Element, const ROWS: usize, const COLUMNS: usize> SharedTile<T, ROWS, CO
         self.address() + Self::offset(row, chunk)
     }
 
+    /// The fields of a 128-byte swizzled, K-major shared-memory matrix descriptor that `wgmma`
+    /// and `tcgen05.mma` share: the start of the block at (`row`, `column`) and 1024 bytes
+    /// between groups of eight rows. Valid for tiles of 128-byte rows at 1024-byte aligned
+    /// addresses, with `row` a multiple of eight and `column` of 16.
+    pub(super) fn descriptor(&self, row: usize, column: usize) -> u64 {
+        let offset = (row * COLUMNS + column) * size_of::<T>();
+        (self.address() + offset as u32) as u64 >> 4 | (1024 >> 4) << 32
+    }
+
     /// The shared-window address of the tile.
-    fn address(&self) -> u32 {
+    pub(super) fn address(&self) -> u32 {
         shared_window(self.elements.as_ptr() as u64) as u32
     }
 

@@ -48,6 +48,8 @@ pub struct Kernel {
     pub certified: Option<Entry>,
     /// Entry point carrying every runtime check and the failure protocol.
     pub instrumented: Option<Entry>,
+    /// Dynamic block-shared memory every launch provides, in bytes.
+    pub shared: u64,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

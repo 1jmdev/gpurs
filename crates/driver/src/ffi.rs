@@ -18,6 +18,9 @@ pub const CU_STREAM_NON_BLOCKING: c_uint = 1;
 pub const CU_EVENT_DISABLE_TIMING: c_uint = 2;
 pub const CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR: c_int = 75;
 pub const CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR: c_int = 76;
+pub const CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES: c_int = 8;
+pub const CU_TENSOR_MAP_SWIZZLE_128B: c_int = 3;
+pub const CU_TENSOR_MAP_L2_PROMOTION_L2_256B: c_int = 3;
 
 #[link(name = "cuda")]
 unsafe extern "C" {
@@ -57,6 +60,21 @@ unsafe extern "C" {
         stream: CUstream,
         parameters: *mut *mut c_void,
         extra: *mut *mut c_void,
+    ) -> CUresult;
+    pub fn cuFuncSetAttribute(function: CUfunction, attribute: c_int, value: c_int) -> CUresult;
+    pub fn cuTensorMapEncodeTiled(
+        tensor_map: *mut [u64; 16],
+        data_type: c_int,
+        rank: c_uint,
+        address: DevicePointer,
+        dimensions: *const u64,
+        strides: *const u64,
+        box_dimensions: *const c_uint,
+        element_strides: *const c_uint,
+        interleave: c_int,
+        swizzle: c_int,
+        promotion: c_int,
+        fill: c_int,
     ) -> CUresult;
     pub fn cuStreamCreate(stream: *mut CUstream, flags: c_uint) -> CUresult;
     pub fn cuStreamDestroy_v2(stream: CUstream) -> CUresult;

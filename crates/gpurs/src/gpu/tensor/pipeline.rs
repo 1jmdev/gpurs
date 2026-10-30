@@ -1,6 +1,6 @@
 use gpurs_macros::primitive;
 
-use super::{Element, SharedTile, TileWriter};
+use super::{Element, SharedTile, TensorWriter, TileWriter};
 use crate::gpu::{
     block_dim,
     intrinsics::{
@@ -22,6 +22,20 @@ pub trait Stage: private::Sealed {
     unsafe fn writers<'a>(stage: *mut Self) -> Self::Writers<'a>;
 }
 
+/// The tiles one [`TensorPipeline`](super::TensorPipeline) stage holds: a [`SharedTile`] of
+/// 128-byte rows, or a tuple of up to four stages.
+pub trait TensorStage: private::Sealed {
+    /// Write access to every tile of a filling stage.
+    type Writers<'a>;
+
+    #[doc(hidden)]
+    /// # Safety
+    ///
+    /// `stage` points to a stage the caller may fill for `'a`, whose copies complete on the
+    /// barrier at shared-window address `barrier`.
+    unsafe fn writers<'a>(stage: *mut Self, barrier: u32) -> Self::Writers<'a>;
+}
+
 mod private {
     pub trait Sealed {}
 }
@@ -36,9 +50,28 @@ impl<T: Element, const ROWS: usize, const COLUMNS: usize> Stage for SharedTile<T
     }
 }
 
+impl<T: Element, const ROWS: usize, const COLUMNS: usize> TensorStage
+    for SharedTile<T, ROWS, COLUMNS>
+{
+    type Writers<'a> = TensorWriter<'a, T, ROWS, COLUMNS>;
+
+    unsafe fn writers<'a>(stage: *mut Self, barrier: u32) -> Self::Writers<'a> {
+        TensorWriter::new(stage, barrier)
+    }
+}
+
 macro_rules! tuple {
     ($($stage:ident $field:tt),+) => {
-        impl<$($stage: Stage),+> private::Sealed for ($($stage,)+) {}
+        impl<$($stage),+> private::Sealed for ($($stage,)+) {}
+
+        impl<$($stage: TensorStage),+> TensorStage for ($($stage,)+) {
+            type Writers<'a> = ($($stage::Writers<'a>,)+);
+
+            unsafe fn writers<'a>(stage: *mut Self, barrier: u32) -> Self::Writers<'a> {
+                // SAFETY: each field lies inside the stage the caller may fill.
+                unsafe { ($($stage::writers(&raw mut (*stage).$field, barrier),)+) }
+            }
+        }
 
         impl<$($stage: Stage),+> Stage for ($($stage,)+) {
             type Writers<'a> = ($($stage::Writers<'a>,)+);
@@ -57,8 +90,8 @@ tuple!(A 0, B 1, C 2);
 tuple!(A 0, B 1, C 2, D 3);
 
 /// `STAGES` copies of `S` in block-shared memory, filled with asynchronous copies while earlier
-/// stages are read. It holds 2 to 8 stages, which must fit in the 48 KiB of static block-shared
-/// memory beside the 8 bytes the compiler reserves.
+/// stages are read. It holds 2 to 8 stages, which must fit in the block-shared memory of the
+/// device.
 ///
 /// Every copy issued through a stage's writers forms one group, committed by the next call on
 /// the pipeline. A stage becomes readable only after its group has completed and a block
@@ -66,7 +99,7 @@ tuple!(A 0, B 1, C 2, D 3);
 /// read, so copies never race with reads.
 #[repr(C)]
 pub struct Pipeline<S, const STAGES: usize> {
-    storage: *mut S,
+    storage: *mut [S; STAGES],
     filled: u32,
     consumed: u32,
 }
@@ -171,7 +204,7 @@ impl<S: Stage, const STAGES: usize> Pipeline<S, STAGES> {
 
     fn slot(&self, index: u32) -> *mut S {
         // SAFETY: the storage holds `STAGES` stages.
-        unsafe { self.storage.add(index as usize % STAGES) }
+        unsafe { self.storage.cast::<S>().add(index as usize % STAGES) }
     }
 }
 

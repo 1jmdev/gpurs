@@ -1,6 +1,6 @@
 use std::env;
 
-use gpurs_artifact::{Convergence, Lowering, Memory};
+use gpurs_artifact::{Convergence, Lowering, Memory, Primitive};
 use rustc_data_structures::fx::FxHashSet;
 
 use crate::{
@@ -105,13 +105,18 @@ fn visit(
                     );
                 }
                 if let Some(primitive) = primitive
-                    && architecture() < primitive.architecture
+                    && !provides(&primitive)
                 {
+                    let suffix = if primitive.specific { "a" } else { "" };
                     diagnostic::error(
                         sess,
                         terminator.source_info.span,
-                        format!("`{}` requires sm_{}", callee.name(), primitive.architecture),
-                        "raise the target GPU architecture",
+                        format!(
+                            "`{}` requires sm_{}{suffix}",
+                            callee.name(),
+                            primitive.architecture
+                        ),
+                        "select the GPU architecture that provides it in gpurs_build::compile",
                     );
                 }
                 if allowed(sess, callee, terminator.source_info.span) {
@@ -205,6 +210,16 @@ fn reachable(body: &Body) -> Vec<usize> {
 
 pub fn architecture() -> u32 {
     env::var("GPURS_ARCHITECTURE").unwrap()[3..]
+        .trim_end_matches(['a', 'f'])
         .parse()
         .unwrap()
+}
+
+/// Whether the target provides `primitive`: its architecture or later, and for an
+/// architecture-specific primitive an `a` or `f` target of the same major version.
+fn provides(primitive: &Primitive) -> bool {
+    let target = env::var("GPURS_ARCHITECTURE").unwrap();
+    architecture() >= primitive.architecture
+        && (!primitive.specific
+            || target.ends_with(['a', 'f']) && architecture() / 10 == primitive.architecture / 10)
 }

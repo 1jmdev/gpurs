@@ -40,6 +40,13 @@ pub struct ModuleBuilder<'sess> {
     functions: FxHashMap<Copy, String>,
     queue: Vec<Copy>,
     pub(super) allocations: FxHashMap<AllocId, ir::Value>,
+    /// Static block-shared bytes the function being lowered allocates.
+    pub shared_static: u64,
+    /// Dynamic block-shared bytes the function being lowered allocates.
+    pub shared: u64,
+    /// Dynamic block-shared bytes of the largest function.
+    pub shared_bytes: u64,
+    dynamic: Option<ir::Value>,
 }
 
 /// Device calling convention of one function instance.
@@ -66,7 +73,18 @@ impl<'sess> ModuleBuilder<'sess> {
             functions: FxHashMap::default(),
             queue: Vec::new(),
             allocations: FxHashMap::default(),
+            shared_static: 0,
+            shared: 0,
+            shared_bytes: 0,
+            dynamic: None,
         }
+    }
+
+    /// The start of the launch's dynamic block-shared memory, aligned for TMA swizzling.
+    pub fn dynamic_shared(&mut self) -> ir::Value {
+        self.dynamic
+            .get_or_insert_with(|| self.ir.external("gpurs_dynamic", Type::bytes(0), 3, 1024))
+            .clone()
     }
 
     /// Name of the device function for one copy of `instance`, queueing it for lowering on
@@ -105,19 +123,22 @@ impl<'sess> ModuleBuilder<'sess> {
         }
     }
 
-    /// Lowers every queued function and renders the module.
-    pub fn finish(mut self) -> String {
+    /// Lowers every queued function and renders the module, with the dynamic block-shared
+    /// bytes a launch provides.
+    pub fn finish(mut self) -> (String, u64) {
         while let Some(copy) = self.queue.pop() {
             let name = self.functions[&copy].clone();
             let (instance, certificate, linear) = copy;
+            (self.shared_static, self.shared) = (0, 0);
             let mut builder = FunctionBuilder::new(&mut self, instance);
             builder.certificate = certificate;
             builder.linear = linear;
             builder.lower(&name);
+            self.shared_bytes = self.shared_bytes.max(self.shared);
         }
         self.ir.define(self.failure("gpurs.fail", true));
         self.ir.define(self.failure("gpurs.record", false));
-        self.ir.to_string()
+        (self.ir.to_string(), self.shared_bytes)
     }
 
     /// `gpurs.fail(code)` records the first failure of the launch and stops the thread;

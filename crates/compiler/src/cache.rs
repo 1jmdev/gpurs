@@ -137,8 +137,9 @@ impl Cache {
             let summary = std::mem::take(&mut plan.summary);
             let warnings = std::mem::take(&mut plan.warnings);
             let mut module = ModuleBuilder::new(sess);
-            let kernel = module.kernel(plan);
-            let ir = module.finish();
+            let mut kernel = module.kernel(plan);
+            let (ir, shared) = module.finish();
+            kernel.shared = shared;
             sess.abort_if_errors();
             let lowered = Lowered {
                 kernel,

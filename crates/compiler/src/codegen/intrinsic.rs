@@ -11,7 +11,7 @@ use super::{
 use crate::{
     attributes, paths, stable,
     stable::{
-        BinOp, CrateDef, GenericArgKind, Instance, MachineSize, RigidTy, Scalar, Ty, TyConst,
+        BinOp, CrateDef, GenericArgKind, Instance, MachineSize, RigidTy, Scalar, TyConst,
         TyConstKind, TyKind, ValueRepr,
     },
 };
@@ -26,7 +26,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
         if let Some(primitive) = attributes::primitive(self.sess, instance.def.def_id())
             && primitive.leaf()
         {
-            self.primitive(primitive, instance, arguments, destination);
+            self.primitive(primitive, arguments, destination);
             return true;
         }
         if let Some(name) = paths::math(self.sess, instance.def.def_id())
@@ -342,13 +342,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
         true
     }
 
-    fn primitive(
-        &mut self,
-        primitive: Primitive,
-        instance: Instance,
-        arguments: &[Operand],
-        destination: &Place,
-    ) {
+    fn primitive(&mut self, primitive: Primitive, arguments: &[Operand], destination: &Place) {
         if self.certificate.is_none() && primitive.convergence == Convergence::Warp {
             let mask = self
                 .ir
@@ -446,23 +440,39 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                 }
             }
             Lowering::SharedArray => {
-                let element = instance.args().0[0].ty().copied().unwrap();
-                let length = instance.args().0[1]
-                    .expect_const()
-                    .eval_target_usize()
-                    .unwrap();
-                let layout = self.shape_of(Ty::try_new_array(element, length).unwrap());
+                // The storage is the pointee of the result's first field. It is static while
+                // the function's static storage fits in 48 KiB, and dynamic beyond that.
+                let storage = destination
+                    .shape
+                    .field(self.sess, 0)
+                    .ty
+                    .kind()
+                    .builtin_deref(true)
+                    .expect("shared storage is reached through a pointer")
+                    .ty;
+                let layout = self.shape_of(storage);
                 let size = layout.size().bytes().max(1) as u64;
-                let shared = self.module.ir.global(
-                    "gpurs.shared",
-                    3,
-                    false,
-                    ir::Value::undef(Type::bytes(size)),
-                    layout.align(),
-                );
-                let shared = self
-                    .ir
-                    .cast(Conversion::AddrSpaceCast, shared, Type::byte_pointer());
+                let start = self.module.shared_static.next_multiple_of(layout.align());
+                let shared = if start + size <= 48 * 1024 - 1024 {
+                    self.module.shared_static = start + size;
+                    let shared = self.module.ir.global(
+                        "gpurs.shared",
+                        3,
+                        false,
+                        ir::Value::undef(Type::bytes(size)),
+                        layout.align(),
+                    );
+                    self.ir
+                        .cast(Conversion::AddrSpaceCast, shared, Type::byte_pointer())
+                } else {
+                    let offset = self.module.shared.next_multiple_of(layout.align());
+                    self.module.shared = offset + size;
+                    let base = self.module.dynamic_shared();
+                    let base = self
+                        .ir
+                        .cast(Conversion::AddrSpaceCast, base, Type::byte_pointer());
+                    self.ir.offset(base, ir::Value::i64(offset), true)
+                };
                 if matches!(destination.shape.repr(), ValueRepr::Scalar(_)) {
                     shared
                 } else {

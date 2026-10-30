@@ -103,11 +103,13 @@ impl<S: Launch> KernelLaunch<'_, S> {
     }
 
     pub fn reference<T>(&mut self, argument: &DeviceValue<T>) {
-        self.reference_argument(&argument.buffer, false);
+        self.reference_argument(argument, false);
     }
 
+    #[track_caller]
     pub fn reference_mut<T>(&mut self, argument: &mut DeviceValue<T>) {
-        self.reference_argument(&argument.buffer, true);
+        assert!(argument.source.is_none(), "tensor maps cannot be written");
+        self.reference_argument(argument, true);
     }
 
     pub fn value<T>(&mut self, argument: &T) {
@@ -151,16 +153,24 @@ impl<S: Launch> KernelLaunch<'_, S> {
         });
     }
 
-    fn reference_argument<T>(&mut self, buffer: &Buffer<T>, mutable: bool) {
+    fn reference_argument<T>(&mut self, value: &DeviceValue<T>, mutable: bool) {
         let effect = self.effect(mutable);
         let offset = self.next() as usize;
-        self.write_word(offset, buffer.allocation.pointer);
+        self.write_word(offset, value.buffer.allocation.pointer);
         self.accesses.push(Access {
-            allocation: buffer.allocation.clone(),
+            allocation: value.buffer.allocation.clone(),
             range: 0..size_of::<T>(),
             write: effect,
             recovers: false,
         });
+        if let Some((allocation, range)) = &value.source {
+            self.accesses.push(Access {
+                allocation: allocation.clone(),
+                range: range.clone(),
+                write: false,
+                recovers: false,
+            });
+        }
     }
 
     fn effect(&self, mutable: bool) -> bool {
@@ -321,7 +331,7 @@ impl<S: Launch> KernelLaunch<'_, S> {
             function.launch(
                 dimensions(config.grid),
                 dimensions(config.block),
-                config.shared_bytes as u32,
+                config.shared_bytes.max(metadata.shared as usize) as u32,
                 &stream.raw,
                 &mut self.arguments[entry.offset..],
             );

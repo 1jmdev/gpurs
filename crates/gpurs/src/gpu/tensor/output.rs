@@ -16,9 +16,18 @@ pub trait OutputElement: Copy + Default + Sealed {
     ///
     /// `pointer` is valid for reading two elements and aligned to their combined size.
     unsafe fn read_pair(pointer: *const Self) -> [Self; 2];
+
+    /// An f32 product fragment rounded to nearest into this type.
+    #[doc(hidden)]
+    fn round(accumulator: &Accumulator<f32>) -> Accumulator<Self>;
 }
 
 impl OutputElement for f32 {
+    #[inline]
+    fn round(accumulator: &Accumulator<f32>) -> Accumulator<f32> {
+        *accumulator
+    }
+
     #[inline]
     unsafe fn write_pair(pointer: *mut Self, [low, high]: [Self; 2]) {
         let bits = low.to_bits() as u64 | (high.to_bits() as u64) << 32;
@@ -38,11 +47,16 @@ impl OutputElement for f32 {
 }
 
 macro_rules! half {
-    ($($element:ident),*) => {
+    ($($element:ident $round:ident),*) => {
         $(
             impl OutputElement for $element {
                 #[inline]
-    unsafe fn write_pair(pointer: *mut Self, [low, high]: [Self; 2]) {
+                fn round(accumulator: &Accumulator<f32>) -> Accumulator<$element> {
+                    accumulator.$round()
+                }
+
+                #[inline]
+                unsafe fn write_pair(pointer: *mut Self, [low, high]: [Self; 2]) {
                     // SAFETY: guaranteed by the caller.
                     unsafe { pointer.cast::<u32>().write(low.0 as u32 | (high.0 as u32) << 16) }
                 }
@@ -58,7 +72,7 @@ macro_rules! half {
     };
 }
 
-half!(Half, BFloat16);
+half!(Half to_half, BFloat16 to_bfloat16);
 
 /// A row-major matrix partitioned among the threads of the launch. The block at grid position
 /// (x, y) owns the `BLOCK_ROWS`x`BLOCK_COLUMNS` tile at row `y * BLOCK_ROWS` and column

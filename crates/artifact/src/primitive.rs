@@ -11,6 +11,10 @@ pub struct Primitive {
     pub lowering: Lowering,
     /// Minimum `sm_XY` as `XY`.
     pub architecture: u32,
+    /// Requires an architecture-specific `sm_XYa` or family `sm_XYf` target of the same major
+    /// version as `architecture`.
+    #[serde(default)]
+    pub specific: bool,
     pub convergence: Convergence,
     pub memory: Memory,
     pub proof: Proof,

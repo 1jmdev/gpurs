@@ -12,6 +12,7 @@ pub(super) struct Global {
     pub constant: bool,
     pub initializer: Value,
     pub align: u64,
+    pub external: bool,
 }
 
 #[derive(Default)]
@@ -42,6 +43,21 @@ impl Module {
             constant,
             initializer,
             align,
+            external: false,
+        });
+        address
+    }
+
+    /// Declares the external global `name` of type `ty`, returning its address in `space`.
+    pub fn external(&mut self, name: &str, ty: Type, space: u32, align: u64) -> Value {
+        let address = Value::new(ty.clone().pointer_in(space), Kind::Global(name.to_owned()));
+        self.globals.push(Global {
+            name: name.to_owned(),
+            space,
+            constant: false,
+            initializer: Value::undef(ty),
+            align,
+            external: true,
         });
         address
     }

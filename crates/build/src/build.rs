@@ -13,9 +13,12 @@ pub fn compile(architecture: &str) {
         process::exit(wrapper::run_wrapper());
     }
     println!("cargo::rustc-check-cfg=cfg(gpurs_device)");
-    if !architecture.starts_with("sm_") || architecture[3..].parse::<u32>().is_err() {
+    let version = architecture
+        .strip_prefix("sm_")
+        .map(|version| version.strip_suffix(['a', 'f']).unwrap_or(version));
+    if version.is_none_or(|version| version.parse::<u32>().is_err()) {
         fail(&format!(
-            "GPU architecture must look like `sm_89`, found `{architecture}`"
+            "GPU architecture must look like `sm_89`, `sm_90a`, or `sm_100f`, found `{architecture}`"
         ));
     }
     let directory = PathBuf::from(env::var_os("OUT_DIR").unwrap());
