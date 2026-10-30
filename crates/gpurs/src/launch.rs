@@ -62,6 +62,7 @@ pub fn kernel<'a, S: Launch, G>(
     cache: &KernelCache,
 ) -> KernelLaunch<'a, S> {
     let device = &stream.stream().device;
+    device.context.make_current();
     let generics = any::type_name::<G>();
     let mut loaded = cache.loaded.borrow_mut();
     let kernel = if let Some(((previous_module, previous_tail, previous), owner, kernel)) = &*loaded
@@ -153,9 +154,13 @@ impl<S: Launch> KernelLaunch<'_, S> {
     }
 
     fn slice_argument<T>(&mut self, span: Span<'_>, mutable: bool) {
+        assert!(
+            Rc::ptr_eq(&self.stream.stream().device, &span.allocation.device),
+            "kernel argument belongs to another GPU"
+        );
         let effect = self.effect(mutable);
         let offset = self.next() as usize;
-        let pointer = span.allocation.pointer + (span.start * size_of::<T>()) as u64;
+        let pointer = span.allocation.pointer + span.start as u64;
         self.write_word(offset, pointer);
         self.write_word(offset + 8, span.len as u64);
         self.lengths[self.position - 1] = span.len as u64;
@@ -168,12 +173,22 @@ impl<S: Launch> KernelLaunch<'_, S> {
     }
 
     fn reference_argument<T>(&mut self, value: &impl DeviceReference<T>, mutable: bool) {
+        assert!(
+            Rc::ptr_eq(
+                &self.stream.stream().device,
+                &value.buffer().allocation.device
+            ),
+            "kernel argument belongs to another GPU"
+        );
         let effect = self.effect(mutable);
         let offset = self.next() as usize;
-        self.write_word(offset, value.buffer().allocation.pointer);
+        self.write_word(
+            offset,
+            value.buffer().allocation.pointer + value.buffer().offset as u64,
+        );
         self.accesses.push(Access {
             allocation: value.buffer().allocation.clone(),
-            range: 0..size_of::<T>(),
+            range: value.buffer().offset..value.buffer().offset + size_of::<T>(),
             write: effect,
             recovers: false,
         });

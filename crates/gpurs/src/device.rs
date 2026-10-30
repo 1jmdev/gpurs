@@ -116,6 +116,7 @@ impl Gpu {
     }
 
     pub fn stream(&self) -> Stream {
+        self.device.context.make_current();
         Stream::new(self.device.clone())
     }
 
@@ -128,23 +129,26 @@ impl Gpu {
 
     /// Copies the bytes of `data` into a new GPU buffer.
     pub(crate) fn copy<T>(&self, data: &[T]) -> Buffer<T> {
+        self.device.context.make_current();
         let bytes = size_of_val(data);
         let pointer = driver::allocate_async(bytes, &self.device.transfer);
         let allocation = Rc::new(Allocation::new(self.device.clone(), pointer, bytes));
-        // SAFETY: any bytes, including padding, may be read as `MaybeUninit<u8>`; the
-        // allocation holds `bytes` bytes.
+        // SAFETY: padding may be copied as `MaybeUninit<u8>`; the allocation holds the
+        // bytes, and the borrowed source stays valid until synchronization below.
         unsafe {
             let source = slice::from_raw_parts(data.as_ptr().cast::<MaybeUninit<u8>>(), bytes);
             driver::copy_to_device_async(pointer, source, &self.device.transfer);
         }
         let access = Access::recovering(&allocation, 0..bytes);
         tracking::complete(&self.device.transfer, &[access], &[]);
+        self.device.transfer.synchronize();
         Buffer::new(allocation, data.len())
     }
 
     /// Allocates `len` zero-initialized elements; `T` must accept the all-zero bit pattern.
     #[track_caller]
     pub fn zeros<T>(&self, len: usize) -> Buffer<T> {
+        self.device.context.make_current();
         let descriptor = launch::verified::<T>(&self.device);
         if !descriptor.zeroable {
             panic!("`{}` has no valid all-zero representation", descriptor.name);
@@ -276,6 +280,7 @@ impl Device {
 
 impl Drop for Device {
     fn drop(&mut self) {
+        self.context.make_current();
         self.context.synchronize();
         for &chunk in self.statuses.borrow().iter() {
             // SAFETY: the context is idle, so no launch still writes status words.

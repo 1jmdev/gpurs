@@ -1,4 +1,4 @@
-use std::{ffi::c_void, mem::MaybeUninit};
+use std::{ffi::c_void, mem::MaybeUninit, ptr};
 
 use crate::{
     Stream,
@@ -43,10 +43,11 @@ pub unsafe fn free_async(pointer: DevicePointer, stream: &Stream) {
     );
 }
 
-/// Copies pageable host memory; the driver stages `source` before returning.
+/// Copies host memory to the device.
 ///
 /// # Safety
 /// `destination` must hold at least `source.len()` bytes until the copy completes.
+/// Pinned sources must remain readable until completion; pageable sources are staged.
 pub unsafe fn copy_to_device_async(
     destination: DevicePointer,
     source: &[MaybeUninit<u8>],
@@ -124,6 +125,70 @@ pub unsafe fn fill_async(destination: DevicePointer, value: u8, bytes: usize, st
         unsafe { ffi::cuMemsetD8Async(destination, value, bytes, stream.raw) },
         "cuMemsetD8Async",
     );
+}
+
+/// # Safety
+/// Both ranges must remain valid until completion and must not overlap.
+pub unsafe fn copy_device_async(
+    destination: DevicePointer,
+    source: DevicePointer,
+    bytes: usize,
+    stream: &Stream,
+) {
+    // SAFETY: guaranteed by the caller.
+    ffi::check(
+        unsafe { ffi::cuMemcpyDtoDAsync_v2(destination, source, bytes, stream.raw) },
+        "cuMemcpyDtoDAsync",
+    );
+}
+
+/// # Safety
+/// `destination` must be four-byte aligned and hold `count` words until completion.
+pub unsafe fn fill_words_async(
+    destination: DevicePointer,
+    value: u32,
+    count: usize,
+    stream: &Stream,
+) {
+    // SAFETY: guaranteed by the caller.
+    ffi::check(
+        unsafe { ffi::cuMemsetD32Async(destination, value, count, stream.raw) },
+        "cuMemsetD32Async",
+    );
+}
+
+pub fn allocate_host(bytes: usize) -> *mut c_void {
+    let mut pointer = ptr::null_mut();
+    // SAFETY: the out-pointer references a valid local; portable storage works across contexts.
+    ffi::check(
+        unsafe { ffi::cuMemHostAlloc(&mut pointer, bytes.max(1), 1) },
+        "cuMemHostAlloc",
+    );
+    pointer
+}
+
+/// # Safety
+/// `pointer` must be a host allocation with no outstanding accesses.
+pub unsafe fn free_host(pointer: *mut c_void) {
+    // SAFETY: guaranteed by the caller.
+    unsafe { ffi::cuMemFreeHost(pointer) };
+}
+
+/// # Safety
+/// The range must remain allocated at this address until unregistered.
+pub unsafe fn register_host(pointer: *mut c_void, bytes: usize) {
+    // SAFETY: guaranteed by the caller; portable registration works across contexts.
+    ffi::check(
+        unsafe { ffi::cuMemHostRegister_v2(pointer, bytes, 1) },
+        "cuMemHostRegister",
+    );
+}
+
+/// # Safety
+/// `pointer` must be registered host memory with no outstanding accesses.
+pub unsafe fn unregister_host(pointer: *mut c_void) {
+    // SAFETY: guaranteed by the caller.
+    unsafe { ffi::cuMemHostUnregister(pointer) };
 }
 
 #[repr(C, align(128))]

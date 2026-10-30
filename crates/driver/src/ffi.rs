@@ -92,6 +92,22 @@ unsafe extern "C" {
     pub fn cuMemAllocAsync(pointer: *mut DevicePointer, bytes: usize, stream: CUstream)
     -> CUresult;
     pub fn cuMemFreeAsync(pointer: DevicePointer, stream: CUstream) -> CUresult;
+    pub fn cuMemHostAlloc(pointer: *mut *mut c_void, bytes: usize, flags: c_uint) -> CUresult;
+    pub fn cuMemFreeHost(pointer: *mut c_void) -> CUresult;
+    pub fn cuMemHostRegister_v2(pointer: *mut c_void, bytes: usize, flags: c_uint) -> CUresult;
+    pub fn cuMemHostUnregister(pointer: *mut c_void) -> CUresult;
+    pub fn cuMemcpyDtoDAsync_v2(
+        destination: DevicePointer,
+        source: DevicePointer,
+        bytes: usize,
+        stream: CUstream,
+    ) -> CUresult;
+    pub fn cuMemsetD32Async(
+        destination: DevicePointer,
+        value: u32,
+        count: usize,
+        stream: CUstream,
+    ) -> CUresult;
     pub fn cuMemcpyHtoDAsync_v2(
         destination: DevicePointer,
         source: *const c_void,

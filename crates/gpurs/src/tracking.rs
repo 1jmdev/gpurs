@@ -6,6 +6,7 @@
 //! region. Failures therefore propagate on the host; kernels never inspect other launches.
 
 use std::{
+    any::Any,
     cell::{Cell, RefCell},
     mem::MaybeUninit,
     ops::Range,
@@ -21,6 +22,8 @@ pub(crate) struct Allocation {
     pub device: Rc<Device>,
     pub pointer: DevicePointer,
     pub bytes: usize,
+    pub base: DevicePointer,
+    pub owner: Option<Box<dyn Any>>,
     records: RefCell<Vec<Record>>,
 }
 
@@ -56,6 +59,8 @@ impl Allocation {
             device,
             pointer,
             bytes,
+            base: pointer,
+            owner: None,
             records: RefCell::default(),
         }
     }
@@ -63,14 +68,20 @@ impl Allocation {
 
 impl Drop for Allocation {
     fn drop(&mut self) {
+        self.device.context.make_current();
         let release = &self.device.release;
         for record in self.records.get_mut().iter() {
             if record.sequence > record.stream.completed.get() {
                 release.wait(&record.stream.event());
             }
         }
+        if self.owner.is_some() {
+            release.synchronize();
+            drop(self.owner.take());
+            return;
+        }
         // SAFETY: the release stream waits for every outstanding use of this allocation.
-        unsafe { driver::free_async(self.pointer, release) };
+        unsafe { driver::free_async(self.base, release) };
     }
 }
 

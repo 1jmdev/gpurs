@@ -8,6 +8,7 @@ mod buffer;
 mod device;
 pub mod gpu;
 mod launch;
+mod memory;
 mod reference;
 mod stream;
 mod tensor_map;
@@ -17,6 +18,7 @@ pub use buffer::{Buffer, DeviceSlice, DeviceSliceMut, DeviceValue, Pending, View
 pub use device::Gpu;
 pub use gpu::{BFloat16, Half};
 pub use gpurs_macros::gpu;
+pub use memory::{DeviceAllocation, PinnedBuffer, Transfer};
 pub use reference::{DeviceReference, DeviceReferenceMut};
 pub use stream::{ConfiguredStream, Launch, LaunchConfig, Stream};
 pub use tensor_map::DeviceTensorMap;

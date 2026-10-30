@@ -1,4 +1,5 @@
 use std::{
+    any,
     marker::PhantomData,
     mem::MaybeUninit,
     ops::{Bound, Range, RangeBounds},
@@ -17,6 +18,7 @@ use crate::{
 pub struct Buffer<T> {
     pub(crate) allocation: Rc<Allocation>,
     len: usize,
+    pub(crate) offset: usize,
     marker: PhantomData<T>,
 }
 
@@ -77,6 +79,7 @@ impl<T> Buffer<T> {
         Buffer {
             allocation,
             len,
+            offset: 0,
             marker: PhantomData,
         }
     }
@@ -100,7 +103,7 @@ impl<T> Buffer<T> {
     #[track_caller]
     pub fn view(&self, range: impl RangeBounds<usize>) -> View<'_, T> {
         View {
-            span: self.whole().slice(range),
+            span: self.whole().slice::<T>(range),
             marker: PhantomData,
         }
     }
@@ -108,7 +111,7 @@ impl<T> Buffer<T> {
     #[track_caller]
     pub fn view_mut(&mut self, range: impl RangeBounds<usize>) -> ViewMut<'_, T> {
         ViewMut {
-            span: self.whole().slice(range),
+            span: self.whole().slice::<T>(range),
             marker: PhantomData,
         }
     }
@@ -123,11 +126,11 @@ impl<T> Buffer<T> {
         let whole = self.whole();
         (
             ViewMut {
-                span: whole.slice(..mid),
+                span: whole.slice::<T>(..mid),
                 marker: PhantomData,
             },
             ViewMut {
-                span: whole.slice(mid..),
+                span: whole.slice::<T>(mid..),
                 marker: PhantomData,
             },
         )
@@ -144,7 +147,7 @@ impl<T> Buffer<T> {
     pub(crate) fn whole(&self) -> Span<'_> {
         Span {
             allocation: &self.allocation,
-            start: 0,
+            start: self.offset,
             len: self.len,
         }
     }
@@ -189,7 +192,7 @@ impl<T> Pending<T> {
 
 impl<'a> Span<'a> {
     #[track_caller]
-    fn slice(self, range: impl RangeBounds<usize>) -> Span<'a> {
+    fn slice<T>(self, range: impl RangeBounds<usize>) -> Span<'a> {
         let start = match range.start_bound() {
             Bound::Included(&start) => start,
             Bound::Excluded(&start) => start + 1,
@@ -208,18 +211,19 @@ impl<'a> Span<'a> {
         }
         Span {
             allocation: self.allocation,
-            start: self.start + start,
+            start: self.start + start * size_of::<T>(),
             len: end - start,
         }
     }
 
     pub fn bytes<T>(&self) -> Range<usize> {
-        self.start * size_of::<T>()..(self.start + self.len) * size_of::<T>()
+        self.start..self.start + self.len * size_of::<T>()
     }
 }
 
 #[track_caller]
 fn download<T>(span: Span<'_>) -> Vec<T> {
+    span.allocation.device.context.make_current();
     let stream = &span.allocation.device.download;
     let range = span.bytes::<T>();
     let sources = tracking::order(stream, &[Access::read(span.allocation, range.clone())]);
@@ -250,19 +254,52 @@ fn read<T>(buffer: &Buffer<T>) -> T {
 }
 
 fn fill<T: Copy>(span: Span<'_>, stream: &Stream, value: T) {
+    assert!(
+        Rc::ptr_eq(&stream.device, &span.allocation.device),
+        "fill allocation belongs to another GPU"
+    );
+    stream.device.context.make_current();
     let access = Access::recovering(span.allocation, span.bytes::<T>());
     tracking::order(&stream.raw, slice::from_ref(&access));
-    let host = vec![value; span.len];
-    // SAFETY: `T` is a verified transfer type, so its bytes may be read as `MaybeUninit<u8>`;
-    // the driver stages the pageable source before returning.
-    unsafe {
-        let source =
-            slice::from_raw_parts(host.as_ptr().cast::<MaybeUninit<u8>>(), size_of_val(&*host));
-        driver::copy_to_device_async(
-            span.allocation.pointer + access.range.start as u64,
-            source,
-            &stream.raw,
-        );
+    let pointer = span.allocation.pointer + access.range.start as u64;
+    match any::type_name::<T>() {
+        "u8" | "i8" | "bool" => {
+            // SAFETY: these primitives have one initialized byte; the range is retained.
+            unsafe {
+                driver::fill_async(
+                    pointer,
+                    (&value as *const T).cast::<u8>().read(),
+                    span.len,
+                    &stream.raw,
+                );
+            }
+        }
+        "u32" | "i32" | "f32" | "char" => {
+            // SAFETY: these primitives have four initialized bytes and four-byte alignment.
+            unsafe {
+                driver::fill_words_async(
+                    pointer,
+                    (&value as *const T).cast::<u32>().read_unaligned(),
+                    span.len,
+                    &stream.raw,
+                );
+            }
+        }
+        _ => {
+            let host = vec![value; span.len];
+            // SAFETY: verified bytes may include padding; the source lives until synchronization.
+            unsafe {
+                driver::copy_to_device_async(
+                    pointer,
+                    slice::from_raw_parts(
+                        host.as_ptr().cast::<MaybeUninit<u8>>(),
+                        size_of_val(&*host),
+                    ),
+                    &stream.raw,
+                );
+            }
+            stream.raw.synchronize();
+        }
     }
     tracking::complete(&stream.raw, &[access], &[]);
 }

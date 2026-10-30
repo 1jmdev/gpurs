@@ -37,7 +37,7 @@ impl Gpu {
             "a {rows}x{columns} matrix does not fit in {} elements",
             span.len
         );
-        let address = span.allocation.pointer + (span.start * size_of::<T>()) as u64;
+        let address = span.allocation.pointer + span.start as u64;
         let map = TensorMap::<T, ROWS, COLUMNS> {
             descriptor: driver::tensor_map(
                 T::TENSOR_MAP_TYPE,
@@ -52,7 +52,7 @@ impl Gpu {
         DeviceTensorMap {
             buffer: self.copy(slice::from_ref(&map)),
             source: span.allocation.clone(),
-            range: span.start * size_of::<T>()..(span.start + rows * columns) * size_of::<T>(),
+            range: span.start..span.start + rows * columns * size_of::<T>(),
         }
     }
 }

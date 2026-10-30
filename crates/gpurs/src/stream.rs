@@ -79,6 +79,7 @@ impl Stream {
     /// Waits for all work on this stream and panics if any of its launches failed.
     #[track_caller]
     pub fn synchronize(&self) {
+        self.device.context.make_current();
         self.raw.synchronize();
         tracking::observe(&self.launched.take());
     }
