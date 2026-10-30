@@ -1,8 +1,8 @@
 use proc_macro2::TokenStream as Tokens;
 use quote::{ToTokens, format_ident, quote};
 use syn::{
-    Attribute, Error, Ident, ImplItem, ItemFn, ItemImpl, Meta, ReceiverKind, Result, Safety,
-    Signature, parse::Parser, spanned::Spanned, visit::Visit,
+    Attribute, Error, GenericParam, Ident, ImplItem, ItemFn, ItemImpl, Meta, ReceiverKind, Result,
+    Safety, Signature, parse::Parser, spanned::Spanned, visit::Visit,
 };
 
 use crate::{launcher, references::References};
@@ -116,7 +116,17 @@ pub(crate) fn expand_implementation(
             let signature = launcher::replace_self(method.sig.to_token_stream(), self_type);
             let signature: Signature = syn::parse2(signature).expect("signature stays valid");
             let name = &method.sig.ident;
-            let arguments = launcher::type_parameters(&method.sig.generics);
+            let arguments =
+                method
+                    .sig
+                    .generics
+                    .params
+                    .iter()
+                    .filter_map(|parameter| match parameter {
+                        GenericParam::Type(parameter) => Some(&parameter.ident),
+                        GenericParam::Const(parameter) => Some(&parameter.ident),
+                        GenericParam::Lifetime(_) => None,
+                    });
             let reference = match &implementation.trait_ {
                 Some((path, _)) => {
                     quote!(let _ = <#self_type as #path>::#name::<#(#arguments),*>;)
@@ -185,8 +195,10 @@ fn unsupported(signature: &Signature) -> Option<Error> {
         "const functions are not supported by #[gpu]"
     } else if matches!(signature.safety, Safety::Unsafe(_)) {
         "GPU functions are safe Rust; remove `unsafe`"
-    } else if signature.generics.const_params().next().is_some() {
-        "const generic parameters are not yet supported on #[gpu] functions"
+    } else if signature.generics.const_params().any(
+        |parameter| !matches!(&parameter.ty, syn::Type::Path(path) if path.path.is_ident("usize")),
+    ) {
+        "GPU const generic parameters must have type usize"
     } else {
         return None;
     };

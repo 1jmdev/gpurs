@@ -9,7 +9,8 @@ use std::{
 use gpurs_driver as driver;
 
 use crate::{
-    Buffer, Error, Event, ExternalAccess, Launch, LaunchConfig, Ownership, Result, Stream,
+    Buffer, DeviceSlice, DeviceSliceMut, Error, Event, ExternalAccess, Launch, LaunchConfig,
+    Ownership, Result, Stream,
     device::Device,
     stream::{FallibleStream, sealed},
     tracking::{self, Access, Status},
@@ -23,11 +24,33 @@ pub struct CapturedKernel {
     pub(crate) status: Option<Rc<Status>>,
 }
 
+pub struct CapturedOperation(Operation);
+
+enum Operation {
+    Kernel(CapturedKernel),
+    Fill { access: Access, value: u8 },
+    Copy { accesses: [Access; 2] },
+}
+
+impl CapturedOperation {
+    pub(crate) fn kernel(kernel: CapturedKernel) -> Self {
+        Self(Operation::Kernel(kernel))
+    }
+
+    fn accesses(&self) -> &[Access] {
+        match &self.0 {
+            Operation::Kernel(kernel) => &kernel.accesses,
+            Operation::Fill { access, .. } => std::slice::from_ref(access),
+            Operation::Copy { accesses } => accesses,
+        }
+    }
+}
+
 /// A capture queue for verified kernels writing into existing allocations.
 pub struct CaptureStream<'a> {
     stream: &'a Stream,
     config: Option<LaunchConfig>,
-    kernels: &'a RefCell<Vec<CapturedKernel>>,
+    kernels: &'a RefCell<Vec<CapturedOperation>>,
 }
 
 /// A reusable CUDA graph retaining device storage, modules, and fixed kernel arguments.
@@ -76,26 +99,51 @@ impl Stream {
         let mut kernels = kernels.into_inner();
         let accesses = kernels
             .iter()
-            .flat_map(|kernel| kernel.accesses.clone())
+            .flat_map(|operation| operation.accesses().iter().cloned())
             .collect();
         let statuses = kernels
             .iter()
-            .filter_map(|kernel| kernel.status.clone())
+            .filter_map(|operation| match &operation.0 {
+                Operation::Kernel(kernel) => kernel.status.clone(),
+                _ => None,
+            })
             .collect();
         let stream = driver::Stream::try_new()?;
         let raw = unsafe {
             driver::Graph::try_capture(&stream, || {
-                for kernel in &mut kernels {
-                    if let Some(status) = &kernel.status {
-                        driver::try_fill_async(status.pointer, 0, 4, &stream)?;
+                for operation in &mut kernels {
+                    match &mut operation.0 {
+                        Operation::Kernel(kernel) => {
+                            if let Some(status) = &kernel.status {
+                                driver::try_fill_async(status.pointer, 0, 4, &stream)?;
+                            }
+                            kernel.function.try_launch(
+                                kernel.config.grid.map(|value| value as u32),
+                                kernel.config.block.map(|value| value as u32),
+                                kernel.config.shared_bytes as u32,
+                                &stream,
+                                &mut kernel.arguments,
+                            )?;
+                        }
+                        Operation::Fill { access, value } => {
+                            driver::try_fill_async(
+                                access.allocation.pointer + access.range.start as u64,
+                                *value,
+                                access.range.len(),
+                                &stream,
+                            )?;
+                        }
+                        Operation::Copy {
+                            accesses: [source, destination],
+                        } => {
+                            driver::try_copy_device_async(
+                                destination.allocation.pointer + destination.range.start as u64,
+                                source.allocation.pointer + source.range.start as u64,
+                                source.range.len(),
+                                &stream,
+                            )?;
+                        }
                     }
-                    kernel.function.try_launch(
-                        kernel.config.grid.map(|value| value as u32),
-                        kernel.config.block.map(|value| value as u32),
-                        kernel.config.shared_bytes as u32,
-                        &stream,
-                        &mut kernel.arguments,
-                    )?;
                 }
                 Ok(())
             })?
@@ -165,6 +213,52 @@ impl Stream {
 }
 
 impl CaptureStream<'_> {
+    pub fn try_fill(&self, destination: &mut impl DeviceSliceMut<u8>, value: u8) -> Result<()> {
+        let span = destination.span();
+        let access = Access::recovering(span.allocation, span.bytes::<u8>());
+        self.stream.check_external(std::slice::from_ref(&access))?;
+        self.kernels
+            .borrow_mut()
+            .push(CapturedOperation(Operation::Fill { access, value }));
+        Ok(())
+    }
+
+    pub fn fill(&self, destination: &mut impl DeviceSliceMut<u8>, value: u8) {
+        self.try_fill(destination, value)
+            .unwrap_or_else(|error| panic!("{error}"));
+    }
+
+    pub fn try_copy<T>(
+        &self,
+        destination: &mut impl DeviceSliceMut<T>,
+        source: &impl DeviceSlice<T>,
+    ) -> Result<()> {
+        let destination = destination.span();
+        let source = source.span();
+        let accesses = [
+            Access::read(source.allocation, source.bytes::<T>()),
+            Access::recovering(destination.allocation, destination.bytes::<T>()),
+        ];
+        if destination.len != source.len
+            || (Rc::ptr_eq(source.allocation, destination.allocation)
+                && tracking::overlaps(&accesses[0].range, &accesses[1].range))
+        {
+            return Err(Error::InvalidOperation(
+                "captured copy lengths differ or ranges overlap".to_owned(),
+            ));
+        }
+        self.stream.check_external(&accesses)?;
+        self.kernels
+            .borrow_mut()
+            .push(CapturedOperation(Operation::Copy { accesses }));
+        Ok(())
+    }
+
+    pub fn copy<T>(&self, destination: &mut impl DeviceSliceMut<T>, source: &impl DeviceSlice<T>) {
+        self.try_copy(destination, source)
+            .unwrap_or_else(|error| panic!("{error}"));
+    }
+
     pub fn fallible(&self) -> FallibleStream<'_> {
         FallibleStream {
             stream: self.stream,
@@ -205,7 +299,7 @@ impl sealed::Sealed for CaptureStream<'_> {
         self.config
     }
 
-    fn capture(&self) -> Option<&RefCell<Vec<CapturedKernel>>> {
+    fn capture(&self) -> Option<&RefCell<Vec<CapturedOperation>>> {
         Some(self.kernels)
     }
 }
@@ -241,6 +335,32 @@ impl Graph {
 }
 
 impl GraphExec {
+    pub fn upload(&self, stream: &Stream) -> Event {
+        self.try_upload(stream)
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    pub fn try_upload(&self, stream: &Stream) -> Result<Event> {
+        if !Rc::ptr_eq(&self.graph.0.device, &stream.device) {
+            return Err(Error::InvalidOperation(
+                "graph and stream contexts differ".to_owned(),
+            ));
+        }
+        self.try_finish()?;
+        let _context = stream.device.context.try_enter()?;
+        self.raw.try_upload(&stream.raw)?;
+        let event = match stream.try_record() {
+            Ok(event) => event,
+            Err(error) => {
+                stream.raw.try_synchronize()?;
+                return Err(error);
+            }
+        };
+        *self.pending.borrow_mut() = Some(event.clone());
+        *self.graph.0.pending.borrow_mut() = Some(event.clone());
+        Ok(event)
+    }
+
     /// Exports a borrowed executable handle for inspection. Use `launch` for tracked replay;
     /// native replay or mutation must uphold all resource and failure-status contracts.
     pub fn as_raw(&self) -> *mut c_void {

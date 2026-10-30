@@ -6,8 +6,15 @@ use gpurs_artifact::TransferType;
 
 use crate::stable::{AdtKind, CrateDef, RigidTy, Session, Ty, TyKind};
 
-pub fn tensor_map(sess: Session<'_>, ty: Ty) -> bool {
-    adt_path(sess, ty).as_deref() == Some("gpurs::gpu::tensor::source::TensorMap")
+pub fn opaque_descriptor(sess: Session<'_>, ty: Ty) -> bool {
+    matches!(
+        adt_path(sess, ty).as_deref(),
+        Some(
+            "gpurs::gpu::tensor::source::TensorMap"
+                | "gpurs::gpu::strided::Strided"
+                | "gpurs::gpu::indexed::Indexed"
+        )
+    )
 }
 
 fn adt_path(sess: Session<'_>, ty: Ty) -> Option<Rc<str>> {
@@ -20,10 +27,14 @@ fn adt_path(sess: Session<'_>, ty: Ty) -> Option<Rc<str>> {
 /// Rejects types that cannot be copied bytewise between host and device.
 pub fn check(sess: Session<'_>, ty: Ty) -> Result<(), String> {
     match adt_path(sess, ty).as_deref() {
-        Some("gpurs::gpu::tensor::source::TensorMap") => {
+        Some(
+            "gpurs::gpu::tensor::source::TensorMap"
+            | "gpurs::gpu::strided::Strided"
+            | "gpurs::gpu::indexed::Indexed",
+        ) => {
             return Err(format!(
-                "`{}` is an opaque GPU descriptor; construct it with Gpu::tensor_map and pass it \
-                 by shared reference",
+                "`{}` is an opaque GPU descriptor; construct it with Gpu and pass it by shared \
+                 reference",
                 sess.type_name(ty)
             ));
         }

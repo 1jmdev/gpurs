@@ -36,6 +36,7 @@ unsafe extern "C" {
     ) -> CUresult;
     pub fn cuGraphExecDestroy(executable: *mut c_void) -> CUresult;
     pub fn cuGraphLaunch(executable: *mut c_void, stream: CUstream) -> CUresult;
+    pub fn cuGraphUpload(executable: *mut c_void, stream: CUstream) -> CUresult;
     pub fn cuGraphExecUpdate(
         executable: *mut c_void,
         graph: *mut c_void,
@@ -65,6 +66,13 @@ unsafe extern "C" {
     pub fn cuCtxDestroy_v2(context: CUcontext) -> CUresult;
     pub fn cuDeviceGetName(name: *mut c_char, len: c_int, device: CUdevice) -> CUresult;
     pub fn cuMemGetInfo_v2(free: *mut usize, total: *mut usize) -> CUresult;
+    pub fn cuDeviceGetDefaultMemPool(pool: *mut *mut c_void, device: CUdevice) -> CUresult;
+    pub fn cuMemPoolSetAttribute(
+        pool: *mut c_void,
+        attribute: c_int,
+        value: *mut c_void,
+    ) -> CUresult;
+    pub fn cuMemPoolTrimTo(pool: *mut c_void, bytes: usize) -> CUresult;
     pub fn cuCtxGetStreamPriorityRange(least: *mut c_int, greatest: *mut c_int) -> CUresult;
     pub fn cuCtxSetCurrent(context: CUcontext) -> CUresult;
     pub fn cuCtxSynchronize() -> CUresult;

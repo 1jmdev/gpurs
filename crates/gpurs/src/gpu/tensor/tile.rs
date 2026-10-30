@@ -1,7 +1,7 @@
 use super::{Element, FragmentA, FragmentB};
 use crate::gpu;
 
-/// A `ROWS`x`COLUMNS` tile of 16-bit elements in block-shared memory, held by a pipeline
+/// A `ROWS`x`COLUMNS` tile of 8-bit or 16-bit elements in block-shared memory, held by a pipeline
 /// [`Stage`](super::Stage). In a [`Pipeline`](super::Pipeline), its 16-byte chunks are permuted
 /// within each row so that eight consecutive rows of one chunk column fall into distinct banks,
 /// which keeps copies and fragment loads free of bank conflicts; both dimensions are then powers
@@ -22,7 +22,7 @@ impl<T: Element, const ROWS: usize, const COLUMNS: usize> SharedTile<T, ROWS, CO
         COLUMNS * size_of::<T>() / 16
     };
 
-    /// The 16x16 block at (`row`, `column`) as an `A` operand; tile rows index `M` and columns
+    /// The 16x`T::DEPTH` block at (`row`, `column`) as an `A` operand; tile rows index `M` and columns
     /// index `K`. Every lane of the warp takes part.
     pub fn load_a(&self, row: usize, column: usize) -> FragmentA<T> {
         FragmentA::new(gpu::intrinsics::load_matrices(
@@ -30,23 +30,47 @@ impl<T: Element, const ROWS: usize, const COLUMNS: usize> SharedTile<T, ROWS, CO
         ))
     }
 
-    /// The 16x16 block at (`row`, `column`) as an `A` operand; tile rows index `K` and columns
+    /// The `T::DEPTH`x16 block at (`row`, `column`) as an `A` operand; tile rows index `K` and columns
     /// index `M`. Every lane of the warp takes part.
     pub fn load_a_transposed(&self, row: usize, column: usize) -> FragmentA<T> {
+        if size_of::<T>() == 1 {
+            let lane = gpu::warp::lane_id();
+            let (row, column) = (row + 4 * (lane % 4), column + lane / 4);
+            return FragmentA::new([
+                self.pack_vertical(row, column),
+                self.pack_vertical(row, column + 8),
+                self.pack_vertical(row + 16, column),
+                self.pack_vertical(row + 16, column + 8),
+            ]);
+        }
         FragmentA::new(gpu::intrinsics::load_matrices_transposed(
             self.lane_address(row, column, true),
         ))
     }
 
-    /// The 16x16 block at (`row`, `column`) as two `B` operands, columns `column..column + 8`
+    /// The `T::DEPTH`x16 block at (`row`, `column`) as two `B` operands, columns `column..column + 8`
     /// first; tile rows index `K` and columns index `N`. Every lane of the warp takes part.
     pub fn load_b(&self, row: usize, column: usize) -> [FragmentB<T>; 2] {
+        if size_of::<T>() == 1 {
+            let lane = gpu::warp::lane_id();
+            let (row, column) = (row + 4 * (lane % 4), column + lane / 4);
+            return [
+                FragmentB::new([
+                    self.pack_vertical(row, column),
+                    self.pack_vertical(row + 16, column),
+                ]),
+                FragmentB::new([
+                    self.pack_vertical(row, column + 8),
+                    self.pack_vertical(row + 16, column + 8),
+                ]),
+            ];
+        }
         let [a, b, c, d] =
             gpu::intrinsics::load_matrices_transposed(self.lane_address(row, column, false));
         [FragmentB::new([a, b]), FragmentB::new([c, d])]
     }
 
-    /// The 16x16 block at (`row`, `column`) as two `B` operands, rows `row..row + 8` first;
+    /// The 16x`T::DEPTH` block at (`row`, `column`) as two `B` operands, rows `row..row + 8` first;
     /// tile rows index `N` and columns index `K`. Every lane of the warp takes part.
     pub fn load_b_transposed(&self, row: usize, column: usize) -> [FragmentB<T>; 2] {
         let [a, b, c, d] = gpu::intrinsics::load_matrices(self.lane_address(row, column, true));
@@ -61,12 +85,26 @@ impl<T: Element, const ROWS: usize, const COLUMNS: usize> SharedTile<T, ROWS, CO
         let (row, chunk) = if across {
             (
                 row.wrapping_add(lane / 16 * 8 + lane % 8),
-                column / 8 + lane / 8 % 2,
+                column / (16 / size_of::<T>()) + lane / 8 % 2,
             )
         } else {
-            (row.wrapping_add(lane % 16), column / 8 + lane / 16)
+            (
+                row.wrapping_add(lane % 16),
+                column / (16 / size_of::<T>()) + lane / 16,
+            )
         };
         self.address() + Self::offset(row, chunk)
+    }
+
+    fn pack_vertical(&self, row: usize, column: usize) -> u32 {
+        let mut packed = 0;
+        for byte in 0..4 {
+            let offset = Self::offset(row.wrapping_add(byte), column / 16) as usize + column % 16;
+            // SAFETY: this path only handles byte elements; offset wraps within the live tile.
+            packed |= unsafe { self.elements.as_ptr().cast::<u8>().add(offset).read() as u32 }
+                << (byte * 8);
+        }
+        packed
     }
 
     /// The fields of a 128-byte swizzled, K-major shared-memory matrix descriptor that `wgmma`

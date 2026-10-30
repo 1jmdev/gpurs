@@ -1,11 +1,22 @@
 use proc_macro2::{Delimiter, Group, TokenStream as Tokens, TokenTree};
 use quote::{ToTokens, format_ident, quote};
-use syn::{FnArg, Generics, Ident, ReturnType, Signature, Type};
+use syn::{FnArg, GenericParam, Generics, ReturnType, Signature, Type};
 
-pub(crate) fn type_parameters(generics: &Generics) -> Vec<Ident> {
+pub(crate) fn type_parameters(generics: &Generics) -> Vec<Tokens> {
     generics
-        .type_params()
-        .map(|parameter| parameter.ident.clone())
+        .params
+        .iter()
+        .filter_map(|parameter| match parameter {
+            GenericParam::Type(parameter) => {
+                let name = &parameter.ident;
+                Some(quote!(#name))
+            }
+            GenericParam::Const(parameter) => {
+                let name = &parameter.ident;
+                Some(quote!([(); #name]))
+            }
+            GenericParam::Lifetime(_) => None,
+        })
         .collect()
 }
 
@@ -13,7 +24,7 @@ pub(crate) fn type_parameters(generics: &Generics) -> Vec<Ident> {
 pub(crate) fn launcher(
     signature: &Signature,
     receiver: Option<bool>,
-    generics: &[Ident],
+    generics: &[Tokens],
     tail: &str,
     reference: Option<Tokens>,
 ) -> Tokens {

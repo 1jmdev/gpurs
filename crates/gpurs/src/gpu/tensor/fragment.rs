@@ -2,11 +2,12 @@
 
 use std::marker::PhantomData;
 
-use super::{intrinsics, sealed::Sealed};
-use crate::gpu::{self, BFloat16, Half};
+use super::{instructions, intrinsics, sealed::Sealed};
+use crate::gpu::{self, BFloat16, E4M3, E5M2, Half};
 
-/// A 16-bit element type of tensor-core operands.
+/// An element type of tensor-core operands.
 pub trait Element: Copy + Default + 'static + Sealed {
+    const DEPTH: usize = 16;
     /// The `CUtensorMapDataType` of the element.
     #[doc(hidden)]
     const TENSOR_MAP_TYPE: i32;
@@ -68,6 +69,40 @@ impl Element for BFloat16 {
 impl Sealed for f32 {}
 impl Sealed for Half {}
 impl Sealed for BFloat16 {}
+impl Sealed for E4M3 {}
+impl Sealed for E5M2 {}
+
+macro_rules! fp8_element {
+    ($element:ty, $format:literal, $multiply:ident, $warpgroup:ident) => {
+        impl Element for $element {
+            const DEPTH: usize = 32;
+            const TENSOR_MAP_TYPE: i32 = 0;
+            const FORMAT: u32 = $format;
+
+            #[inline]
+            fn multiply_accumulate(a: [u32; 4], b: [u32; 2], c: [f32; 4]) -> [f32; 4] {
+                instructions::$multiply(
+                    FragmentA::new(a),
+                    FragmentB::new(b),
+                    Accumulator { values: c },
+                )
+                .values
+            }
+
+            #[inline]
+            unsafe fn warpgroup_multiply_accumulate(
+                a: u64,
+                b: u64,
+                d: [Accumulator<f32>; 32],
+            ) -> [Accumulator<f32>; 32] {
+                unsafe { instructions::$warpgroup(a, b, d) }
+            }
+        }
+    };
+}
+
+fp8_element!(E4M3, 0, multiply_accumulate_e4m3_e4m3, warpgroup_e4m3_e4m3);
+fp8_element!(E5M2, 1, multiply_accumulate_e5m2_e5m2, warpgroup_e5m2_e5m2);
 
 /// A warp's 16x16 `A` operand, as four registers of element pairs per lane.
 #[derive(Clone, Copy, Debug, Default)]

@@ -43,7 +43,7 @@ pub struct LaunchConfig {
 pub struct FallibleStream<'a> {
     pub(crate) stream: &'a Stream,
     pub(crate) config: Option<LaunchConfig>,
-    pub(crate) capture: Option<&'a RefCell<Vec<crate::graph::CapturedKernel>>>,
+    pub(crate) capture: Option<&'a RefCell<Vec<crate::graph::CapturedOperation>>>,
 }
 
 pub struct ConfiguredStream<'a> {
@@ -72,7 +72,7 @@ pub(crate) mod sealed {
     pub trait Sealed {
         fn stream(&self) -> &Stream;
         fn config(&self) -> Option<LaunchConfig>;
-        fn capture(&self) -> Option<&std::cell::RefCell<Vec<crate::graph::CapturedKernel>>> {
+        fn capture(&self) -> Option<&std::cell::RefCell<Vec<crate::graph::CapturedOperation>>> {
             None
         }
     }
@@ -289,7 +289,7 @@ impl Launch for FallibleStream<'_> {
 }
 
 impl sealed::Sealed for FallibleStream<'_> {
-    fn capture(&self) -> Option<&RefCell<Vec<crate::graph::CapturedKernel>>> {
+    fn capture(&self) -> Option<&RefCell<Vec<crate::graph::CapturedOperation>>> {
         self.capture
     }
 

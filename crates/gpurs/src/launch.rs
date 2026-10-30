@@ -18,6 +18,7 @@ use crate::{
     DeviceReference, DeviceReferenceMut, Error, Result,
     buffer::{Buffer, DeviceSlice, DeviceSliceMut, Span},
     device::{Device, KernelKey, LoadedKernel},
+    graph::{CapturedKernel, CapturedOperation},
     stream::{Launch, LaunchConfig},
     tracking::{self, Access, Allocation},
 };
@@ -417,18 +418,20 @@ impl<S: Launch> KernelLaunch<'_, S> {
             self.write_word(RESULT_OFFSET as usize, buffer.allocation.pointer);
         }
         if let Some(capture) = capture {
-            capture.borrow_mut().push(crate::graph::CapturedKernel {
-                function: *function,
-                config: crate::LaunchConfig {
-                    shared_bytes: config
-                        .shared_bytes
-                        .max(metadata.shared.dynamic_bytes as usize),
-                    ..config
-                },
-                arguments: self.arguments[entry.offset..].to_vec(),
-                accesses,
-                status,
-            });
+            capture
+                .borrow_mut()
+                .push(CapturedOperation::kernel(CapturedKernel {
+                    function: *function,
+                    config: crate::LaunchConfig {
+                        shared_bytes: config
+                            .shared_bytes
+                            .max(metadata.shared.dynamic_bytes as usize),
+                        ..config
+                    },
+                    arguments: self.arguments[entry.offset..].to_vec(),
+                    accesses,
+                    status,
+                }));
             return Ok(result);
         }
         if let Some(status) = &status {

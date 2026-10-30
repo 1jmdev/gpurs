@@ -141,6 +141,19 @@ impl Graph {
 }
 
 impl GraphExec {
+    pub fn try_upload(&self, stream: &Stream) -> Result<()> {
+        let _context = self.context.try_enter()?;
+        ffi::result(
+            unsafe { ffi::cuGraphUpload(self.raw, stream.raw) },
+            "cuGraphUpload",
+        )
+    }
+
+    pub fn upload(&self, stream: &Stream) {
+        self.try_upload(stream)
+            .unwrap_or_else(|error| panic!("{error}"));
+    }
+
     pub fn as_raw(&self) -> *mut c_void {
         self.raw
     }

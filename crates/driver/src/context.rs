@@ -200,6 +200,34 @@ impl Context {
         Ok((free, total))
     }
 
+    pub fn try_set_pool_release_threshold(&self, bytes: u64) -> Result<()> {
+        let _context = self.try_enter()?;
+        let mut pool = ptr::null_mut();
+        let mut bytes = bytes;
+        unsafe {
+            ffi::result(
+                ffi::cuDeviceGetDefaultMemPool(&mut pool, self.0.device),
+                "cuDeviceGetDefaultMemPool",
+            )?;
+            ffi::result(
+                ffi::cuMemPoolSetAttribute(pool, 4, (&raw mut bytes).cast()),
+                "cuMemPoolSetAttribute",
+            )
+        }
+    }
+
+    pub fn try_trim_pool(&self, bytes: usize) -> Result<()> {
+        let _context = self.try_enter()?;
+        let mut pool = ptr::null_mut();
+        unsafe {
+            ffi::result(
+                ffi::cuDeviceGetDefaultMemPool(&mut pool, self.0.device),
+                "cuDeviceGetDefaultMemPool",
+            )?;
+            ffi::result(ffi::cuMemPoolTrimTo(pool, bytes), "cuMemPoolTrimTo")
+        }
+    }
+
     /// Least and greatest stream priorities; lower numbers have higher priority.
     pub fn priority_range(&self) -> (i32, i32) {
         self.try_priority_range()

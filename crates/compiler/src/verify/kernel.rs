@@ -35,11 +35,12 @@ pub fn kernel(
                     RigidTy::Slice(element) => element,
                     _ => pointee,
                 };
-                let transfer = if transfer::tensor_map(sess, pointee) && access == Access::Read {
-                    Ok(())
-                } else {
-                    transfer::check(sess, referent)
-                };
+                let transfer =
+                    if transfer::opaque_descriptor(sess, pointee) && access == Access::Read {
+                        Ok(())
+                    } else {
+                        transfer::check(sess, referent)
+                    };
                 if let Err(message) = transfer {
                     sess.error(instance.def.def_id().span(), message);
                     return None;

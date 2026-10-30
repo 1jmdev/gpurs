@@ -7,7 +7,9 @@ use rustc_interface::{interface::Compiler, util};
 use crate::{
     cache::Cache,
     discovery::HostView,
-    stable::{self, CrateDef, GenericArgKind, GenericArgs, Instance, Session, Ty, TyCtxt},
+    stable::{
+        self, CrateDef, GenericArgKind, GenericArgs, Instance, RigidTy, Session, Ty, TyCtxt, TyKind,
+    },
 };
 
 pub struct DeviceView;
@@ -78,6 +80,16 @@ impl DeviceView {
                                 sess.err(format!("not enough type arguments for `{}`", launch.key));
                                 Ty::bool_ty()
                             }))
+                        }
+                        GenericArgKind::Const(_) => {
+                            if let Some(ty) = arguments.next()
+                                && let TyKind::RigidTy(RigidTy::Array(_, length)) = ty.kind()
+                            {
+                                GenericArgKind::Const(length)
+                            } else {
+                                sess.err(format!("missing const argument for `{}`", launch.key));
+                                argument.clone()
+                            }
                         }
                         argument => argument.clone(),
                     })

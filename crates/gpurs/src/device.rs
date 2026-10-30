@@ -86,6 +86,7 @@ impl Gpu {
 
     pub fn try_from_context(context: Context) -> Result<Self> {
         let _context = context.try_enter()?;
+        context.try_set_pool_release_threshold(u64::MAX)?;
         let mut artifact = embedded_artifact()?;
         let capability = context.try_compute_capability()?;
         let mut candidates = mem::take(&mut artifact.alternatives);
@@ -140,6 +141,25 @@ impl Gpu {
 
     pub fn context(&self) -> &Context {
         &self.device.context
+    }
+
+    pub fn try_memory_info(&self) -> Result<(usize, usize)> {
+        Ok(self.device.context.try_memory_info()?)
+    }
+
+    pub fn memory_info(&self) -> (usize, usize) {
+        self.try_memory_info()
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    pub fn try_trim_memory(&self) -> Result<()> {
+        self.device.context.try_synchronize()?;
+        Ok(self.device.context.try_trim_pool(0)?)
+    }
+
+    pub fn trim_memory(&self) {
+        self.try_trim_memory()
+            .unwrap_or_else(|error| panic!("{error}"));
     }
 
     pub fn stream_with_priority(&self, priority: i32) -> Stream {

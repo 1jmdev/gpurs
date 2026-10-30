@@ -26,12 +26,15 @@ mod device;
 mod error;
 pub mod gpu;
 mod graph;
+mod indexed;
 mod interop;
 mod launch;
 mod memory;
 mod module;
 mod reference;
+mod storage;
 mod stream;
+mod strided;
 mod tensor_map;
 mod tracking;
 
@@ -44,11 +47,14 @@ pub use gpu::{BFloat16, Half};
 pub use gpurs_driver::{Context, ContextGuard, KernelNodeParameters, Ownership};
 pub use gpurs_macros::{gpu, unsafe_primitive};
 pub use graph::{CaptureStream, Graph, GraphExec};
+pub use indexed::DeviceIndexed;
 pub use interop::{Event, ExternalAccess};
 pub use memory::{DeviceAllocation, PinnedBuffer, Transfer};
 pub use module::{Kernel, Module};
 pub use reference::{DeviceReference, DeviceReferenceMut};
+pub use storage::{BitPattern, Storage};
 pub use stream::{ConfiguredStream, FallibleStream, Launch, LaunchConfig, Stream};
+pub use strided::DeviceStrided;
 pub use tensor_map::DeviceTensorMap;
 
 #[doc(hidden)]

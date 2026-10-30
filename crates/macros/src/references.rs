@@ -2,7 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use quote::ToTokens;
 use syn::{
-    Expr, ExprCall, ExprPath, Ident, Item, PatIdent, Path, TypeParam, TypePath, UseName, UseRename,
+    ConstParam, Expr, ExprCall, ExprPath, Ident, Item, PatIdent, Path, TypeParam, TypePath,
+    UseName, UseRename,
     visit::{self, Visit},
 };
 
@@ -42,6 +43,11 @@ impl<'ast> Visit<'ast> for References {
     fn visit_type_param(&mut self, parameter: &'ast TypeParam) {
         self.bindings.insert(parameter.ident.to_string());
         visit::visit_type_param(self, parameter);
+    }
+
+    fn visit_const_param(&mut self, parameter: &'ast ConstParam) {
+        self.bindings.insert(parameter.ident.to_string());
+        visit::visit_const_param(self, parameter);
     }
 
     fn visit_type_path(&mut self, ty: &'ast TypePath) {
