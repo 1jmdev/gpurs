@@ -240,6 +240,13 @@ impl<S, const STAGES: usize, C> TensorPipeline<S, STAGES, C> {
 impl<S, const STAGES: usize, C> Drop for TensorPipeline<S, STAGES, C> {
     /// Waits for copies still landing, which must not write the shared memory of a block that
     /// exited.
+    #[primitive(
+        lowering = Body,
+        architecture = 90,
+        convergence = None,
+        memory = Encapsulated,
+        proof = Uniform
+    )]
     fn drop(&mut self) {
         if thread_id().x != 0 {
             return;

@@ -1,5 +1,5 @@
 [package]
-name = "gpurs-examples"
+name = "gpurs-ada-examples"
 description = "The gpurs API scenarios as runnable examples"
 version.workspace = true
 edition.workspace = true

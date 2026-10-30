@@ -96,6 +96,13 @@ impl Display for Function {
             .parameters
             .iter()
             .map(|(parameter, byval)| match byval {
+                // The NVVM IR parser of sm_100 and later requires the `byval` type, which
+                // earlier ones reject.
+                Some(align) if crate::verify::architecture() >= 100 => format!(
+                    "{} byval({}) align {align} {parameter}",
+                    parameter.ty,
+                    parameter.ty.pointee()
+                ),
                 Some(align) => format!("{} byval align {align} {parameter}", parameter.ty),
                 None => Typed(parameter).to_string(),
             })

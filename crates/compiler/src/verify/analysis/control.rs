@@ -2,8 +2,10 @@ use rustc_data_structures::fx::FxHashSet;
 
 use super::{Analysis, Kind, Obligation, Region, State, Value, arithmetic};
 use crate::{
-    diagnostic, policy,
-    stable::{AssertMessage, BinOp, Body, TerminatorKind},
+    attributes, diagnostic, policy,
+    stable::{
+        AssertMessage, BinOp, Body, CrateDef, Instance, RigidTy, Sess, TerminatorKind, Ty, TyKind,
+    },
     verify::symbolic::{Atom, Fact, Polynomial, Predicate, Relation, Requirement},
 };
 
@@ -120,7 +122,8 @@ impl Analysis<'_, '_> {
                 Vec::new()
             }
             TerminatorKind::Drop { place, target, .. } => {
-                if self.sess.needs_drop(self.place_type(place)) {
+                let ty = self.place_type(place);
+                if self.sess.needs_drop(ty) && !trusted_drop(self.sess, ty) {
                     self.obligation(
                         block,
                         Kind::Panic,
@@ -400,4 +403,27 @@ pub fn normal_successors(body: &Body, block: usize) -> Vec<usize> {
         }
         _ => terminator.successors(),
     }
+}
+
+/// Whether the drop glue of `ty` only calls library primitives, whose definitions describe
+/// their effects as for any other call.
+fn trusted_drop(sess: Sess<'_>, ty: Ty) -> bool {
+    Instance::resolve_drop_in_place(ty)
+        .body()
+        .is_some_and(|body| {
+            body.blocks
+                .iter()
+                .all(|block| match &block.terminator.kind {
+                    TerminatorKind::Call { func, .. } => {
+                        func.ty(body.locals()).is_ok_and(|callee| {
+                            matches!(callee.kind(), TyKind::RigidTy(RigidTy::FnDef(definition, arguments))
+                    if Instance::resolve(definition, &arguments).is_ok_and(|instance| {
+                        attributes::primitive(sess, instance.def.def_id()).is_some()
+                    }))
+                        })
+                    }
+                    TerminatorKind::Drop { .. } => false,
+                    _ => true,
+                })
+        })
 }

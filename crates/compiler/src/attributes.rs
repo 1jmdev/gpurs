@@ -20,6 +20,9 @@ pub fn primitive(sess: Sess<'_>, def: DefId) -> Option<Primitive> {
     if sess.is_local(def) || sess.crate_name(def) != "gpurs" {
         return None;
     }
+    // Implementations of gpurs traits share the trait item's definition; implementations of
+    // foreign traits, such as `Drop`, carry their own.
     marker(sess, sess.trait_item_of(def).unwrap_or(def), "primitive")
+        .or_else(|| marker(sess, def, "primitive"))
         .map(|text| Primitive::decode(&text))
 }

@@ -66,6 +66,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "gpurs-ada-examples"
+version = "0.1.0"
+dependencies = [
+ "gpurs",
+ "gpurs-build",
+]
+
+[[package]]
 name = "gpurs-artifact"
 version = "0.1.0"
 dependencies = [
@@ -116,14 +124,6 @@ dependencies = [
 [[package]]
 name = "gpurs-driver"
 version = "0.1.0"
-
-[[package]]
-name = "gpurs-examples"
-version = "0.1.0"
-dependencies = [
- "gpurs",
- "gpurs-build",
-]
 
 [[package]]
 name = "gpurs-hopper-examples"
