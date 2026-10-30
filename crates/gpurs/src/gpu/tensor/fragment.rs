@@ -2,11 +2,11 @@
 
 use std::marker::PhantomData;
 
-use super::intrinsics;
+use super::{intrinsics, sealed::Sealed};
 use crate::gpu::{self, BFloat16, Half};
 
 /// A 16-bit element type of tensor-core operands.
-pub trait Element: Copy + Default + 'static + sealed::Sealed {
+pub trait Element: Copy + Default + 'static + Sealed {
     /// The `CUtensorMapDataType` of the element.
     #[doc(hidden)]
     const TENSOR_MAP_TYPE: i32;
@@ -65,13 +65,9 @@ impl Element for BFloat16 {
     }
 }
 
-pub(super) mod sealed {
-    pub trait Sealed {}
-
-    impl Sealed for f32 {}
-    impl Sealed for crate::gpu::Half {}
-    impl Sealed for crate::gpu::BFloat16 {}
-}
+impl Sealed for f32 {}
+impl Sealed for Half {}
+impl Sealed for BFloat16 {}
 
 /// A warp's 16x16 `A` operand, as four registers of element pairs per lane.
 #[derive(Clone, Copy, Debug, Default)]

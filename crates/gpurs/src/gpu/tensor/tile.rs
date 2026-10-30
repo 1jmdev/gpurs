@@ -1,15 +1,12 @@
-use std::marker::PhantomData;
+use super::{Element, FragmentA, FragmentB};
+use crate::gpu;
 
-use gpurs_macros::primitive;
-
-use super::{Element, FragmentA, FragmentB, Initialized, Matrix};
-use crate::gpu::{self, Block};
-
-/// A `ROWS`x`COLUMNS` tile of 16-bit elements in block-shared memory, held by a
-/// [`Pipeline`](super::Pipeline) stage. Its 16-byte chunks are permuted within each row so that
-/// eight consecutive rows of one chunk column fall into distinct banks, which keeps copies and
-/// fragment loads free of bank conflicts. Both dimensions are powers of two of at least 16, and
-/// coordinates are taken modulo them.
+/// A `ROWS`x`COLUMNS` tile of 16-bit elements in block-shared memory, held by a pipeline
+/// [`Stage`](super::Stage). In a [`Pipeline`](super::Pipeline), its 16-byte chunks are permuted
+/// within each row so that eight consecutive rows of one chunk column fall into distinct banks,
+/// which keeps copies and fragment loads free of bank conflicts; both dimensions are then powers
+/// of two of at least 16, and coordinates are taken modulo them. In a
+/// [`TensorPipeline`](super::TensorPipeline), TMA swizzles its 128-byte rows.
 #[repr(C, align(128))]
 pub struct SharedTile<T, const ROWS: usize, const COLUMNS: usize> {
     elements: [[T; COLUMNS]; ROWS],
@@ -17,7 +14,7 @@ pub struct SharedTile<T, const ROWS: usize, const COLUMNS: usize> {
 
 impl<T: Element, const ROWS: usize, const COLUMNS: usize> SharedTile<T, ROWS, COLUMNS> {
     /// 16-byte chunks per row.
-    const CHUNKS: usize = {
+    pub(super) const CHUNKS: usize = {
         assert!(
             ROWS.is_power_of_two() && ROWS >= 16 && COLUMNS.is_power_of_two() && COLUMNS >= 16,
             "tile dimensions are powers of two of at least 16"
@@ -87,106 +84,11 @@ impl<T: Element, const ROWS: usize, const COLUMNS: usize> SharedTile<T, ROWS, CO
     }
 
     /// The byte offset of chunk `chunk` of row `row`.
-    fn offset(row: usize, chunk: usize) -> u32 {
+    pub(super) fn offset(row: usize, chunk: usize) -> u32 {
         let row = row as u32 & (ROWS as u32 - 1);
         let chunk = chunk as u32 & (Self::CHUNKS as u32 - 1);
         let group = Self::CHUNKS.min(8) as u32;
         let permutation = (row / (8 / group)) & (group - 1);
         (row * Self::CHUNKS as u32 + (chunk ^ permutation)) * 16
-    }
-}
-
-/// Write access to one tile of a filling [`Pipeline`](super::Pipeline) stage.
-pub struct TileWriter<'a, T, const ROWS: usize, const COLUMNS: usize> {
-    tile: *mut SharedTile<T, ROWS, COLUMNS>,
-    stage: PhantomData<&'a mut SharedTile<T, ROWS, COLUMNS>>,
-}
-
-impl<'a, T: Element, const ROWS: usize, const COLUMNS: usize> TileWriter<'a, T, ROWS, COLUMNS> {
-    pub(super) fn new(tile: *mut SharedTile<T, ROWS, COLUMNS>) -> Self {
-        TileWriter {
-            tile,
-            stage: PhantomData,
-        }
-    }
-
-    /// Starts copying the block of `source` at (`row`, `column`) into the tile; elements outside
-    /// `source` read as zero. The copy is complete when the pipeline returns the stage. Every
-    /// thread of the block takes part. A 16-byte aligned `source` whose column count and
-    /// `column` are multiples of eight copies 16 bytes per instruction with `cp.async`; any other
-    /// copies element by element.
-    #[primitive(
-        lowering = Body,
-        architecture = 80,
-        convergence = Block,
-        memory = ReadReachable(2),
-        proof = Initialized
-    )]
-    pub fn load<const THREADS: usize>(
-        self,
-        block: &Block<THREADS>,
-        source: &Matrix<T>,
-        row: usize,
-        column: usize,
-    ) -> Initialized<'a, SharedTile<T, ROWS, COLUMNS>> {
-        let width = SharedTile::<T, ROWS, COLUMNS>::CHUNKS;
-        let lanes = 16 / size_of::<T>();
-        let (data, rows, columns) = (source.data(), source.rows(), source.columns());
-        if data.as_ptr() as usize % 16 == 0 && columns % lanes == 0 && column.is_multiple_of(lanes)
-        {
-            // SAFETY: the pipeline hands out writers only for stages it owns.
-            let destination = unsafe { &*self.tile }.address();
-            let chunks = ROWS * width;
-            for step in
-                0..const { (ROWS * SharedTile::<T, ROWS, COLUMNS>::CHUNKS).div_ceil(THREADS) }
-            {
-                let chunk = step * THREADS + block.thread();
-                if !chunks.is_multiple_of(THREADS) && chunk >= chunks {
-                    break;
-                }
-                let (tile_row, tile_chunk) = (chunk / width, chunk % width);
-                let offset = SharedTile::<T, ROWS, COLUMNS>::offset(tile_row, tile_chunk);
-                let source_row = row.wrapping_add(tile_row);
-                let source_column = column.wrapping_add(tile_chunk * lanes);
-                let (start, bytes) = if source_row < rows && source_column < columns {
-                    (source_row * columns + source_column, 16)
-                } else {
-                    (0, 0)
-                };
-                // SAFETY: `start` is inside `data`, since `rows` only counts rows the slice
-                // holds, and the chunk ends at or before the end of its row; a zero-byte copy
-                // reads nothing.
-                let pointer = unsafe { data.as_ptr().add(start) };
-                gpu::intrinsics::copy_asynchronously(destination + offset, pointer as u64, bytes);
-            }
-        } else {
-            let elements = ROWS * COLUMNS;
-            for step in 0..const { (ROWS * COLUMNS).div_ceil(THREADS) } {
-                let element = step * THREADS + block.thread();
-                if !elements.is_multiple_of(THREADS) && element >= elements {
-                    break;
-                }
-                let (tile_row, tile_column) = (element / COLUMNS, element % COLUMNS);
-                let offset = SharedTile::<T, ROWS, COLUMNS>::offset(tile_row, tile_column / lanes);
-                let source_row = row.wrapping_add(tile_row);
-                let source_column = column.wrapping_add(tile_column);
-                let value = if source_row < rows && source_column < columns {
-                    // SAFETY: as above.
-                    unsafe { *data.as_ptr().add(source_row * columns + source_column) }
-                } else {
-                    T::default()
-                };
-                // SAFETY: the element lies inside the tile, which this writer may fill.
-                unsafe {
-                    self.tile
-                        .cast::<u8>()
-                        .add(offset as usize)
-                        .cast::<T>()
-                        .add(tile_column % lanes)
-                        .write(value)
-                };
-            }
-        }
-        Initialized::new()
     }
 }

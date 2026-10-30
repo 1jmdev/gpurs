@@ -9,7 +9,7 @@ use crate::{
 
 pub fn tensor_map(sess: Sess<'_>, ty: Ty) -> bool {
     matches!(ty.kind(), TyKind::RigidTy(RigidTy::Adt(definition, _))
-        if paths::is(sess, definition.def_id(), "gpurs::gpu::tensor::map::TensorMap"))
+        if paths::is(sess, definition.def_id(), "gpurs::gpu::tensor::source::TensorMap"))
 }
 
 /// Rejects types that cannot be copied bytewise between host and device.

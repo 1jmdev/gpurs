@@ -35,7 +35,7 @@ pub(crate) struct Device {
     pub instrumented: Cell<bool>,
     kernels: RefCell<HashMap<KernelKey, Rc<LoadedKernel>>>,
     statuses: RefCell<Vec<DevicePointer>>,
-    status_count: RefCell<usize>,
+    status_count: Cell<usize>,
     pub context: Context,
 }
 
@@ -96,7 +96,7 @@ impl Gpu {
             artifact,
             kernels: RefCell::default(),
             statuses: RefCell::default(),
-            status_count: RefCell::new(0),
+            status_count: Cell::new(0),
             context,
         };
         Gpu {
@@ -123,11 +123,16 @@ impl Gpu {
     #[track_caller]
     pub fn upload<T>(&self, data: &[T]) -> Buffer<T> {
         launch::verified::<T>(&self.device);
+        self.copy(data)
+    }
+
+    /// Copies the bytes of `data` into a new GPU buffer.
+    pub(crate) fn copy<T>(&self, data: &[T]) -> Buffer<T> {
         let bytes = size_of_val(data);
         let pointer = driver::allocate_async(bytes, &self.device.transfer);
         let allocation = Rc::new(Allocation::new(self.device.clone(), pointer, bytes));
-        // SAFETY: `T` is a verified transfer type, so reading its bytes (including padding)
-        // as `MaybeUninit<u8>` is valid; the allocation holds `bytes` bytes.
+        // SAFETY: any bytes, including padding, may be read as `MaybeUninit<u8>`; the
+        // allocation holds `bytes` bytes.
         unsafe {
             let source = slice::from_raw_parts(data.as_ptr().cast::<MaybeUninit<u8>>(), bytes);
             driver::copy_to_device_async(pointer, source, &self.device.transfer);
@@ -248,18 +253,18 @@ impl Device {
 
     /// Allocates a zeroed device status word for one launch.
     pub fn status(&self, kernel: &str) -> Rc<Status> {
-        let mut count = self.status_count.borrow_mut();
+        let count = self.status_count.get();
         let mut chunks = self.statuses.borrow_mut();
-        if *count == chunks.len() * STATUS_CHUNK {
+        if count == chunks.len() * STATUS_CHUNK {
             let chunk = driver::allocate(STATUS_CHUNK * 4);
             // SAFETY: the chunk holds `STATUS_CHUNK` words.
             unsafe { driver::fill_async(chunk, 0, STATUS_CHUNK * 4, &self.transfer) };
             self.transfer.synchronize();
             chunks.push(chunk);
         }
-        let chunk = chunks[*count / STATUS_CHUNK];
-        let pointer = chunk + 4 * (*count % STATUS_CHUNK) as u64;
-        *count += 1;
+        let chunk = chunks[count / STATUS_CHUNK];
+        let pointer = chunk + 4 * (count % STATUS_CHUNK) as u64;
+        self.status_count.set(count + 1);
         Rc::new(Status {
             pointer,
             chunk,

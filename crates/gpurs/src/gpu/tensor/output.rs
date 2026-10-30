@@ -1,6 +1,6 @@
 use gpurs_macros::primitive;
 
-use super::{Accumulator, fragment::sealed::Sealed};
+use super::{Accumulator, sealed::Sealed};
 use crate::gpu::{self, BFloat16, Block, Half};
 
 /// An element type of an [`Output`].

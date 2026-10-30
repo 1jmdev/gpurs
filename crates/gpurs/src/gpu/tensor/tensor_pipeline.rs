@@ -2,10 +2,9 @@ use std::marker::PhantomData;
 
 use gpurs_macros::primitive;
 
-use self::private::Sealed;
 use super::{
-    Element, Initialized, SharedTile, TensorMap, TensorStage, intrinsics,
-    stage::{Initialize, TensorPipelineStages},
+    Bulk, Element, Initialized, SharedTile, Stage, TensorMap, TileWriter, intrinsics,
+    sealed::Sealed, stage::Initialize,
 };
 use crate::gpu::{self, Block};
 
@@ -22,20 +21,18 @@ pub trait Consumer: Sealed + 'static {
     unsafe fn release(barrier: u32);
 }
 
-mod private {
-    pub trait Sealed {}
-
-    impl Sealed for super::Hopper {}
-    impl Sealed for super::Blackwell {}
-}
-
 /// sm_90a `wgmma`, issued by every warpgroup through a
 /// [`WarpgroupAccumulator`](super::WarpgroupAccumulator).
+#[derive(Debug)]
 pub struct Hopper;
 
 /// sm_100a `tcgen05.mma`, issued by one thread through a
 /// [`TensorMemoryAccumulator`](super::TensorMemoryAccumulator).
+#[derive(Debug)]
 pub struct Blackwell;
+
+impl Sealed for Hopper {}
+impl Sealed for Blackwell {}
 
 impl Consumer for Hopper {
     fn arrivals<const THREADS: usize>() -> u32 {
@@ -97,10 +94,7 @@ pub struct TensorPipeline<S, const STAGES: usize, C: Consumer> {
     consumer: PhantomData<C>,
 }
 
-impl<S: TensorStage, const STAGES: usize, C: Consumer> TensorPipeline<S, STAGES, C>
-where
-    [(); STAGES]: TensorPipelineStages,
-{
+impl<S: Stage<Bulk>, const STAGES: usize, C: Consumer> TensorPipeline<S, STAGES, C> {
     /// Allocates the stages in block-shared memory; each call site owns distinct storage.
     #[primitive(
         lowering = SharedArray,
@@ -245,6 +239,12 @@ impl<S, const STAGES: usize, C: Consumer> TensorPipeline<S, STAGES, C> {
     }
 
     fn slot(&self, index: u32) -> *mut S {
+        const {
+            assert!(
+                STAGES >= 2 && STAGES <= 16,
+                "TMA pipelines hold 2 to 16 stages"
+            )
+        };
         // SAFETY: the storage holds `STAGES` stages.
         unsafe {
             (&raw mut (*self.storage).stages)
@@ -253,17 +253,22 @@ impl<S, const STAGES: usize, C: Consumer> TensorPipeline<S, STAGES, C> {
         }
     }
 
+    /// The shared-window address of the barrier signalling that stage `index` landed.
     fn full(&self, index: u32) -> u32 {
         // SAFETY: as in `slot`.
-        let barrier = unsafe { (&raw mut (*self.storage).full).cast::<u64>() };
-        gpu::intrinsics::shared_window(barrier as u64) as u32 + index % STAGES as u32 * 8
+        barrier(unsafe { &raw mut (*self.storage).full }, index)
     }
 
+    /// The shared-window address of the barrier signalling that stage `index` was released.
     fn empty(&self, index: u32) -> u32 {
         // SAFETY: as in `slot`.
-        let barrier = unsafe { (&raw mut (*self.storage).empty).cast::<u64>() };
-        gpu::intrinsics::shared_window(barrier as u64) as u32 + index % STAGES as u32 * 8
+        barrier(unsafe { &raw mut (*self.storage).empty }, index)
     }
+}
+
+/// The shared-window address of the barrier of stage `index` in `barriers`.
+fn barrier<const STAGES: usize>(barriers: *mut [u64; STAGES], index: u32) -> u32 {
+    gpu::intrinsics::shared_window(barriers as u64) as u32 + index % STAGES as u32 * 8
 }
 
 impl<S, const STAGES: usize, C: Consumer> Drop for TensorPipeline<S, STAGES, C> {
@@ -295,22 +300,9 @@ impl<S, const STAGES: usize, C: Consumer> Drop for TensorPipeline<S, STAGES, C> 
     }
 }
 
-/// Write access to one tile of a filling [`TensorPipeline`] stage.
-pub struct TensorWriter<'a, T, const ROWS: usize, const COLUMNS: usize> {
-    tile: *mut SharedTile<T, ROWS, COLUMNS>,
-    barrier: u32,
-    stage: PhantomData<&'a mut SharedTile<T, ROWS, COLUMNS>>,
-}
-
-impl<'a, T: Element, const ROWS: usize, const COLUMNS: usize> TensorWriter<'a, T, ROWS, COLUMNS> {
-    pub(super) fn new(tile: *mut SharedTile<T, ROWS, COLUMNS>, barrier: u32) -> Self {
-        TensorWriter {
-            tile,
-            barrier,
-            stage: PhantomData,
-        }
-    }
-
+impl<'a, T: Element, const ROWS: usize, const COLUMNS: usize>
+    TileWriter<'a, T, ROWS, COLUMNS, Bulk>
+{
     /// Starts a TMA copy of the box of `source` at (`row`, `column`) into the tile; elements
     /// outside the matrix read as zero. The copy has landed when the pipeline returns the
     /// stage. Every thread of the block takes part, and the first issues the copy.
@@ -328,9 +320,10 @@ impl<'a, T: Element, const ROWS: usize, const COLUMNS: usize> TensorWriter<'a, T
         row: usize,
         column: usize,
     ) -> Initialized<'a, SharedTile<T, ROWS, COLUMNS>> {
+        const { TensorMap::<T, ROWS, COLUMNS>::validate() };
         if block.thread() == 0 {
             intrinsics::barrier_expect(
-                self.barrier,
+                self.completion,
                 size_of::<SharedTile<T, ROWS, COLUMNS>>() as u32,
             );
             // SAFETY: the pipeline hands out writers only for stages it owns.
@@ -341,7 +334,7 @@ impl<'a, T: Element, const ROWS: usize, const COLUMNS: usize> TensorWriter<'a, T
                 source as *const TensorMap<T, ROWS, COLUMNS> as u64,
                 column as i32,
                 row as i32,
-                self.barrier,
+                self.completion,
             );
         }
         Initialized::new()
