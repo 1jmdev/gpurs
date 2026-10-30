@@ -13,6 +13,7 @@ pub fn opaque_descriptor(sess: Session<'_>, ty: Ty) -> bool {
             "gpurs::gpu::tensor::source::TensorMap"
                 | "gpurs::gpu::strided::Strided"
                 | "gpurs::gpu::indexed::Indexed"
+                | "gpurs::gpu::scatter::Scatter"
         )
     )
 }
@@ -30,7 +31,8 @@ pub fn check(sess: Session<'_>, ty: Ty) -> Result<(), String> {
         Some(
             "gpurs::gpu::tensor::source::TensorMap"
             | "gpurs::gpu::strided::Strided"
-            | "gpurs::gpu::indexed::Indexed",
+            | "gpurs::gpu::indexed::Indexed"
+            | "gpurs::gpu::scatter::Scatter",
         ) => {
             return Err(format!(
                 "`{}` is an opaque GPU descriptor; construct it with Gpu and pass it by shared \

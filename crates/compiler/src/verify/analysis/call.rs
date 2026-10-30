@@ -276,6 +276,15 @@ impl Analysis<'_, '_> {
         arguments: &[Value],
         state: &mut State,
     ) -> Value {
+        let path = self.sess.path(instance.def.def_id());
+        if path.starts_with("gpurs::gpu::scatter::")
+            && path.ends_with("::store")
+            && let Some(Pointer::Memory(mut origin)) = arguments[0].pointer.clone()
+        {
+            origin.index = arguments[1].integer.clone();
+            origin.inner = false;
+            self.access(&origin, true, false, state);
+        }
         match primitive.memory {
             Memory::Read | Memory::Write | Memory::Atomic => {
                 if primitive.memory == Memory::Atomic
