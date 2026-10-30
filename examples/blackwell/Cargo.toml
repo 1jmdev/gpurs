@@ -1,0 +1,14 @@
+[package]
+name = "gpurs-blackwell-examples"
+description = "Blackwell tensor-core examples, compiled for sm_100a"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+gpurs.workspace = true
+
+[build-dependencies]
+gpurs-build.workspace = true
