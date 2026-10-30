@@ -24,7 +24,7 @@ impl FileLoader for Source {
         }
         let (attributes, items) = source.split_at(inner_attributes(&source));
         Ok(format!(
-            "{attributes} ::gpurs::__private::compilation! {{ {items}\n }}"
+            "{attributes}\n::gpurs::__private::compilation! {{ {items}\n }}"
         ))
     }
 
