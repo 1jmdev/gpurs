@@ -63,3 +63,31 @@ assembly! {
     None 61 "dp2a.hi.s32.s32 $0, $1, $2, $3;" "=r,r,r,r"
     fn dot_product_2_high_signed(left: i32, right: i32, addend: i32) -> i32;
 }
+
+assembly! {
+    /// Four signed left bytes times unsigned right bytes, summed modulo 2^32.
+    None 61 "dp4a.s32.u32 $0, $1, $2, $3;" "=r,r,r,r"
+    fn dot_product_4_signed_unsigned(left: i32, right: u32, addend: i32) -> i32;
+
+    /// Four unsigned left bytes times signed right bytes, summed modulo 2^32.
+    None 61 "dp4a.u32.s32 $0, $1, $2, $3;" "=r,r,r,r"
+    fn dot_product_4_unsigned_signed(left: u32, right: i32, addend: i32) -> i32;
+}
+
+assembly! {
+    /// Two signed 16-bit left components times the low unsigned right bytes, modulo 2^32.
+    None 61 "dp2a.lo.s32.u32 $0, $1, $2, $3;" "=r,r,r,r"
+    fn dot_product_2_low_signed_unsigned(left: i32, right: u32, addend: i32) -> i32;
+
+    /// Two signed 16-bit left components times the high unsigned right bytes, modulo 2^32.
+    None 61 "dp2a.hi.s32.u32 $0, $1, $2, $3;" "=r,r,r,r"
+    fn dot_product_2_high_signed_unsigned(left: i32, right: u32, addend: i32) -> i32;
+
+    /// Two unsigned 16-bit left components times the low signed right bytes, modulo 2^32.
+    None 61 "dp2a.lo.u32.s32 $0, $1, $2, $3;" "=r,r,r,r"
+    fn dot_product_2_low_unsigned_signed(left: u32, right: i32, addend: i32) -> i32;
+
+    /// Two unsigned 16-bit left components times the high signed right bytes, modulo 2^32.
+    None 61 "dp2a.hi.u32.s32 $0, $1, $2, $3;" "=r,r,r,r"
+    fn dot_product_2_high_unsigned_signed(left: u32, right: i32, addend: i32) -> i32;
+}

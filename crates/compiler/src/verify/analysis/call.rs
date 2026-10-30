@@ -228,10 +228,28 @@ impl Analysis<'_, '_> {
         }
         if path.starts_with("core::sync::atomic::") || path.starts_with("core::intrinsics::atomic_")
         {
+            if matches!(
+                arguments.first().and_then(|value| value.pointer.as_ref()),
+                Some(Pointer::Slot(..))
+            ) && path.rsplit("::").next().is_some_and(|name| {
+                matches!(
+                    name,
+                    "load" | "store" | "swap" | "compare_exchange" | "compare_exchange_weak"
+                ) || name.starts_with("fetch_")
+            }) {
+                self.sess.error_help(
+                    self.span,
+                    "GPU atomics require global or block-shared storage",
+                    "use a device buffer or shared_array instead of thread-local storage",
+                );
+            }
             if let Some(Pointer::Memory(origin)) = arguments
                 .first()
                 .and_then(|argument| argument.pointer.clone())
             {
+                if !path.ends_with("::store") && !path.ends_with("atomic_store") {
+                    self.access(&origin, false, true, state);
+                }
                 self.access(&origin, !path.ends_with("::load"), true, state);
             }
             return Some(Value::varying(2));
@@ -259,12 +277,32 @@ impl Analysis<'_, '_> {
         state: &mut State,
     ) -> Value {
         match primitive.memory {
-            Memory::Read | Memory::Write => {
+            Memory::Read | Memory::Write | Memory::Atomic => {
+                if primitive.memory == Memory::Atomic
+                    && matches!(
+                        arguments.first().and_then(|value| value.pointer.as_ref()),
+                        Some(Pointer::Slot(..))
+                    )
+                {
+                    self.sess.error_help(
+                        self.span,
+                        "native GPU atomics require global or block-shared storage",
+                        "use a device buffer or shared_array instead of thread-local storage",
+                    );
+                }
                 if let Some(Pointer::Memory(origin)) = arguments
                     .first()
                     .and_then(|argument| argument.pointer.clone())
                 {
-                    self.access(&origin, primitive.memory == Memory::Write, false, state);
+                    if primitive.memory == Memory::Atomic {
+                        self.access(&origin, false, true, state);
+                    }
+                    self.access(
+                        &origin,
+                        primitive.memory != Memory::Read,
+                        primitive.memory == Memory::Atomic,
+                        state,
+                    );
                 }
             }
             Memory::ReadReachable(argument) | Memory::BlockFenceReadReachable(argument) => {

@@ -26,6 +26,7 @@
 //! thread of the block or warp they name.
 
 mod fragment;
+pub mod instructions;
 mod intrinsics;
 mod output;
 mod pipeline;

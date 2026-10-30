@@ -2,7 +2,9 @@ use std::mem::ManuallyDrop;
 
 use gpurs_macros::primitive;
 
-use super::{Accumulator, Blackwell, Element, Output, OutputElement, TensorTile, intrinsics};
+use super::{
+    Accumulator, Blackwell, Element, Output, OutputElement, TensorTile, instructions, intrinsics,
+};
 use crate::gpu::{self, Block};
 
 /// The descriptor version and 128-byte swizzle mode of a `tcgen05` matrix descriptor.
@@ -83,6 +85,51 @@ impl<const COLUMNS: usize> TensorMemoryAccumulator<COLUMNS> {
                     b.descriptor(0, depth * 16) | SWIZZLE,
                     const { Self::instruction::<T>() },
                     (accumulate || depth > 0) as u32,
+                );
+            }
+        }
+    }
+
+    /// Accumulates caller-described FP8 tiles into this accumulator's managed tensor memory.
+    /// # Safety
+    /// Every block thread participates. The descriptors name initialized, published shared
+    /// tiles meeting PTX kind::f8f6f4 layout/alignment requirements. The instruction descriptor
+    /// must specify f32 accumulation, 128 rows, exactly COLUMNS columns and the actual FP8
+    /// formats and depth. Keep operands alive until store_tensor_memory or destruction completes.
+    #[primitive(
+        lowering = Body,
+        architecture = 100,
+        compatibility = Architecture,
+        convergence = Block,
+        memory = Encapsulated,
+        proof = Uniform
+    )]
+    pub unsafe fn multiply_accumulate_fp8(
+        &mut self,
+        block: &Block<128>,
+        a: u64,
+        b: u64,
+        instruction: u32,
+    ) {
+        const {
+            assert!(
+                COLUMNS.is_power_of_two() && COLUMNS >= 64 && COLUMNS <= 256,
+                "tensor memory accumulators have 64 to 256 columns"
+            )
+        };
+        let accumulate = self.allocated;
+        if !self.allocated {
+            self.allocate(block);
+        }
+        if block.thread() == 0 {
+            // SAFETY: storage is managed here; the caller guarantees the operand descriptors.
+            unsafe {
+                instructions::tensor_multiply_accumulate_fp8(
+                    self.address,
+                    a,
+                    b,
+                    instruction,
+                    accumulate as u32,
                 );
             }
         }

@@ -1,4 +1,6 @@
-use gpurs_artifact::{Convergence, Failure, Lowering, Memory, Operand as CallOperand, Primitive};
+use gpurs_artifact::{
+    Compatibility, Convergence, Failure, Lowering, Memory, Operand as CallOperand, Primitive,
+};
 
 use super::{
     function::FunctionBuilder,
@@ -661,6 +663,90 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
             false => layout::memory_type(layout::primitive(scalar)),
         };
         let pointer = arguments[0].scalar();
+        if ty == Type::Integer(16)
+            && matches!(
+                name,
+                "atomic_load"
+                    | "atomic_store"
+                    | "atomic_xchg"
+                    | "atomic_cxchg"
+                    | "atomic_cxchgweak"
+            )
+        {
+            if !self.sess.target.provides(70, Compatibility::Generic) {
+                return self.unsupported("16-bit atomics require sm_70 or later");
+            }
+            let failure = orders.get(1).copied().unwrap_or(Ordering::Monotonic);
+            let order = match (order, failure) {
+                (_, Ordering::SequentiallyConsistent) => Ordering::SequentiallyConsistent,
+                (Ordering::Monotonic, Ordering::Acquire) => Ordering::Acquire,
+                (Ordering::Release, Ordering::Acquire) => Ordering::AcquireRelease,
+                _ => order,
+            };
+            let (fence, semantics) = match order {
+                Ordering::Monotonic => ("", "relaxed"),
+                Ordering::Acquire => ("", "acquire"),
+                Ordering::Release => ("", "release"),
+                Ordering::AcquireRelease => ("", "acq_rel"),
+                Ordering::SequentiallyConsistent => ("fence.sc.sys; ", "acq_rel"),
+            };
+            if name == "atomic_store" {
+                let semantics = if order == Ordering::Monotonic {
+                    "relaxed"
+                } else {
+                    "release"
+                };
+                self.ir.assembly(
+                    &format!("{fence}st.{semantics}.sys.b16 [$0], $1;"),
+                    "l,h,~{memory}",
+                    true,
+                    Type::Void,
+                    vec![pointer, values[0].clone()],
+                );
+                return;
+            }
+            let (instruction, constraints) = match name {
+                "atomic_load" => {
+                    let semantics = if order == Ordering::Monotonic {
+                        "relaxed"
+                    } else {
+                        "acquire"
+                    };
+                    (
+                        format!("{fence}ld.{semantics}.sys.b16 $0, [$1];"),
+                        "=h,l,~{memory}",
+                    )
+                }
+                "atomic_cxchg" | "atomic_cxchgweak" => (
+                    format!("{fence}atom.{semantics}.sys.cas.b16 $0, [$1], $2, $3;"),
+                    "=h,l,h,h,~{memory}",
+                ),
+                _ => (
+                    format!(
+                        "{{ .reg .b16 expected, observed; .reg .pred equal; \
+                         {fence}ld.relaxed.sys.b16 expected, [$1]; RETRY: \
+                         atom.{semantics}.sys.cas.b16 observed, [$1], expected, $2; setp.eq.b16 \
+                         equal, observed, expected; mov.b16 expected, observed; @!equal bra \
+                         RETRY; mov.b16 $0, observed; }}"
+                    ),
+                    "=h,l,h,~{memory}",
+                ),
+            };
+            let mut operands = vec![pointer];
+            operands.extend(values.iter().cloned());
+            let value = self
+                .ir
+                .assembly(&instruction, constraints, true, ty, operands);
+            return match name {
+                "atomic_cxchg" | "atomic_cxchgweak" => {
+                    let success = self
+                        .ir
+                        .compare(Predicate::Eq, value.clone(), values[0].clone());
+                    self.assign(destination, Value::Pair(value, success));
+                }
+                _ => self.assign(destination, Value::Scalar(value)),
+            };
+        }
         let value = match name {
             "atomic_store" => {
                 let value = values[0].clone();
@@ -673,6 +759,13 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                 .load(ty, pointer, layout.align(), Access::Atomic(order)),
             "atomic_cxchg" | "atomic_cxchgweak" => {
                 let failure = orders.get(1).copied().unwrap_or(Ordering::Monotonic);
+                // NVVM requires failure ordering no stronger than success ordering.
+                let order = match (order, failure) {
+                    (_, Ordering::SequentiallyConsistent) => Ordering::SequentiallyConsistent,
+                    (Ordering::Monotonic, Ordering::Acquire) => Ordering::Acquire,
+                    (Ordering::Release, Ordering::Acquire) => Ordering::AcquireRelease,
+                    _ => order,
+                };
                 let result = self.ir.compare_exchange(
                     pointer,
                     values[0].clone(),

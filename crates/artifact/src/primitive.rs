@@ -76,6 +76,8 @@ pub enum Memory {
     Read,
     /// Writes the referent of the first argument.
     Write,
+    /// Atomically reads and modifies the first argument's referent.
+    Atomic,
     /// Accesses block-shared memory that only the library abstraction issuing it can reach. It
     /// keeps its order, but the verifier records no access.
     Encapsulated,

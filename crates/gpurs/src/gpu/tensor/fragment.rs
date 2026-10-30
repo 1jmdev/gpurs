@@ -84,7 +84,8 @@ pub struct FragmentB<T> {
 }
 
 impl<T> FragmentA<T> {
-    pub(super) fn new(registers: [u32; 4]) -> Self {
+    /// Constructs raw lane registers in the consuming PTX instruction's documented layout.
+    pub fn new(registers: [u32; 4]) -> Self {
         FragmentA {
             registers,
             element: PhantomData,
@@ -93,7 +94,8 @@ impl<T> FragmentA<T> {
 }
 
 impl<T> FragmentB<T> {
-    pub(super) fn new(registers: [u32; 2]) -> Self {
+    /// Constructs raw lane registers in the consuming PTX instruction's documented layout.
+    pub fn new(registers: [u32; 2]) -> Self {
         FragmentB {
             registers,
             element: PhantomData,

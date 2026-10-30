@@ -31,6 +31,7 @@ pub fn primitive(sess: Session<'_>, def: DefId) -> Option<Rc<Primitive>> {
                             Memory::None
                                 | Memory::Read
                                 | Memory::Write
+                                | Memory::Atomic
                                 | Memory::Encapsulated
                                 | Memory::BlockFence
                         )

@@ -21,12 +21,17 @@ impl Analysis<'_, '_> {
                 facts: &comparisons,
                 variables: &self.variables,
             };
-            let injective = access.origin.index.as_ref().and_then(|expression| {
-                proofs.injective(
-                    expression,
-                    matches!(access.origin.region, Region::Shared(..)),
-                )
-            });
+            let injective = access
+                .origin
+                .index
+                .as_ref()
+                .filter(|_| !access.atomic && access.partition.is_none())
+                .and_then(|expression| {
+                    proofs.injective(
+                        expression,
+                        matches!(access.origin.region, Region::Shared(..)),
+                    )
+                });
             if !access.atomic && access.partition.is_none() && injective.is_none() {
                 self.sess.error_help(
                     access.span,

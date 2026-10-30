@@ -50,6 +50,7 @@ fn declaration(attribute: Tokens, item: Tokens, extension: bool) -> Result<Token
                 Memory::None
                     | Memory::Read
                     | Memory::Write
+                    | Memory::Atomic
                     | Memory::Encapsulated
                     | Memory::BlockFence
             ))
@@ -57,7 +58,7 @@ fn declaration(attribute: Tokens, item: Tokens, extension: bool) -> Result<Token
         return Err(Error::new(
             signature.span(),
             "extensions require an unsafe assembly declaration, Varying proof, and None, Read, \
-             Write, Encapsulated or BlockFence memory effects",
+             Write, Atomic, Encapsulated or BlockFence memory effects",
         ));
     }
     let inline = body.as_ref().map(|_| quote!(#[inline]));
