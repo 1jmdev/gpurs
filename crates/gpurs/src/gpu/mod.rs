@@ -34,8 +34,7 @@ pub mod convert;
 pub mod float;
 mod float16;
 pub mod integer;
-#[doc(hidden)]
-pub mod intrinsics;
+pub(crate) mod intrinsics;
 mod shared;
 pub mod tensor;
 mod thread;

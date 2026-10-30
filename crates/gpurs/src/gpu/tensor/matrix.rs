@@ -8,11 +8,7 @@ pub struct Matrix<'a, T> {
 
 impl<'a, T> Matrix<'a, T> {
     pub fn new(data: &'a [T], rows: usize, columns: usize) -> Self {
-        let rows = if columns == 0 {
-            0
-        } else {
-            rows.min(data.len() / columns)
-        };
+        let rows = rows.min(data.len().checked_div(columns).unwrap_or(0));
         Matrix {
             data,
             rows,

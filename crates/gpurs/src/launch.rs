@@ -15,7 +15,8 @@ use gpurs_artifact::{
 use gpurs_driver as driver;
 
 use crate::{
-    buffer::{Buffer, DeviceSlice, DeviceSliceMut, DeviceValue, Span},
+    DeviceReference, DeviceReferenceMut,
+    buffer::{Buffer, DeviceSlice, DeviceSliceMut, Span},
     device::{Device, KernelKey, LoadedKernel},
     stream::{Launch, LaunchConfig},
     tracking::{self, Access, Allocation},
@@ -94,25 +95,34 @@ pub fn kernel<'a, S: Launch, G>(
 }
 
 impl<S: Launch> KernelLaunch<'_, S> {
-    pub fn slice<T>(&mut self, argument: &impl DeviceSlice<T>) {
+    /// # Safety
+    /// `T` and this argument position match the compiled kernel's immutable slice parameter.
+    pub unsafe fn slice<T>(&mut self, argument: &impl DeviceSlice<T>) {
         self.slice_argument::<T>(argument.span(), false);
     }
 
-    pub fn slice_mut<T>(&mut self, argument: &mut impl DeviceSliceMut<T>) {
+    /// # Safety
+    /// `T` and this argument position match the compiled kernel's mutable slice parameter.
+    pub unsafe fn slice_mut<T>(&mut self, argument: &mut impl DeviceSliceMut<T>) {
         self.slice_argument::<T>(argument.span(), true);
     }
 
-    pub fn reference<T>(&mut self, argument: &DeviceValue<T>) {
+    /// # Safety
+    /// `T` and this argument position match the compiled kernel's immutable reference parameter.
+    pub unsafe fn reference<T>(&mut self, argument: &impl DeviceReference<T>) {
         self.reference_argument(argument, false);
     }
 
     #[track_caller]
-    pub fn reference_mut<T>(&mut self, argument: &mut DeviceValue<T>) {
-        assert!(argument.source.is_none(), "tensor maps cannot be written");
+    /// # Safety
+    /// `T` and this argument position match the compiled kernel's mutable reference parameter.
+    pub unsafe fn reference_mut<T>(&mut self, argument: &mut impl DeviceReferenceMut<T>) {
         self.reference_argument(argument, true);
     }
 
-    pub fn value<T>(&mut self, argument: &T) {
+    /// # Safety
+    /// `T` and this argument position match the compiled kernel's value parameter.
+    pub unsafe fn value<T>(&mut self, argument: &T) {
         let offset = self.next() as usize;
         // SAFETY: kernel parameter types are verified transfer types, so their bytes may be
         // copied as `MaybeUninit<u8>`.
@@ -126,12 +136,16 @@ impl<S: Launch> KernelLaunch<'_, S> {
     }
 
     #[track_caller]
-    pub fn finish_unit(self) {
+    /// # Safety
+    /// Every parameter was supplied with its compiled type, and the kernel returns unit.
+    pub unsafe fn finish_unit(self) {
         self.submit::<()>();
     }
 
     #[track_caller]
-    pub fn finish<R>(self) -> S::Output<R> {
+    /// # Safety
+    /// Every parameter was supplied with its compiled type, and `R` is the compiled return type.
+    pub unsafe fn finish<R>(self) -> S::Output<R> {
         let buffer = self
             .submit::<R>()
             .expect("value-returning kernels have a result");
@@ -153,23 +167,19 @@ impl<S: Launch> KernelLaunch<'_, S> {
         });
     }
 
-    fn reference_argument<T>(&mut self, value: &DeviceValue<T>, mutable: bool) {
+    fn reference_argument<T>(&mut self, value: &impl DeviceReference<T>, mutable: bool) {
         let effect = self.effect(mutable);
         let offset = self.next() as usize;
-        self.write_word(offset, value.buffer.allocation.pointer);
+        self.write_word(offset, value.buffer().allocation.pointer);
         self.accesses.push(Access {
-            allocation: value.buffer.allocation.clone(),
+            allocation: value.buffer().allocation.clone(),
             range: 0..size_of::<T>(),
             write: effect,
             recovers: false,
         });
-        if let Some((allocation, range)) = &value.source {
-            self.accesses.push(Access {
-                allocation: allocation.clone(),
-                range: range.clone(),
-                write: false,
-                recovers: false,
-            });
+        if let Some(source) = value.source() {
+            self.accesses
+                .push(Access::read(source.allocation, source.bytes::<u8>()));
         }
     }
 
@@ -210,8 +220,8 @@ impl<S: Launch> KernelLaunch<'_, S> {
         }
         .unwrap_or_else(|| {
             panic!(
-                "kernel `{}` has no instrumented entry point; build in the debug profile or \
-                 with GPURS_INSTRUMENTED=1",
+                "kernel `{}` has no instrumented entry point; asynchronous tensor kernels require \
+                 certified execution; for other kernels build in debug or with GPURS_INSTRUMENTED=1",
                 metadata.name
             )
         });
@@ -249,8 +259,20 @@ impl<S: Launch> KernelLaunch<'_, S> {
                 .grid
                 .iter()
                 .chain(&config.block)
-                .try_fold(1usize, |count, value| count.checked_mul(*value))
-                .expect("GPU launch dimensions exceed the addressable thread count");
+                .try_fold(1usize, |count, value| {
+                    u32::try_from(*value).ok()?;
+                    count.checked_mul(*value)
+                })
+                .expect(
+                    "GPU launch dimensions exceed CUDA's range or the addressable thread count",
+                );
+            let shared_bytes = u32::try_from(config.shared_bytes)
+                .expect("launch shared memory exceeds CUDA's size range");
+            if config.shared_bytes > metadata.shared.dynamic_bytes as usize {
+                for function in [Some(entry.general), entry.linear].into_iter().flatten() {
+                    function.reserve_shared(shared_bytes);
+                }
+            }
             let leaf = |variable: &Variable| match *variable {
                 Variable::BlockDimension(axis) => config.block[axis] as i128,
                 Variable::GridDimension(axis) => config.grid[axis] as i128,
@@ -291,7 +313,9 @@ impl<S: Launch> KernelLaunch<'_, S> {
                 metadata.name
             );
             let count = if explicit.is_some() { threads } else { 1 };
-            let bytes = count * size_of::<R>();
+            let bytes = count
+                .checked_mul(size_of::<R>())
+                .expect("GPU result size exceeds the addressable byte count");
             let pointer = driver::allocate_async(bytes, &stream.raw);
             Buffer::new(
                 Rc::new(Allocation::new(device.clone(), pointer, bytes)),
@@ -331,7 +355,9 @@ impl<S: Launch> KernelLaunch<'_, S> {
             function.launch(
                 dimensions(config.grid),
                 dimensions(config.block),
-                config.shared_bytes.max(metadata.shared as usize) as u32,
+                config
+                    .shared_bytes
+                    .max(metadata.shared.dynamic_bytes as usize) as u32,
                 &stream.raw,
                 &mut self.arguments[entry.offset..],
             );

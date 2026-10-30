@@ -2,12 +2,8 @@ use std::marker::PhantomData;
 
 use gpurs_macros::primitive;
 
-use super::{Element, FragmentA, FragmentB, Matrix};
-use crate::gpu::{
-    Block,
-    intrinsics::{copy_asynchronously, load_matrices, load_matrices_transposed, shared_window},
-    warp::lane_id,
-};
+use super::{Element, FragmentA, FragmentB, Initialized, Matrix};
+use crate::gpu::{self, Block};
 
 /// A `ROWS`x`COLUMNS` tile of 16-bit elements in block-shared memory, held by a
 /// [`Pipeline`](super::Pipeline) stage. Its 16-byte chunks are permuted within each row so that
@@ -32,13 +28,15 @@ impl<T: Element, const ROWS: usize, const COLUMNS: usize> SharedTile<T, ROWS, CO
     /// The 16x16 block at (`row`, `column`) as an `A` operand; tile rows index `M` and columns
     /// index `K`. Every lane of the warp takes part.
     pub fn load_a(&self, row: usize, column: usize) -> FragmentA<T> {
-        FragmentA::new(load_matrices(self.lane_address(row, column, false)))
+        FragmentA::new(gpu::intrinsics::load_matrices(
+            self.lane_address(row, column, false),
+        ))
     }
 
     /// The 16x16 block at (`row`, `column`) as an `A` operand; tile rows index `K` and columns
     /// index `M`. Every lane of the warp takes part.
     pub fn load_a_transposed(&self, row: usize, column: usize) -> FragmentA<T> {
-        FragmentA::new(load_matrices_transposed(
+        FragmentA::new(gpu::intrinsics::load_matrices_transposed(
             self.lane_address(row, column, true),
         ))
     }
@@ -46,14 +44,15 @@ impl<T: Element, const ROWS: usize, const COLUMNS: usize> SharedTile<T, ROWS, CO
     /// The 16x16 block at (`row`, `column`) as two `B` operands, columns `column..column + 8`
     /// first; tile rows index `K` and columns index `N`. Every lane of the warp takes part.
     pub fn load_b(&self, row: usize, column: usize) -> [FragmentB<T>; 2] {
-        let [a, b, c, d] = load_matrices_transposed(self.lane_address(row, column, false));
+        let [a, b, c, d] =
+            gpu::intrinsics::load_matrices_transposed(self.lane_address(row, column, false));
         [FragmentB::new([a, b]), FragmentB::new([c, d])]
     }
 
     /// The 16x16 block at (`row`, `column`) as two `B` operands, rows `row..row + 8` first;
     /// tile rows index `N` and columns index `K`. Every lane of the warp takes part.
     pub fn load_b_transposed(&self, row: usize, column: usize) -> [FragmentB<T>; 2] {
-        let [a, b, c, d] = load_matrices(self.lane_address(row, column, true));
+        let [a, b, c, d] = gpu::intrinsics::load_matrices(self.lane_address(row, column, true));
         [FragmentB::new([a, b]), FragmentB::new([c, d])]
     }
 
@@ -61,7 +60,7 @@ impl<T: Element, const ROWS: usize, const COLUMNS: usize> SharedTile<T, ROWS, CO
     /// `ldmatrix`. Lanes `8 * i..8 * i + 8` name the rows of 8x8 matrix `i`; the matrices are
     /// ordered down the block's columns, or across its rows when `across`.
     fn lane_address(&self, row: usize, column: usize, across: bool) -> u32 {
-        let lane = lane_id();
+        let lane = gpu::warp::lane_id();
         let (row, chunk) = if across {
             (
                 row.wrapping_add(lane / 16 * 8 + lane % 8),
@@ -84,7 +83,7 @@ impl<T: Element, const ROWS: usize, const COLUMNS: usize> SharedTile<T, ROWS, CO
 
     /// The shared-window address of the tile.
     pub(super) fn address(&self) -> u32 {
-        shared_window(self.elements.as_ptr() as u64) as u32
+        gpu::intrinsics::shared_window(self.elements.as_ptr() as u64) as u32
     }
 
     /// The byte offset of chunk `chunk` of row `row`.
@@ -103,7 +102,7 @@ pub struct TileWriter<'a, T, const ROWS: usize, const COLUMNS: usize> {
     stage: PhantomData<&'a mut SharedTile<T, ROWS, COLUMNS>>,
 }
 
-impl<T: Element, const ROWS: usize, const COLUMNS: usize> TileWriter<'_, T, ROWS, COLUMNS> {
+impl<'a, T: Element, const ROWS: usize, const COLUMNS: usize> TileWriter<'a, T, ROWS, COLUMNS> {
     pub(super) fn new(tile: *mut SharedTile<T, ROWS, COLUMNS>) -> Self {
         TileWriter {
             tile,
@@ -121,7 +120,7 @@ impl<T: Element, const ROWS: usize, const COLUMNS: usize> TileWriter<'_, T, ROWS
         architecture = 80,
         convergence = Block,
         memory = ReadReachable(2),
-        proof = Uniform
+        proof = Initialized
     )]
     pub fn load<const THREADS: usize>(
         self,
@@ -129,17 +128,20 @@ impl<T: Element, const ROWS: usize, const COLUMNS: usize> TileWriter<'_, T, ROWS
         source: &Matrix<T>,
         row: usize,
         column: usize,
-    ) {
+    ) -> Initialized<'a, SharedTile<T, ROWS, COLUMNS>> {
         let width = SharedTile::<T, ROWS, COLUMNS>::CHUNKS;
         let lanes = 16 / size_of::<T>();
         let (data, rows, columns) = (source.data(), source.rows(), source.columns());
-        if data.as_ptr() as usize % 16 == 0 && columns % lanes == 0 && column % lanes == 0 {
+        if data.as_ptr() as usize % 16 == 0 && columns % lanes == 0 && column.is_multiple_of(lanes)
+        {
             // SAFETY: the pipeline hands out writers only for stages it owns.
             let destination = unsafe { &*self.tile }.address();
             let chunks = ROWS * width;
-            for step in 0..chunks.div_ceil(THREADS) {
+            for step in
+                0..const { (ROWS * SharedTile::<T, ROWS, COLUMNS>::CHUNKS).div_ceil(THREADS) }
+            {
                 let chunk = step * THREADS + block.thread();
-                if chunks % THREADS != 0 && chunk >= chunks {
+                if !chunks.is_multiple_of(THREADS) && chunk >= chunks {
                     break;
                 }
                 let (tile_row, tile_chunk) = (chunk / width, chunk % width);
@@ -155,13 +157,13 @@ impl<T: Element, const ROWS: usize, const COLUMNS: usize> TileWriter<'_, T, ROWS
                 // holds, and the chunk ends at or before the end of its row; a zero-byte copy
                 // reads nothing.
                 let pointer = unsafe { data.as_ptr().add(start) };
-                copy_asynchronously(destination + offset, pointer as u64, bytes);
+                gpu::intrinsics::copy_asynchronously(destination + offset, pointer as u64, bytes);
             }
         } else {
             let elements = ROWS * COLUMNS;
-            for step in 0..elements.div_ceil(THREADS) {
+            for step in 0..const { (ROWS * COLUMNS).div_ceil(THREADS) } {
                 let element = step * THREADS + block.thread();
-                if elements % THREADS != 0 && element >= elements {
+                if !elements.is_multiple_of(THREADS) && element >= elements {
                     break;
                 }
                 let (tile_row, tile_column) = (element / COLUMNS, element % COLUMNS);
@@ -185,5 +187,6 @@ impl<T: Element, const ROWS: usize, const COLUMNS: usize> TileWriter<'_, T, ROWS
                 };
             }
         }
+        Initialized::new()
     }
 }

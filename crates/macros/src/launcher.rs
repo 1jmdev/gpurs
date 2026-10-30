@@ -58,11 +58,11 @@ pub(crate) fn launcher(
                         )
                     }
                     (element, true) => (
-                        quote!(&#lifetime mut ::gpurs::DeviceValue<#element>),
+                        quote!(&#lifetime mut impl ::gpurs::DeviceReferenceMut<#element>),
                         quote!(__launch.reference_mut(#argument);),
                     ),
                     (element, false) => (
-                        quote!(&#lifetime ::gpurs::DeviceValue<#element>),
+                        quote!(&#lifetime impl ::gpurs::DeviceReference<#element>),
                         quote!(__launch.reference(#argument);),
                     ),
                 }
@@ -97,8 +97,11 @@ pub(crate) fn launcher(
                     cache,
                 )
             });
-            #(#arguments)*
-            #finish
+            // SAFETY: the generated launcher preserves the verified kernel's parameter and result types.
+            unsafe {
+                #(#arguments)*
+                #finish
+            }
         }
     }
 }

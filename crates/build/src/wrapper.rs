@@ -2,6 +2,7 @@ use std::{
     env,
     ffi::{CString, c_char, c_int},
     mem,
+    path::Path,
     process::Command,
 };
 
@@ -32,12 +33,11 @@ pub(crate) fn run_wrapper() -> i32 {
             .code()
             .unwrap_or(1);
     }
-    if arguments.iter().any(|argument| {
-        let argument = argument.to_string_lossy();
-        argument.starts_with("--emit=") && !argument.contains("link")
-    }) {
-        let directory =
-            std::path::PathBuf::from(env::var_os("GPURS_ARTIFACTS").unwrap()).join("metadata");
+    {
+        let directory = Path::new(COMPILER_LIBRARY)
+            .parent()
+            .expect("the compiler library has a parent directory")
+            .join("metadata");
         let mut command = Command::new(env::var_os("CARGO").unwrap());
         for (name, _) in env::vars_os() {
             let name = name.to_string_lossy();
@@ -65,7 +65,7 @@ pub(crate) fn run_wrapper() -> i32 {
             .env("RUSTC_BOOTSTRAP", "1")
             .env(
                 "CARGO_ENCODED_RUSTFLAGS",
-                "-Zalways-encode-mir\u{1f}-Zinline-mir=no",
+                "-Zalways-encode-mir\u{1f}-Zmir-opt-level=2\u{1f}-Copt-level=3\u{1f}-Cdebug-assertions=no\u{1f}-Coverflow-checks=on\u{1f}--cfg=gpurs_device\u{1f}-Zcrate-attr=feature(register_tool)\u{1f}-Zcrate-attr=register_tool(gpurs_tool)",
             )
             .output()
             .unwrap_or_else(|error| build::fail(&error.to_string()));
@@ -85,11 +85,8 @@ pub(crate) fn run_wrapper() -> i32 {
                     }
                     arguments.extend([
                         "-L".into(),
-                        format!(
-                            "dependency={}",
-                            std::path::Path::new(file).parent().unwrap().display(),
-                        )
-                        .into(),
+                        format!("dependency={}", Path::new(file).parent().unwrap().display(),)
+                            .into(),
                     ]);
                 }
             }

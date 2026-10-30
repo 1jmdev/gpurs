@@ -1,7 +1,7 @@
 use std::{
     env, fs,
     hash::{DefaultHasher, Hash, Hasher},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Command,
     sync::atomic::{AtomicBool, Ordering},
 };
@@ -39,7 +39,7 @@ impl VisitMut for DevicePaths {
             && path.ident == "crate"
         {
             let suffix = &path.tree;
-            path.tree = Box::new(parse_quote!(__gpurs_device::#suffix));
+            *path.tree = parse_quote!(__gpurs_device::#suffix);
         }
     }
 
@@ -248,7 +248,7 @@ pub(crate) fn artifact() -> Tokens {
     let Some(wrapper) = env::var_os("GPURS_COMPILER_WRAPPER") else {
         return Tokens::new();
     };
-    let arguments = env::args_os().skip(1).collect::<Vec<_>>();
+    let mut arguments = env::args_os().skip(1).collect::<Vec<_>>();
     if !arguments
         .windows(2)
         .any(|pair| pair[0] == "--crate-type" && pair[1] == "bin")
@@ -259,12 +259,29 @@ pub(crate) fn artifact() -> Tokens {
         return Tokens::new();
     }
     let result = (|| {
+        let compiler = if arguments.first().is_some_and(|argument| {
+            Path::new(argument)
+                .file_stem()
+                .is_some_and(|name| name == "rustc")
+        }) {
+            arguments.remove(0)
+        } else {
+            env::current_exe()
+                .map_err(|error| error.to_string())?
+                .into_os_string()
+        };
+        if Path::new(&compiler)
+            .file_stem()
+            .is_some_and(|name| name == "rustdoc")
+        {
+            return Ok(Tokens::new());
+        }
         let mut hash = DefaultHasher::new();
         arguments.hash(&mut hash);
         let path = PathBuf::from(env::var_os("GPURS_ARTIFACTS").unwrap())
             .join(format!("{:016x}.bin", hash.finish()));
         let output = Command::new(wrapper)
-            .arg(env::current_exe().map_err(|error| error.to_string())?)
+            .arg(compiler)
             .args(arguments)
             .env("GPURS_TARGET_ARTIFACT", &path)
             .env("GPURS_WRAPPER", "1")

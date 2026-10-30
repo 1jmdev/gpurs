@@ -5,9 +5,11 @@
 //! residual device checks receives the block from the result word on.
 
 mod primitive;
+mod target;
 
 pub use primitive::{Convergence, Lowering, Memory, Operand, Primitive, Proof};
 use serde::{Deserialize, Serialize};
+pub use target::{Compatibility, ParseTargetError, Target};
 
 /// Symbol under which `gpurs-build` links the serialized artifact into each binary.
 pub const ARTIFACT_SYMBOL: &str = "__gpurs_artifact";
@@ -48,8 +50,14 @@ pub struct Kernel {
     pub certified: Option<Entry>,
     /// Entry point carrying every runtime check and the failure protocol.
     pub instrumented: Option<Entry>,
-    /// Dynamic block-shared memory every launch provides, in bytes.
-    pub shared: u64,
+    pub shared: SharedMemory,
+}
+
+/// Static and dynamic block-shared storage required by a kernel's compiled entry points.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SharedMemory {
+    pub static_bytes: u64,
+    pub dynamic_bytes: u64,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

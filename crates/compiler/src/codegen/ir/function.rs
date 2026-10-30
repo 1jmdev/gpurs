@@ -16,11 +16,13 @@ pub(super) struct BlockData {
 /// One function definition and the insertion point of its builder.
 pub struct Function {
     pub name: String,
+    pub typed_byval: bool,
     /// Printed above the definition, such as the Rust instance it implements.
     pub comment: String,
     pub internal: bool,
     /// `noinline cold`, for the failure path.
     pub cold: bool,
+    pub inline: bool,
     /// `!nvvm.annotations` entries of a kernel entry point.
     pub annotations: Vec<(&'static str, u32)>,
     pub(super) result: Type,
@@ -38,9 +40,11 @@ impl Function {
     pub fn new(name: impl Into<String>, result: Type, parameters: Vec<Type>) -> Function {
         let mut function = Function {
             name: name.into(),
+            typed_byval: false,
             comment: String::new(),
             internal: true,
             cold: false,
+            inline: false,
             annotations: Vec::new(),
             result,
             parameters: Vec::new(),

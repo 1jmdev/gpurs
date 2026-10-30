@@ -2,14 +2,8 @@
 
 use std::marker::PhantomData;
 
-use crate::gpu::{
-    BFloat16, Half,
-    intrinsics::{
-        multiply_accumulate_bf16, multiply_accumulate_f16, multiply_accumulate_f16_f16,
-        pack_bfloat16, pack_half, warpgroup_multiply_accumulate_bf16,
-        warpgroup_multiply_accumulate_f16,
-    },
-};
+use super::intrinsics;
+use crate::gpu::{self, BFloat16, Half};
 
 /// A 16-bit element type of tensor-core operands.
 pub trait Element: Copy + Default + 'static + sealed::Sealed {
@@ -24,7 +18,9 @@ pub trait Element: Copy + Default + 'static + sealed::Sealed {
     fn multiply_accumulate(a: [u32; 4], b: [u32; 2], c: [f32; 4]) -> [f32; 4];
 
     #[doc(hidden)]
-    fn warpgroup_multiply_accumulate(
+    /// # Safety
+    /// The descriptors name live, aligned shared tiles whose reads finish before storage is reused.
+    unsafe fn warpgroup_multiply_accumulate(
         a: u64,
         b: u64,
         d: [Accumulator<f32>; 32],
@@ -37,16 +33,16 @@ impl Element for Half {
 
     #[inline]
     fn multiply_accumulate(a: [u32; 4], b: [u32; 2], c: [f32; 4]) -> [f32; 4] {
-        multiply_accumulate_f16(a, b, c)
+        gpu::intrinsics::multiply_accumulate_f16(a, b, c)
     }
 
     #[inline]
-    fn warpgroup_multiply_accumulate(
+    unsafe fn warpgroup_multiply_accumulate(
         a: u64,
         b: u64,
         d: [Accumulator<f32>; 32],
     ) -> [Accumulator<f32>; 32] {
-        warpgroup_multiply_accumulate_f16(a, b, d)
+        intrinsics::warpgroup_multiply_accumulate_f16(a, b, d)
     }
 }
 
@@ -56,16 +52,16 @@ impl Element for BFloat16 {
 
     #[inline]
     fn multiply_accumulate(a: [u32; 4], b: [u32; 2], c: [f32; 4]) -> [f32; 4] {
-        multiply_accumulate_bf16(a, b, c)
+        gpu::intrinsics::multiply_accumulate_bf16(a, b, c)
     }
 
     #[inline]
-    fn warpgroup_multiply_accumulate(
+    unsafe fn warpgroup_multiply_accumulate(
         a: u64,
         b: u64,
         d: [Accumulator<f32>; 32],
     ) -> [Accumulator<f32>; 32] {
-        warpgroup_multiply_accumulate_bf16(a, b, d)
+        intrinsics::warpgroup_multiply_accumulate_bf16(a, b, d)
     }
 }
 
@@ -127,7 +123,10 @@ impl Accumulator<f32> {
     /// The values rounded to nearest f16.
     pub fn to_half(&self) -> Accumulator<Half> {
         let [a, b, c, d] = self.values;
-        let [a, b, c, d] = unpack([pack_half(a, b), pack_half(c, d)]);
+        let [a, b, c, d] = unpack([
+            gpu::intrinsics::pack_half(a, b),
+            gpu::intrinsics::pack_half(c, d),
+        ]);
         Accumulator {
             values: [Half(a), Half(b), Half(c), Half(d)],
         }
@@ -136,7 +135,10 @@ impl Accumulator<f32> {
     /// The values rounded to nearest bf16.
     pub fn to_bfloat16(&self) -> Accumulator<BFloat16> {
         let [a, b, c, d] = self.values;
-        let [a, b, c, d] = unpack([pack_bfloat16(a, b), pack_bfloat16(c, d)]);
+        let [a, b, c, d] = unpack([
+            gpu::intrinsics::pack_bfloat16(a, b),
+            gpu::intrinsics::pack_bfloat16(c, d),
+        ]);
         Accumulator {
             values: [BFloat16(a), BFloat16(b), BFloat16(c), BFloat16(d)],
         }
@@ -153,7 +155,7 @@ impl Accumulator<Half> {
             w.0 as u32 | (x.0 as u32) << 16,
             y.0 as u32 | (z.0 as u32) << 16,
         ];
-        let [w, x, y, z] = unpack(multiply_accumulate_f16_f16(
+        let [w, x, y, z] = unpack(gpu::intrinsics::multiply_accumulate_f16_f16(
             a.registers,
             b.registers,
             packed,

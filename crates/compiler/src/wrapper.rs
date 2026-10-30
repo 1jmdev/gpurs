@@ -77,12 +77,10 @@ fn device_arguments(arguments: &[String]) -> Vec<String> {
             "--color",
         ]
         .contains(&argument.as_str())
-        {
-            arguments.next();
-        } else if argument == "-C"
-            && arguments
-                .peek()
-                .is_some_and(|value| value.starts_with("incremental="))
+            || argument == "-C"
+                && arguments
+                    .peek()
+                    .is_some_and(|value| value.starts_with("incremental="))
         {
             arguments.next();
         } else if ![

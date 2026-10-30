@@ -11,28 +11,39 @@
 //! memory. Both operands are K-major, and both accumulators end in [`Accumulator`] fragments
 //! of an [`Output`].
 //!
+//! [`Pipeline::fill`] and [`TensorPipeline::fill`] take a closure returning every tile writer's
+//! load proof. `advance` initializes the next stage while returning the completed one; `drain`
+//! consumes completed stages without issuing more copies. TMA tiles retain their consumer type
+//! and their pipeline borrow until their last use. Asynchronous tensor kernels require complete
+//! memory-safety and panic proofs, and run only through certified entry points.
+//!
 //! Each operation lowers to the instructions a hand-written CUDA kernel uses, and its safety
 //! follows from construction: tiles are reachable only through the pipeline, between the
 //! barriers that separate its copies from reads, and an output lets every thread touch only
 //! the elements it owns. Collective operations are called directly in the kernel body by every
 //! thread of the block or warp they name.
 
-mod bulk;
 mod fragment;
+mod intrinsics;
 mod map;
 mod matrix;
-mod memory;
 mod output;
 mod pipeline;
+mod stage;
+mod tensor_memory;
+mod tensor_pipeline;
 mod tile;
 mod warpgroup;
 
-pub use bulk::{Blackwell, Consumer, Hopper, TensorPipeline, TensorWriter};
 pub use fragment::{Accumulator, Element, FragmentA, FragmentB};
 pub use map::TensorMap;
 pub use matrix::Matrix;
-pub use memory::TensorMemoryAccumulator;
 pub use output::{Output, OutputElement};
-pub use pipeline::{Pipeline, Stage, TensorStage};
+pub use pipeline::Pipeline;
+pub use stage::{Initialized, Stage, TensorStage, TensorTile};
+#[doc(hidden)]
+pub use stage::{PipelineStages, TensorPipelineStages};
+pub use tensor_memory::TensorMemoryAccumulator;
+pub use tensor_pipeline::{Blackwell, Consumer, Hopper, TensorPipeline, TensorWriter};
 pub use tile::{SharedTile, TileWriter};
 pub use warpgroup::WarpgroupAccumulator;

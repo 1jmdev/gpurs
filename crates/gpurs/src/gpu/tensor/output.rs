@@ -1,7 +1,7 @@
 use gpurs_macros::primitive;
 
 use super::{Accumulator, fragment::sealed::Sealed};
-use crate::gpu::{BFloat16, Block, Half, block_id, warp::lane_id};
+use crate::gpu::{self, BFloat16, Block, Half};
 
 /// An element type of an [`Output`].
 pub trait OutputElement: Copy + Default + Sealed {
@@ -127,7 +127,7 @@ impl<
                 "warp tiles are made of 16x8 fragments"
             );
             assert!(
-                BLOCK_ROWS % WARP_ROWS == 0 && BLOCK_COLUMNS % WARP_COLUMNS == 0,
+                BLOCK_ROWS.is_multiple_of(WARP_ROWS) && BLOCK_COLUMNS.is_multiple_of(WARP_COLUMNS),
                 "warp tiles divide the block tile"
             );
             assert!(
@@ -135,13 +135,10 @@ impl<
                 "the block holds one warp per warp tile"
             );
         };
-        let limit = if columns == 0 {
-            0
-        } else {
-            rows.min(data.len() / columns)
-        };
-        let paired = columns % 2 == 0 && data.as_ptr() as usize % (2 * size_of::<T>()) == 0;
-        let tile = block_id();
+        let limit = rows.min(data.len().checked_div(columns).unwrap_or(0));
+        let paired =
+            columns % 2 == 0 && (data.as_ptr() as usize).is_multiple_of(2 * size_of::<T>());
+        let tile = gpu::block_id();
         let warp = block.warp();
         let warps = BLOCK_COLUMNS / WARP_COLUMNS;
         Output {
@@ -189,7 +186,7 @@ impl<
     /// row `16 * i` and column `8 * j` of the warp's tile, with `i` and `j` taken modulo the
     /// fragment counts.
     pub fn coordinates(&self, i: usize, j: usize) -> (usize, usize) {
-        let lane = lane_id();
+        let lane = gpu::warp::lane_id();
         (
             self.row + self.warp_row + i % Self::FRAGMENT_ROWS * 16 + lane / 4,
             self.column + self.warp_column + j % Self::FRAGMENT_COLUMNS * 8 + lane % 4 * 2,

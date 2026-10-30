@@ -3,6 +3,8 @@ use std::{
     ptr,
 };
 
+use crate::memory::TensorDescriptor;
+
 pub type DevicePointer = u64;
 pub type CUresult = c_int;
 pub type CUdevice = c_int;
@@ -63,7 +65,7 @@ unsafe extern "C" {
     ) -> CUresult;
     pub fn cuFuncSetAttribute(function: CUfunction, attribute: c_int, value: c_int) -> CUresult;
     pub fn cuTensorMapEncodeTiled(
-        tensor_map: *mut [u64; 16],
+        tensor_map: *mut TensorDescriptor,
         data_type: c_int,
         rank: c_uint,
         address: DevicePointer,

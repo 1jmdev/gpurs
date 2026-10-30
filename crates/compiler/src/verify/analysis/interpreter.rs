@@ -7,7 +7,7 @@ use super::{
     Access, Context, Frame, Obligation, Origin, Pointer, Region, State, Value, arithmetic,
 };
 use crate::{
-    codegen::KernelParameter,
+    kernel::KernelParameter,
     stable,
     stable::{Body, Instance, RigidTy, Sess, Span},
     verify::{
@@ -27,7 +27,6 @@ pub struct Analysis<'a, 'sess> {
     pub contexts: Vec<Context>,
     pub obligations: Vec<Obligation>,
     pub frames: Vec<Frame>,
-    bodies: FxHashMap<Instance, Rc<Body>>,
     pub accesses: Vec<Access>,
     pub barriers: FxHashSet<usize>,
     pub collectives: Vec<(usize, u8, Span)>,
@@ -54,10 +53,9 @@ pub struct Analysis<'a, 'sess> {
 
 impl<'a, 'sess> Analysis<'a, 'sess> {
     pub fn new(sess: Sess<'sess>, kernel: Instance, parameters: &'a [KernelParameter]) -> Self {
-        let body = Rc::new(kernel.body().unwrap());
+        let body = sess.body(kernel);
         let blocks = body.blocks.len();
         let span = body.span;
-        let kernel_body = body.clone();
         Analysis {
             sess,
             kernel,
@@ -74,7 +72,6 @@ impl<'a, 'sess> Analysis<'a, 'sess> {
             contexts: Vec::new(),
             obligations: Vec::new(),
             frames: Vec::new(),
-            bodies: FxHashMap::from_iter([(kernel, kernel_body)]),
             accesses: Vec::new(),
             barriers: FxHashSet::default(),
             collectives: Vec::new(),
@@ -140,10 +137,7 @@ impl<'a, 'sess> Analysis<'a, 'sess> {
     }
 
     pub fn body(&mut self, instance: Instance) -> Rc<Body> {
-        self.bodies
-            .entry(instance)
-            .or_insert_with(|| Rc::new(instance.body().unwrap()))
-            .clone()
+        self.sess.body(instance)
     }
 
     /// The context of `instance` called from `parent`, stable across passes.

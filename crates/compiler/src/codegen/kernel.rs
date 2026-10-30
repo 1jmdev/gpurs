@@ -1,48 +1,15 @@
 use gpurs_artifact::{
-    self as artifact, Clause, Entry, Extent, Kernel, PARAMETERS_OFFSET, Parameter, RESULT_OFFSET,
-    STATUS_OFFSET, Value,
+    self as artifact, Entry, Kernel, PARAMETERS_OFFSET, RESULT_OFFSET, STATUS_OFFSET, SharedMemory,
+    Value,
 };
 
 use super::{
     function::FunctionBuilder,
     ir::{self, Access, Binary, Conversion, Flags, Type},
-    layout::Shape,
-    module::{Certificate, ModuleBuilder},
+    module::ModuleBuilder,
     place::Place,
 };
-use crate::{
-    stable,
-    stable::{Instance, RigidTy},
-};
-
-#[derive(Clone)]
-pub struct KernelParameter {
-    pub layout: Shape,
-    pub metadata: Parameter,
-}
-
-pub struct KernelPlan {
-    pub instance: Instance,
-    pub key: String,
-    pub symbol: String,
-    pub parameters: Vec<KernelParameter>,
-    pub extent: Extent,
-    pub requirements: Vec<Clause>,
-    pub preconditions: Vec<Clause>,
-    /// The checks the certified entry point omits; `None` when it does not exist.
-    pub certificate: Option<Certificate>,
-    /// Whether the certified entry point records arithmetic failures in the status word.
-    pub status: bool,
-    /// Whether the instrumented entry point exists.
-    pub instrumented: bool,
-    /// Whether the kernel reads the linear thread index.
-    pub uses_index: bool,
-    /// Whether the kernel issues asynchronous copies, which must land before the block exits.
-    pub asynchronous: bool,
-    /// The kernel's entry in the `*.preconditions` report.
-    pub summary: String,
-    pub warnings: Vec<crate::verify::Warning>,
-}
+use crate::{kernel::KernelPlan, layout::Shape, stable, stable::RigidTy};
 
 impl<'sess> ModuleBuilder<'sess> {
     pub fn kernel(&mut self, plan: KernelPlan) -> Kernel {
@@ -89,7 +56,7 @@ impl<'sess> ModuleBuilder<'sess> {
             preconditions: plan.preconditions,
             certified,
             instrumented,
-            shared: 0,
+            shared: SharedMemory::default(),
         }
     }
 

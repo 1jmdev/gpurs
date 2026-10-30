@@ -2,10 +2,35 @@
 
 use gpurs_artifact::TransferType;
 
-use crate::stable::{AdtKind, RigidTy, Sess, Ty, TyKind};
+use crate::{
+    paths,
+    stable::{AdtKind, CrateDef, RigidTy, Sess, Ty, TyKind},
+};
+
+pub fn tensor_map(sess: Sess<'_>, ty: Ty) -> bool {
+    matches!(ty.kind(), TyKind::RigidTy(RigidTy::Adt(definition, _))
+        if paths::is(sess, definition.def_id(), "gpurs::gpu::tensor::map::TensorMap"))
+}
 
 /// Rejects types that cannot be copied bytewise between host and device.
 pub fn check(sess: Sess<'_>, ty: Ty) -> Result<(), String> {
+    if tensor_map(sess, ty) {
+        return Err(format!(
+            "`{}` is an opaque GPU descriptor; construct it with Gpu::tensor_map and pass it by shared reference",
+            sess.type_name(ty)
+        ));
+    }
+    if matches!(ty.kind(), TyKind::RigidTy(RigidTy::Adt(definition, _))
+        if paths::is(sess, definition.def_id(), "gpurs::gpu::tensor::tile::SharedTile"))
+    {
+        return Err("block-shared tiles are created only by GPU pipelines".to_owned());
+    }
+    if matches!(ty.kind(), TyKind::RigidTy(RigidTy::Adt(definition, _))
+        if ["gpurs::gpu::thread::Block", "gpurs::gpu::tensor::stage::Initialized"]
+            .iter().any(|path| paths::is(sess, definition.def_id(), path)))
+    {
+        return Err("GPU execution proofs cannot be transferred from the host".to_owned());
+    }
     if sess.needs_drop(ty) {
         return Err(format!(
             "`{}` has a destructor, which GPU transfers cannot run",

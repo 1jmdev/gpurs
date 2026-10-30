@@ -4,8 +4,9 @@
 //! interface does not yet expose (reachable instances, stable fingerprints, definition paths,
 //! type printing, diagnostics) go through the bridge in this module and nowhere else.
 
-use std::ops::ControlFlow;
+use std::{env, ops::ControlFlow, rc::Rc};
 
+use gpurs_artifact::Target;
 #[cfg(gpurs_api_value_repr)]
 use rustc_ast::attr::AttributeExt;
 use rustc_const_eval::util;
@@ -49,6 +50,8 @@ use rustc_public::{
     ty::MirConst,
     visitor::{Visitable, Visitor},
 };
+
+use crate::{kernel::Signature, queries::SESSION};
 
 #[derive(Default)]
 struct FingerprintInputs {
@@ -99,6 +102,7 @@ pub fn rigid(ty: Ty) -> RigidTy {
 #[derive(Clone, Copy)]
 pub struct Session<'tcx> {
     tcx: TyCtxt<'tcx>,
+    pub target: Target,
 }
 
 /// A borrowed session; one lifetime keeps it usable in structs and impl blocks.
@@ -106,7 +110,35 @@ pub type Sess<'a> = Session<'a>;
 
 impl<'tcx> Session<'tcx> {
     pub fn new(tcx: TyCtxt<'tcx>) -> Self {
-        Session { tcx }
+        Session {
+            tcx,
+            target: env::var("GPURS_ARCHITECTURE")
+                .expect("GPU compilation has a target architecture")
+                .parse()
+                .expect("the build script validated the target architecture"),
+        }
+    }
+
+    pub fn body(&self, instance: Instance) -> Rc<Body> {
+        SESSION.with(|queries| {
+            queries
+                .bodies
+                .borrow_mut()
+                .entry(instance)
+                .or_insert_with(|| Rc::new(instance.body().expect("GPU functions have MIR")))
+                .clone()
+        })
+    }
+
+    pub fn signature(&self, instance: Instance) -> Rc<Signature> {
+        SESSION.with(|queries| {
+            queries
+                .signatures
+                .borrow_mut()
+                .entry(instance)
+                .or_insert_with(|| Rc::new(Signature::of(*self, instance)))
+                .clone()
+        })
     }
 
     pub fn entry(&self) -> Option<Instance> {

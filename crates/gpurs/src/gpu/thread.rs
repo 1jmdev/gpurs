@@ -71,6 +71,12 @@ pub fn sync_block();
 #[derive(Clone, Copy, Debug)]
 pub struct Block<const THREADS: usize>(());
 
+impl<const THREADS: usize> Default for Block<THREADS> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<const THREADS: usize> Block<THREADS> {
     #[primitive(
         lowering = Body,

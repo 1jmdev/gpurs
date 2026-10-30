@@ -1,31 +1,20 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
 
+use gpurs_artifact::SharedMemory;
 use rustc_data_structures::fx::FxHashMap;
 
 use super::{
     function::FunctionBuilder,
     ir::{self, Access, Ordering, Type},
-    layout::{self, PassMode, Shape},
+    layout,
 };
-use crate::stable::{AllocId, Instance, Sess};
-
-/// Which checks of one function copy the verifier discharged, by MIR block.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
-pub struct Certificate {
-    /// Blocks whose assertion or panic cannot fail; their checks are omitted.
-    pub discharged: BTreeSet<usize>,
-    /// Blocks whose data-dependent arithmetic check records the failure and continues.
-    pub recorded: BTreeSet<usize>,
-    /// Certificates of the callees, by call block.
-    pub calls: BTreeMap<usize, Certificate>,
-}
-
-impl Certificate {
-    /// Whether a check of this copy or of a callee reports through the status word.
-    pub fn records(&self) -> bool {
-        !self.recorded.is_empty() || self.calls.values().any(Certificate::records)
-    }
-}
+use crate::{
+    kernel::Signature,
+    layout::PassMode,
+    shared_memory::SharedAllocations,
+    stable::{AllocId, Instance, Sess},
+    verify::Certificate,
+};
 
 /// One copy of a function: certified with its certificate, or instrumented; `linear` folds a
 /// one-dimensional launch geometry.
@@ -40,24 +29,13 @@ pub struct ModuleBuilder<'sess> {
     functions: FxHashMap<Copy, String>,
     queue: Vec<Copy>,
     pub(super) allocations: FxHashMap<AllocId, ir::Value>,
-    /// Static block-shared bytes the function being lowered allocates.
-    pub shared_static: u64,
-    /// Dynamic block-shared bytes the function being lowered allocates.
-    pub shared: u64,
-    /// Dynamic block-shared bytes of the largest function.
-    pub shared_bytes: u64,
-    dynamic: Option<ir::Value>,
-}
-
-/// Device calling convention of one function instance.
-pub struct Signature {
-    pub arguments: Vec<(PassMode, Shape)>,
-    pub result: (PassMode, Shape),
+    pub shared: SharedAllocations,
 }
 
 impl<'sess> ModuleBuilder<'sess> {
     pub fn new(sess: Sess<'sess>) -> Self {
         let mut ir = ir::Module::default();
+        ir.typed_byval = sess.target.capability() >= 100;
         let status_pointer = Type::I32.pointer();
         let status = ir.global(
             "gpurs.status",
@@ -73,18 +51,8 @@ impl<'sess> ModuleBuilder<'sess> {
             functions: FxHashMap::default(),
             queue: Vec::new(),
             allocations: FxHashMap::default(),
-            shared_static: 0,
-            shared: 0,
-            shared_bytes: 0,
-            dynamic: None,
+            shared: SharedAllocations::default(),
         }
-    }
-
-    /// The start of the launch's dynamic block-shared memory, aligned for TMA swizzling.
-    pub fn dynamic_shared(&mut self) -> ir::Value {
-        self.dynamic
-            .get_or_insert_with(|| self.ir.external("gpurs_dynamic", Type::bytes(0), 3, 1024))
-            .clone()
     }
 
     /// Name of the device function for one copy of `instance`, queueing it for lowering on
@@ -105,40 +73,24 @@ impl<'sess> ModuleBuilder<'sess> {
         name
     }
 
-    pub fn signature(&self, instance: Instance) -> Signature {
-        let body = instance
-            .body()
-            .unwrap_or_else(|| panic!("no body for `{}`", instance.name()));
-        let shape = |ty| {
-            let shape = Shape::of(self.sess, ty);
-            (layout::pass_mode(&shape), shape)
-        };
-        Signature {
-            arguments: body
-                .arg_locals()
-                .iter()
-                .map(|local| shape(local.ty))
-                .collect(),
-            result: shape(body.ret_local().ty),
-        }
+    pub fn signature(&self, instance: Instance) -> Rc<Signature> {
+        self.sess.signature(instance)
     }
 
     /// Lowers every queued function and renders the module, with the dynamic block-shared
     /// bytes a launch provides.
-    pub fn finish(mut self) -> (String, u64) {
+    pub fn finish(mut self) -> (String, SharedMemory) {
         while let Some(copy) = self.queue.pop() {
             let name = self.functions[&copy].clone();
             let (instance, certificate, linear) = copy;
-            (self.shared_static, self.shared) = (0, 0);
             let mut builder = FunctionBuilder::new(&mut self, instance);
             builder.certificate = certificate;
             builder.linear = linear;
             builder.lower(&name);
-            self.shared_bytes = self.shared_bytes.max(self.shared);
         }
         self.ir.define(self.failure("gpurs.fail", true));
         self.ir.define(self.failure("gpurs.record", false));
-        (self.ir.to_string(), self.shared_bytes)
+        (self.ir.to_string(), self.shared.required)
     }
 
     /// `gpurs.fail(code)` records the first failure of the launch and stops the thread;
@@ -157,7 +109,7 @@ impl<'sess> ModuleBuilder<'sess> {
         );
         if stop {
             // A stopping thread may still have asynchronous copies into block-shared memory.
-            if crate::verify::architecture() >= 80 {
+            if self.sess.target.capability() >= 80 {
                 function.assembly(
                     "cp.async.wait_all;",
                     "~{memory}",

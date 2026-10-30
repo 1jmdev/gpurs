@@ -96,9 +96,7 @@ impl Display for Function {
             .parameters
             .iter()
             .map(|(parameter, byval)| match byval {
-                // The NVVM IR parser of sm_100 and later requires the `byval` type, which
-                // earlier ones reject.
-                Some(align) if crate::verify::architecture() >= 100 => format!(
+                Some(align) if self.typed_byval => format!(
                     "{} byval({}) align {align} {parameter}",
                     parameter.ty,
                     parameter.ty.pointee()
@@ -114,7 +112,13 @@ impl Display for Function {
             self.result,
             self.name,
             parameters.join(", "),
-            if self.cold { " noinline cold" } else { "" }
+            if self.cold {
+                " noinline cold"
+            } else if self.inline {
+                " alwaysinline"
+            } else {
+                ""
+            }
         )?;
         for block in &self.layout {
             let data = &self.blocks[block.0];

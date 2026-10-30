@@ -117,6 +117,9 @@ impl Analysis<'_, '_> {
         {
             return self.call(func, args, destination, state);
         }
+        if let TerminatorKind::Drop { place, .. } = &terminator.kind {
+            self.drop_value(place, state);
+        }
         true
     }
 

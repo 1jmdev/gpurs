@@ -1,26 +1,28 @@
-use std::env;
-
-use gpurs_artifact::{Convergence, Lowering, Memory, Primitive};
+use gpurs_artifact::{Compatibility, Convergence, Lowering, Memory, Proof};
 use rustc_data_structures::fx::FxHashSet;
 
 use crate::{
-    attributes, diagnostic, paths,
+    attributes, call_graph, diagnostic, paths,
     stable::{Body, CrateDef, Instance, InstanceKind, RigidTy, Sess, Span, TerminatorKind, TyKind},
 };
 
-/// Rejects call graphs that GPU code cannot express: recursion, dynamic dispatch, host-only
-/// callees, and primitives beyond the target architecture. Returns whether the kernel issues
-/// asynchronous copies into block-shared memory.
-pub fn verify(sess: Sess<'_>, root: Instance) -> bool {
-    let mut asynchronous = false;
+#[derive(Default)]
+pub struct Effects {
+    pub asynchronous: bool,
+    pub tensor: bool,
+}
+
+/// Rejects unsupported call graphs and determines which asynchronous exit protocols they require.
+pub fn verify(sess: Sess<'_>, root: Instance) -> Effects {
+    let mut effects = Effects::default();
     visit(
         sess,
         root,
         &mut Vec::new(),
         &mut FxHashSet::default(),
-        &mut asynchronous,
+        &mut effects,
     );
-    asynchronous
+    effects
 }
 
 fn visit(
@@ -28,7 +30,7 @@ fn visit(
     instance: Instance,
     active: &mut Vec<Instance>,
     checked: &mut FxHashSet<Instance>,
-    asynchronous: &mut bool,
+    effects: &mut Effects,
 ) {
     if active.contains(&instance) {
         diagnostic::error(
@@ -39,7 +41,7 @@ fn visit(
         );
         return;
     }
-    if !checked.insert(instance) || leaf(sess, instance) {
+    if !checked.insert(instance) || call_graph::leaf(sess, instance) {
         return;
     }
     active.push(instance);
@@ -52,11 +54,12 @@ fn visit(
         active.pop();
         return;
     }
-    let Some(body) = instance.body() else {
+    let function = call_graph::function(sess, instance);
+    let Some(body) = &function.body else {
         active.pop();
         return;
     };
-    for block in reachable(&body) {
+    for block in reachable(body) {
         let terminator = &body.blocks[block].terminator;
         match &terminator.kind {
             TerminatorKind::Call {
@@ -68,7 +71,7 @@ fn visit(
                 let Ok(ty) = func.ty(&locals) else {
                     continue;
                 };
-                let TyKind::RigidTy(RigidTy::FnDef(definition, args)) = ty.kind() else {
+                let TyKind::RigidTy(RigidTy::FnDef(..)) = ty.kind() else {
                     diagnostic::error(
                         sess,
                         terminator.source_info.span,
@@ -77,25 +80,50 @@ fn visit(
                     );
                     continue;
                 };
-                let Ok(callee) = Instance::resolve(definition, &args) else {
+                let Some(&callee) = function.calls.get(&block) else {
                     diagnostic::error(
                         sess,
                         terminator.source_info.span,
                         "cannot resolve GPU callee",
-                        "call a #[gpu] function directly or use a generic parameter so the compiler can resolve the callee",
+                        "use a directly resolved GPU function",
                     );
                     continue;
                 };
+                let path = paths::path(sess, callee.def.def_id());
+                if attributes::is_device(sess, instance.def.def_id())
+                    && (paths::is(sess, callee.def.def_id(), "core::mem::forget")
+                        || path.starts_with("core::mem::manually_drop::")
+                        || path.starts_with("core::mem::maybe_uninit::"))
+                    && callee
+                        .args()
+                        .0
+                        .iter()
+                        .filter_map(|argument| argument.ty())
+                        .any(|ty| sess.needs_drop(*ty))
+                {
+                    diagnostic::error(
+                        sess,
+                        terminator.source_info.span,
+                        "GPU resources cannot bypass destructor cleanup",
+                        "let the resource leave scope normally, or complete its operation",
+                    );
+                }
                 let primitive = attributes::primitive(sess, callee.def.def_id());
-                *asynchronous |= primitive.as_ref().is_some_and(|primitive| {
+                effects.asynchronous |= primitive.as_ref().is_some_and(|primitive| {
                     matches!(&primitive.lowering, Lowering::Assembly { text, .. } if text.starts_with("cp.async."))
                 });
-                if active.len() > 1
-                    && attributes::is_device(sess, instance.def.def_id())
-                    && primitive.as_ref().is_some_and(|primitive| {
-                        primitive.convergence != Convergence::None
-                            || primitive.memory == Memory::SharedAllocation
-                    })
+                effects.tensor |= primitive.as_ref().is_some_and(|primitive| {
+                    primitive.architecture >= 90 && primitive.memory != Memory::None
+                });
+                if let Some(primitive) = &primitive
+                    && active.len() > 1
+                    && (primitive.memory == Memory::SharedAllocation
+                        || primitive.proof != Proof::Initialized
+                            && primitive.convergence != Convergence::None
+                            && active
+                                .iter()
+                                .skip(1)
+                                .any(|caller| attributes::is_device(sess, caller.def.def_id())))
                 {
                     diagnostic::error(
                         sess,
@@ -105,9 +133,15 @@ fn visit(
                     );
                 }
                 if let Some(primitive) = primitive
-                    && !provides(&primitive)
+                    && !sess
+                        .target
+                        .provides(primitive.architecture, primitive.compatibility)
                 {
-                    let suffix = if primitive.specific { "a" } else { "" };
+                    let suffix = match primitive.compatibility {
+                        Compatibility::Generic => "",
+                        Compatibility::Architecture => "a",
+                        Compatibility::Family => "f",
+                    };
                     diagnostic::error(
                         sess,
                         terminator.source_info.span,
@@ -120,7 +154,12 @@ fn visit(
                     );
                 }
                 if allowed(sess, callee, terminator.source_info.span) {
-                    visit(sess, callee, active, checked, asynchronous);
+                    visit(sess, callee, active, checked, effects);
+                }
+            }
+            TerminatorKind::Drop { .. } => {
+                if let Some(&callee) = function.calls.get(&block) {
+                    visit(sess, callee, active, checked, effects);
                 }
             }
             TerminatorKind::InlineAsm { .. } => {
@@ -147,7 +186,7 @@ fn allowed(sess: Sess<'_>, instance: Instance, span: Span) -> bool {
     }
     let path = paths::path(sess, instance.def.def_id());
     let approved = attributes::is_device(sess, instance.def.def_id())
-        || leaf(sess, instance)
+        || call_graph::leaf(sess, instance)
         || path.starts_with("gpurs::gpu::")
         || [
             "core::ops::",
@@ -188,14 +227,6 @@ fn allowed(sess: Sess<'_>, instance: Instance, span: Span) -> bool {
     approved
 }
 
-pub fn leaf(sess: Sess<'_>, instance: Instance) -> bool {
-    instance.intrinsic_name().is_some()
-        || paths::math(sess, instance.def.def_id()).is_some()
-        || attributes::primitive(sess, instance.def.def_id())
-            .is_some_and(|primitive| primitive.leaf())
-        || (instance.kind == InstanceKind::Shim && instance.is_empty_shim())
-}
-
 fn reachable(body: &Body) -> Vec<usize> {
     let mut seen = std::collections::BTreeSet::new();
     let mut pending = vec![0usize];
@@ -206,20 +237,4 @@ fn reachable(body: &Body) -> Vec<usize> {
         pending.extend(body.blocks[block].terminator.successors());
     }
     seen.into_iter().collect()
-}
-
-pub fn architecture() -> u32 {
-    env::var("GPURS_ARCHITECTURE").unwrap()[3..]
-        .trim_end_matches(['a', 'f'])
-        .parse()
-        .unwrap()
-}
-
-/// Whether the target provides `primitive`: its architecture or later, and for an
-/// architecture-specific primitive an `a` or `f` target of the same major version.
-fn provides(primitive: &Primitive) -> bool {
-    let target = env::var("GPURS_ARCHITECTURE").unwrap();
-    architecture() >= primitive.architecture
-        && (!primitive.specific
-            || target.ends_with(['a', 'f']) && architecture() / 10 == primitive.architecture / 10)
 }

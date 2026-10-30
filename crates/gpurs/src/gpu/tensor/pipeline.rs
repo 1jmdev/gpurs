@@ -1,93 +1,10 @@
 use gpurs_macros::primitive;
 
-use super::{Element, SharedTile, TensorWriter, TileWriter};
-use crate::gpu::{
-    block_dim,
-    intrinsics::{
-        commit_group, wait_group_0, wait_group_1, wait_group_2, wait_group_3, wait_group_4,
-        wait_group_5, wait_group_6,
-    },
-    sync_block, thread_id,
+use super::{
+    Stage,
+    stage::{Initialize, PipelineStages},
 };
-
-/// The tiles one [`Pipeline`] stage holds: a [`SharedTile`], or a tuple of up to four stages.
-pub trait Stage: private::Sealed {
-    /// Write access to every tile of a filling stage.
-    type Writers<'a>;
-
-    #[doc(hidden)]
-    /// # Safety
-    ///
-    /// `stage` points to a stage the caller may fill for `'a`.
-    unsafe fn writers<'a>(stage: *mut Self) -> Self::Writers<'a>;
-}
-
-/// The tiles one [`TensorPipeline`](super::TensorPipeline) stage holds: a [`SharedTile`] of
-/// 128-byte rows, or a tuple of up to four stages.
-pub trait TensorStage: private::Sealed {
-    /// Write access to every tile of a filling stage.
-    type Writers<'a>;
-
-    #[doc(hidden)]
-    /// # Safety
-    ///
-    /// `stage` points to a stage the caller may fill for `'a`, whose copies complete on the
-    /// barrier at shared-window address `barrier`.
-    unsafe fn writers<'a>(stage: *mut Self, barrier: u32) -> Self::Writers<'a>;
-}
-
-mod private {
-    pub trait Sealed {}
-}
-
-impl<T, const ROWS: usize, const COLUMNS: usize> private::Sealed for SharedTile<T, ROWS, COLUMNS> {}
-
-impl<T: Element, const ROWS: usize, const COLUMNS: usize> Stage for SharedTile<T, ROWS, COLUMNS> {
-    type Writers<'a> = TileWriter<'a, T, ROWS, COLUMNS>;
-
-    unsafe fn writers<'a>(stage: *mut Self) -> Self::Writers<'a> {
-        TileWriter::new(stage)
-    }
-}
-
-impl<T: Element, const ROWS: usize, const COLUMNS: usize> TensorStage
-    for SharedTile<T, ROWS, COLUMNS>
-{
-    type Writers<'a> = TensorWriter<'a, T, ROWS, COLUMNS>;
-
-    unsafe fn writers<'a>(stage: *mut Self, barrier: u32) -> Self::Writers<'a> {
-        TensorWriter::new(stage, barrier)
-    }
-}
-
-macro_rules! tuple {
-    ($($stage:ident $field:tt),+) => {
-        impl<$($stage),+> private::Sealed for ($($stage,)+) {}
-
-        impl<$($stage: TensorStage),+> TensorStage for ($($stage,)+) {
-            type Writers<'a> = ($($stage::Writers<'a>,)+);
-
-            unsafe fn writers<'a>(stage: *mut Self, barrier: u32) -> Self::Writers<'a> {
-                // SAFETY: each field lies inside the stage the caller may fill.
-                unsafe { ($($stage::writers(&raw mut (*stage).$field, barrier),)+) }
-            }
-        }
-
-        impl<$($stage: Stage),+> Stage for ($($stage,)+) {
-            type Writers<'a> = ($($stage::Writers<'a>,)+);
-
-            unsafe fn writers<'a>(stage: *mut Self) -> Self::Writers<'a> {
-                // SAFETY: each field lies inside the stage the caller may fill.
-                unsafe { ($($stage::writers(&raw mut (*stage).$field),)+) }
-            }
-        }
-    };
-}
-
-tuple!(A 0);
-tuple!(A 0, B 1);
-tuple!(A 0, B 1, C 2);
-tuple!(A 0, B 1, C 2, D 3);
+use crate::gpu::{self, intrinsics};
 
 /// `STAGES` copies of `S` in block-shared memory, filled with asynchronous copies while earlier
 /// stages are read. It holds 2 to 8 stages, which must fit in the block-shared memory of the
@@ -104,7 +21,10 @@ pub struct Pipeline<S, const STAGES: usize> {
     consumed: u32,
 }
 
-impl<S: Stage, const STAGES: usize> Pipeline<S, STAGES> {
+impl<S: Stage, const STAGES: usize> Pipeline<S, STAGES>
+where
+    [(); STAGES]: PipelineStages,
+{
     /// Allocates the stages in block-shared memory; each call site owns distinct storage.
     #[primitive(
         lowering = SharedArray,
@@ -115,28 +35,44 @@ impl<S: Stage, const STAGES: usize> Pipeline<S, STAGES> {
     )]
     pub fn new() -> Self;
 
-    /// Writers for the next free stage, to fill stages ahead of [`Pipeline::advance`]. When
-    /// every stage already holds unread data, the oldest is completed and dropped first. Every
-    /// thread of the block takes part.
+    /// Initializes every tile of the next stage. The closure returns each writer's load proof.
     #[primitive(
         lowering = Body,
         architecture = 80,
         convergence = Block,
-        memory = None,
+        memory = ReadReachable(1),
         proof = Uniform
     )]
-    pub fn fill(&mut self) -> S::Writers<'_> {
-        commit_group();
+    pub fn fill<F>(&mut self, initialize: F)
+    where
+        F: for<'stage> Initialize<S::Writers<'stage>, S::Initialized<'stage>>,
+    {
+        intrinsics::commit_group();
         if self.pending() == STAGES - 1 {
             self.consume();
         }
-        self.produce()
+        let _ = initialize(self.produce());
     }
 
-    /// Waits until the oldest filled stage is complete and visible to the block, and returns it
-    /// with writers for the next free stage. The stage stays readable until the next call on
-    /// the pipeline; without a filled stage it reads as zeros. Every thread of the block takes
-    /// part, and the call is a block barrier.
+    /// Returns the oldest completed stage while initializing every tile of the next stage.
+    #[primitive(
+        lowering = Body,
+        architecture = 80,
+        convergence = Block,
+        memory = BlockFenceReadReachable(1),
+        proof = Uniform
+    )]
+    pub fn advance<F>(&mut self, initialize: F) -> &S
+    where
+        F: for<'stage> Initialize<S::Writers<'stage>, S::Initialized<'stage>>,
+    {
+        let stage = self.ready();
+        let _ = initialize(self.produce());
+        // SAFETY: readiness precedes the borrow, and the next pipeline operation needs it back.
+        unsafe { &*stage }
+    }
+
+    /// Returns the oldest completed stage without producing another; an empty pipeline yields zeros.
     #[primitive(
         lowering = Body,
         architecture = 80,
@@ -144,17 +80,19 @@ impl<S: Stage, const STAGES: usize> Pipeline<S, STAGES> {
         memory = BlockFence,
         proof = Uniform
     )]
-    pub fn advance(&mut self) -> (&S, S::Writers<'_>) {
-        commit_group();
+    pub fn drain(&mut self) -> &S {
+        // SAFETY: readiness precedes the borrow, which excludes the next pipeline operation.
+        unsafe { &*self.ready() }
+    }
+
+    fn ready(&mut self) -> *const S {
+        intrinsics::commit_group();
         if self.pending() == 0 {
             self.zero();
-            commit_group();
+            intrinsics::commit_group();
         }
         self.consume();
-        // SAFETY: the stage completed before the barrier in `consume`, and the next refill of
-        // its storage needs `&mut self`.
-        let stage = unsafe { &*self.slot(self.consumed.wrapping_sub(1)) };
-        (stage, self.produce())
+        self.slot(self.consumed.wrapping_sub(1))
     }
 
     /// Filled stages not yet consumed.
@@ -164,12 +102,6 @@ impl<S: Stage, const STAGES: usize> Pipeline<S, STAGES> {
 
     /// Completes the oldest filled stage, makes it visible to the block, and marks it consumed.
     fn consume(&mut self) {
-        const {
-            assert!(
-                STAGES >= 2 && STAGES <= 8,
-                "a pipeline holds between 2 and 8 stages"
-            )
-        };
         // One group was committed per filled stage, so the oldest pending stage is complete
         // once at most `pending - 1` groups are outstanding.
         if self.pending() == STAGES - 1 {
@@ -177,7 +109,7 @@ impl<S: Stage, const STAGES: usize> Pipeline<S, STAGES> {
         } else {
             wait_groups(0);
         }
-        sync_block();
+        gpu::sync_block();
         self.consumed = self.consumed.wrapping_add(1);
     }
 
@@ -193,11 +125,11 @@ impl<S: Stage, const STAGES: usize> Pipeline<S, STAGES> {
     /// Fills the next free stage with zeros by plain stores from every thread.
     fn zero(&mut self) {
         let slot = self.slot(self.filled).cast::<Zero>();
-        let mut chunk = thread_id().x;
+        let mut chunk = gpu::thread_id().x;
         while chunk < size_of::<S>() / 16 {
             // SAFETY: the chunk lies inside a free stage, and tiles are 128-byte aligned.
             unsafe { slot.add(chunk).write(Zero([0; 4])) };
-            chunk += block_dim().x;
+            chunk += gpu::block_dim().x;
         }
         self.filled = self.filled.wrapping_add(1);
     }
@@ -214,12 +146,12 @@ struct Zero([u32; 4]);
 #[inline]
 fn wait_groups(pending: usize) {
     match pending {
-        0 => wait_group_0(),
-        1 => wait_group_1(),
-        2 => wait_group_2(),
-        3 => wait_group_3(),
-        4 => wait_group_4(),
-        5 => wait_group_5(),
-        _ => wait_group_6(),
+        0 => intrinsics::wait_group_0(),
+        1 => intrinsics::wait_group_1(),
+        2 => intrinsics::wait_group_2(),
+        3 => intrinsics::wait_group_3(),
+        4 => intrinsics::wait_group_4(),
+        5 => intrinsics::wait_group_5(),
+        _ => intrinsics::wait_group_6(),
     }
 }

@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, rc::Rc};
 
 use gpurs_artifact::Failure;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
@@ -6,7 +6,7 @@ use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use super::{
     ir::{self, Type},
     layout::{self, PassMode, Shape},
-    module::{Certificate, ModuleBuilder},
+    module::ModuleBuilder,
     place::{Operand, Place, Value},
     unroll::{self, Loop},
 };
@@ -17,6 +17,7 @@ use crate::{
         Operand as MirOperand, Place as MirPlace, ProjectionElem, RETURN_LOCAL, RigidTy, Rvalue,
         Sess, Span, StatementKind, TerminatorKind, Ty, ValueRepr,
     },
+    verify::Certificate,
 };
 
 /// Lowers the MIR body of one monomorphic instance to an NVVM IR function.
@@ -24,7 +25,7 @@ pub struct FunctionBuilder<'m, 'sess> {
     pub module: &'m mut ModuleBuilder<'sess>,
     pub sess: Sess<'sess>,
     pub instance: Instance,
-    pub body: Body,
+    pub body: Rc<Body>,
     pub locals: Vec<Place>,
     /// The size of each local held in its own stack slot, for its lifetime markers.
     slots: Vec<Option<u64>>,
@@ -36,7 +37,7 @@ pub struct FunctionBuilder<'m, 'sess> {
     /// The loops lowered as one copy of their body per iteration, outermost first.
     unrolled: Vec<unroll::Loop>,
     /// The copy of each unrolled loop enclosing the current block, outermost first.
-    copy: Vec<u64>,
+    pub(super) copy: Vec<u64>,
     /// The IR blocks of further copies, and the copies awaiting lowering.
     copies: FxHashMap<(usize, Vec<u64>), ir::Block>,
     pending: Vec<(usize, Vec<u64>)>,
@@ -54,9 +55,7 @@ pub struct FunctionBuilder<'m, 'sess> {
 impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
     pub fn new(module: &'m mut ModuleBuilder<'sess>, instance: Instance) -> Self {
         let sess = module.sess;
-        let body = instance
-            .body()
-            .unwrap_or_else(|| panic!("no body for `{:?}`", instance.name()));
+        let body = sess.body(instance);
         let span = body.span;
         FunctionBuilder {
             sess,
@@ -215,6 +214,8 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
         let signature = self.module.signature(self.instance);
         self.ir = ir::Function::new(name, signature.return_type(), signature.parameters());
         self.ir.comment = self.instance.name();
+        self.ir.inline = self.sess.is_closure_like(self.instance.def.def_id())
+            || attributes::primitive(self.sess, self.instance.def.def_id()).is_some();
         let mut parameters =
             (0..signature.parameters().len()).map(|index| self.ir.parameter(index));
         let result =

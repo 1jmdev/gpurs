@@ -35,9 +35,6 @@ pub struct ViewMut<'a, T> {
 /// A single GPU-resident value; annotated methods of `T` launch directly on it.
 pub struct DeviceValue<T> {
     pub(crate) buffer: Buffer<T>,
-    /// The buffer range the value refers to, such as the matrix of a tensor map, which every
-    /// launch taking the value reads.
-    pub(crate) source: Option<(Rc<Allocation>, Range<usize>)>,
 }
 
 /// Result of a scalar launch. [`Pending::read`] waits for the launch.
@@ -144,7 +141,7 @@ impl<T> Buffer<T> {
         fill(self.whole(), stream, value)
     }
 
-    fn whole(&self) -> Span<'_> {
+    pub(crate) fn whole(&self) -> Span<'_> {
         Span {
             allocation: &self.allocation,
             start: 0,
@@ -175,11 +172,9 @@ impl<T> ViewMut<'_, T> {
 }
 
 impl<T> DeviceValue<T> {
-    /// Copies the value to the host after the work writing it finished. A tensor map cannot
-    /// be read, since a copy would describe its matrix without keeping it alive.
+    /// Copies the value to the host after the work writing it finished.
     #[track_caller]
     pub fn read(&self) -> T {
-        assert!(self.source.is_none(), "tensor maps cannot be read back");
         read(&self.buffer)
     }
 }

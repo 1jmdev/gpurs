@@ -11,6 +11,7 @@
 //! launch rather than an out-of-bounds access.
 
 mod analysis;
+mod certificate;
 mod diagnostic;
 mod engine;
 mod kernel;
@@ -19,6 +20,6 @@ mod proof;
 mod render;
 mod symbolic;
 
+pub use certificate::Certificate;
 pub use diagnostic::Warning;
 pub use kernel::kernel;
-pub(crate) use policy::{architecture, leaf};

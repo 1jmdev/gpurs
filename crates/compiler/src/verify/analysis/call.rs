@@ -4,12 +4,9 @@ use super::{
     Access, Analysis, Kind, Obligation, Origin, Pointer, Region, State, Value, arithmetic, state,
 };
 use crate::{
-    attributes, diagnostic, paths,
+    attributes, call_graph, diagnostic, paths,
     stable::{CrateDef, Instance, Operand, Place, RigidTy, Ty, TyKind},
-    verify::{
-        policy,
-        symbolic::{Atom, Polynomial, Predicate, Relation, Requirement, launch_monomial},
-    },
+    verify::symbolic::{self, Atom, Polynomial, Predicate, Relation, Requirement},
 };
 
 const DEPTH: usize = 48;
@@ -70,7 +67,7 @@ impl Analysis<'_, '_> {
                 .or_else(|| self.model(&declared, receiver, &values, state))
                 .or_else(|| self.model(&path, None, &values, state)),
         };
-        if policy::leaf(self.sess, instance) {
+        if call_graph::leaf(self.sess, instance) {
             if model.is_none() {
                 self.forget(&values, state);
             }
@@ -94,6 +91,14 @@ impl Analysis<'_, '_> {
                 Some(value) => self.result(value, destination, state),
                 None => false,
             },
+        }
+    }
+
+    pub fn drop_value(&mut self, place: &Place, state: &mut State) {
+        let ty = self.place_type(place);
+        if self.sess.needs_drop(ty) {
+            let argument = self.address(place, state);
+            self.enter(Instance::resolve_drop_in_place(ty), vec![argument], state);
         }
     }
 
@@ -266,7 +271,7 @@ impl Analysis<'_, '_> {
                     self.access(&origin, primitive.memory == Memory::Write, false, state);
                 }
             }
-            Memory::ReadReachable(argument) => {
+            Memory::ReadReachable(argument) | Memory::BlockFenceReadReachable(argument) => {
                 let mut regions = Vec::new();
                 reachable(&arguments[argument], state, 3, &mut regions);
                 for region in regions {
@@ -313,7 +318,10 @@ impl Analysis<'_, '_> {
                 }
                 Convergence::Block => {
                     self.collectives.push((block, 0, self.span));
-                    if primitive.memory == Memory::BlockFence {
+                    if matches!(
+                        primitive.memory,
+                        Memory::BlockFence | Memory::BlockFenceReadReachable(_)
+                    ) {
                         self.barriers.insert(block);
                     }
                 }
@@ -393,7 +401,7 @@ impl Analysis<'_, '_> {
                 Value::default()
             }
             Proof::Varying => Value::varying(2),
-            Proof::Uniform => Value::default(),
+            Proof::Uniform | Proof::Initialized => Value::default(),
         }
     }
 
@@ -410,7 +418,7 @@ impl Analysis<'_, '_> {
         };
         let launch = |value: &Value| {
             value.integer.clone().filter(|integer| {
-                value.variance == 0 && integer.0.keys().all(|m| launch_monomial(m))
+                value.variance == 0 && integer.0.keys().all(|m| symbolic::launch_monomial(m))
             })
         };
         let data = referent
@@ -420,7 +428,7 @@ impl Analysis<'_, '_> {
                 Some(Pointer::Memory(origin)) if data.variance == 0 => origin
                     .index
                     .clone()
-                    .filter(|index| index.0.keys().all(|m| launch_monomial(m)))
+                    .filter(|index| index.0.keys().all(|m| symbolic::launch_monomial(m)))
                     .map(|index| (origin.region.clone(), index)),
                 _ => None,
             });

@@ -26,7 +26,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
         if let Some(primitive) = attributes::primitive(self.sess, instance.def.def_id())
             && primitive.leaf()
         {
-            self.primitive(primitive, arguments, destination);
+            self.primitive((*primitive).clone(), arguments, destination);
             return true;
         }
         if let Some(name) = paths::math(self.sess, instance.def.def_id())
@@ -440,8 +440,6 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                 }
             }
             Lowering::SharedArray => {
-                // The storage is the pointee of the result's first field. It is static while
-                // the function's static storage fits in 48 KiB, and dynamic beyond that.
                 let storage = destination
                     .shape
                     .field(self.sess, 0)
@@ -452,27 +450,16 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                     .ty;
                 let layout = self.shape_of(storage);
                 let size = layout.size().bytes().max(1) as u64;
-                let start = self.module.shared_static.next_multiple_of(layout.align());
-                let shared = if start + size <= 48 * 1024 - 1024 {
-                    self.module.shared_static = start + size;
-                    let shared = self.module.ir.global(
-                        "gpurs.shared",
-                        3,
-                        false,
-                        ir::Value::undef(Type::bytes(size)),
-                        layout.align(),
-                    );
-                    self.ir
-                        .cast(Conversion::AddrSpaceCast, shared, Type::byte_pointer())
-                } else {
-                    let offset = self.module.shared.next_multiple_of(layout.align());
-                    self.module.shared = offset + size;
-                    let base = self.module.dynamic_shared();
-                    let base = self
-                        .ir
-                        .cast(Conversion::AddrSpaceCast, base, Type::byte_pointer());
-                    self.ir.offset(base, ir::Value::i64(offset), true)
-                };
+                let (base, offset) = self.module.shared.allocate(
+                    &mut self.module.ir,
+                    (self.instance, self.block, self.copy.clone()),
+                    size,
+                    layout.align(),
+                );
+                let base = self
+                    .ir
+                    .cast(Conversion::AddrSpaceCast, base, Type::byte_pointer());
+                let shared = self.ir.offset(base, ir::Value::i64(offset), true);
                 if matches!(destination.shape.repr(), ValueRepr::Scalar(_)) {
                     shared
                 } else {

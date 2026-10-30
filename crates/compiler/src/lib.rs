@@ -2,9 +2,9 @@
 //!
 //! Loaded by `gpurs-build` for the selected binary or example. One rustc session discovers
 //! reachable launches and transfer types alongside device implementations, verifies their
-//! MIR, and lowers it to NVVM IR. [`cache`] stores verification, lowered IR, and CUBINs per kernel.
+//! MIR, and lowers it to NVVM IR. `cache` stores verification, lowered IR, and CUBINs per kernel.
 //!
-//! MIR is read through `rustc_public`. [`stable`] is the only module that touches
+//! MIR is read through `rustc_public`. `stable` is the only module that touches
 //! `rustc_middle`: it holds the `Session` boundary and the few queries the stable interface
 //! does not yet expose (reachable instances, stable fingerprints, definition paths,
 //! type printing, layout validity, and diagnostics).
@@ -23,13 +23,18 @@ extern crate rustc_span;
 
 mod attributes;
 mod cache;
+mod call_graph;
 mod codegen;
 mod device;
 mod diagnostic;
 mod discovery;
+mod kernel;
+mod layout;
 mod nvvm;
 mod paths;
 mod policy;
+mod queries;
+mod shared_memory;
 mod source;
 mod stable;
 mod transfer;

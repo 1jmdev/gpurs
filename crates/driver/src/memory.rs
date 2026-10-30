@@ -126,6 +126,10 @@ pub unsafe fn fill_async(destination: DevicePointer, value: u8, bytes: usize, st
     );
 }
 
+#[repr(C, align(128))]
+#[derive(Clone, Copy, Debug)]
+pub struct TensorDescriptor(pub [u64; 16]);
+
 /// Encodes a TMA descriptor of the row-major `rows`x`columns` matrix of `element_type`
 /// (a `CUtensorMapDataType`) at `address`, copied in 128-byte swizzled `box_rows`x`box_columns`
 /// boxes whose elements outside the matrix read as zero.
@@ -136,8 +140,8 @@ pub fn tensor_map(
     address: DevicePointer,
     [rows, columns]: [u64; 2],
     [box_rows, box_columns]: [u32; 2],
-) -> [u64; 16] {
-    let mut map = [0; 16];
+) -> TensorDescriptor {
+    let mut map = TensorDescriptor([0; 16]);
     // SAFETY: the out-pointer and the arrays are valid for the duration of the call.
     ffi::check(
         unsafe {

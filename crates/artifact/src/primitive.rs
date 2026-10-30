@@ -5,6 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::Compatibility;
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Primitive {
@@ -14,7 +16,7 @@ pub struct Primitive {
     /// Requires an architecture-specific `sm_XYa` or family `sm_XYf` target of the same major
     /// version as `architecture`.
     #[serde(default)]
-    pub specific: bool,
+    pub compatibility: Compatibility,
     pub convergence: Convergence,
     pub memory: Memory,
     pub proof: Proof,
@@ -64,6 +66,7 @@ pub enum Memory {
     None,
     /// Makes prior block-shared writes visible to the block.
     BlockFence,
+    BlockFenceReadReachable(usize),
     /// Allocates block-shared storage per call site.
     SharedAllocation,
     /// Reads the referent of the first argument.
@@ -97,6 +100,7 @@ pub enum Proof {
     Varying,
     /// Opaque and identical across threads.
     Uniform,
+    Initialized,
     /// Requires a block of `N` threads along x and one along y and z, for the first const
     /// generic `N`.
     BlockShape,
@@ -126,7 +130,7 @@ impl Primitive {
             | Proof::Index
             | Proof::Lane
             | Proof::BlockShape => true,
-            Proof::SharedRegion | Proof::Varying | Proof::Uniform => false,
+            Proof::SharedRegion | Proof::Varying | Proof::Uniform | Proof::Initialized => false,
         }
     }
 }

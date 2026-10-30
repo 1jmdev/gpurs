@@ -1,19 +1,16 @@
 use std::{
     cell::{Cell, OnceCell, RefCell},
     collections::HashMap,
-    marker::PhantomData,
     mem::MaybeUninit,
     rc::Rc,
     slice,
 };
 
-use gpurs_artifact::{Artifact, Kernel};
+use gpurs_artifact::{Artifact, Entry as ArtifactEntry, Kernel, Target};
 use gpurs_driver::{self as driver, Context, DevicePointer, Function, Module};
 
 use crate::{
-    DeviceSlice,
     buffer::{Buffer, DeviceValue},
-    gpu::tensor::{Element, TensorMap},
     launch,
     stream::Stream,
     tracking::{self, Access, Allocation, Status},
@@ -77,16 +74,11 @@ impl Gpu {
         let artifact = embedded_artifact();
         let context = Context::primary(ordinal);
         let capability = context.compute_capability();
-        let version = artifact.architecture.trim_start_matches("sm_");
-        let architecture: u32 = version
-            .trim_end_matches(['a', 'f'])
+        let target: Target = artifact
+            .architecture
             .parse()
-            .expect("artifact architecture has the form sm_XY");
-        // An architecture-specific `a` image runs only on its exact compute capability.
-        if capability / 10 != architecture / 10
-            || capability < architecture
-            || version.ends_with('a') && capability != architecture
-        {
+            .expect("the compiler recorded a valid GPU architecture");
+        if !target.supports(capability) {
             panic!(
                 "GPU {ordinal} has compute capability {}.{}, but kernels were compiled for {}; \
                  change the architecture passed to gpurs_build::compile",
@@ -114,7 +106,8 @@ impl Gpu {
 
     /// Launches the instrumented entry point of every kernel instead of the certified one. The
     /// instrumented entry point carries every runtime check; it exists for kernels whose
-    /// obligations were not all discharged and, in debug builds, for every kernel.
+    /// obligations were not all discharged and, in debug builds, for ordinary kernels.
+    /// Asynchronous tensor kernels require certified execution and reject this selection.
     pub fn select_instrumented(&self, enabled: bool) {
         self.device.instrumented.set(enabled);
         self.device.kernels.borrow().values().for_each(|kernel| {
@@ -151,7 +144,9 @@ impl Gpu {
         if !descriptor.zeroable {
             panic!("`{}` has no valid all-zero representation", descriptor.name);
         }
-        let bytes = len * size_of::<T>();
+        let bytes = len
+            .checked_mul(size_of::<T>())
+            .expect("GPU buffer size exceeds the addressable byte count");
         let pointer = driver::allocate_async(bytes, &self.device.transfer);
         let allocation = Rc::new(Allocation::new(self.device.clone(), pointer, bytes));
         // SAFETY: the allocation holds `bytes` bytes.
@@ -161,69 +156,11 @@ impl Gpu {
         Buffer::new(allocation, len)
     }
 
-    /// Describes the row-major `rows`x`columns` matrix at the start of `source` for TMA copies
-    /// into `ROWS`x`COLUMNS` tiles; launches taking the result read `source`. Rows of
-    /// `COLUMNS` 16-bit elements span the 128-byte swizzle, so `COLUMNS` is 64, and `columns`
-    /// is a multiple of eight.
-    #[track_caller]
-    pub fn tensor_map<T: Element, const ROWS: usize, const COLUMNS: usize>(
-        &self,
-        source: &impl DeviceSlice<T>,
-        rows: usize,
-        columns: usize,
-    ) -> DeviceValue<TensorMap<T, ROWS, COLUMNS>> {
-        const {
-            assert!(
-                COLUMNS * size_of::<T>() == 128 && ROWS >= 8 && ROWS <= 256 && ROWS % 8 == 0,
-                "tensor map boxes are 128-byte rows, 8 to 256 of them in multiples of eight"
-            )
-        };
-        let span = source.span();
-        if rows
-            .checked_mul(columns)
-            .is_none_or(|elements| elements > span.len)
-        {
-            panic!(
-                "a {rows}x{columns} matrix does not fit in {} elements",
-                span.len
-            );
-        }
-        let address = span.allocation.pointer + (span.start * size_of::<T>()) as u64;
-        let map = TensorMap::<T, ROWS, COLUMNS> {
-            descriptor: driver::tensor_map(
-                T::TENSOR_MAP_TYPE,
-                size_of::<T>() as u64,
-                address,
-                [rows as u64, columns as u64],
-                [ROWS as u32, COLUMNS as u32],
-            ),
-            element: PhantomData,
-        };
-        let bytes = size_of_val(&map);
-        let pointer = driver::allocate_async(bytes, &self.device.transfer);
-        let allocation = Rc::new(Allocation::new(self.device.clone(), pointer, bytes));
-        // SAFETY: the descriptor is plain data, and the allocation holds `bytes` bytes.
-        unsafe {
-            let source = slice::from_raw_parts((&raw const map).cast::<MaybeUninit<u8>>(), bytes);
-            driver::copy_to_device_async(pointer, source, &self.device.transfer);
-        }
-        tracking::complete(
-            &self.device.transfer,
-            &[Access::recovering(&allocation, 0..bytes)],
-            &[],
-        );
-        DeviceValue {
-            buffer: Buffer::new(allocation, 1),
-            source: Some((span.allocation.clone(), span.bytes::<T>())),
-        }
-    }
-
     /// Copies one value to the GPU; annotated methods of `T` launch directly on the result.
     #[track_caller]
     pub fn upload_value<T>(&self, value: &T) -> DeviceValue<T> {
         DeviceValue {
             buffer: self.upload(slice::from_ref(value)),
-            source: None,
         }
     }
 }
@@ -275,31 +212,27 @@ impl Device {
         } else {
             gpurs_artifact::PARAMETERS_OFFSET
         };
-        let load = |entry: &gpurs_artifact::Entry| Entry {
-            general: module.function(&entry.symbol),
-            linear: entry.linear.as_ref().map(|symbol| module.function(symbol)),
-            status: entry.status,
-            offset: if entry.status {
-                0
-            } else {
-                (start / align * align) as usize
-            },
-        };
-        if metadata.shared > 48 * 1024 {
-            for entry in [&metadata.certified, &metadata.instrumented]
-                .into_iter()
-                .flatten()
-            {
-                for symbol in [Some(&entry.symbol), entry.linear.as_ref()]
-                    .into_iter()
-                    .flatten()
-                {
-                    module
-                        .function(symbol)
-                        .reserve_shared(metadata.shared as u32);
+        let shared_bytes = u32::try_from(metadata.shared.dynamic_bytes)
+            .expect("kernel shared memory exceeds CUDA's size range");
+        let load = |entry: &ArtifactEntry| {
+            let function = |symbol: &str| {
+                let function = module.function(symbol);
+                if shared_bytes > 0 {
+                    function.reserve_shared(shared_bytes);
                 }
+                function
+            };
+            Entry {
+                general: function(&entry.symbol),
+                linear: entry.linear.as_deref().map(function),
+                status: entry.status,
+                offset: if entry.status {
+                    0
+                } else {
+                    (start / align * align) as usize
+                },
             }
-        }
+        };
         let kernel = Rc::new(LoadedKernel {
             certified: metadata.certified.as_ref().map(load),
             instrumented: metadata.instrumented.as_ref().map(load),

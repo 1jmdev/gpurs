@@ -9,6 +9,7 @@ use crate::{
     cache::Cache,
     discovery::HostView,
     paths,
+    queries::Scope,
     stable::{self, CrateDef, GenericArgKind, GenericArgs, Instance, Sess, Session, Ty, TyCtxt},
 };
 
@@ -109,8 +110,9 @@ impl Callbacks for DeviceView {
     fn config(&mut self, config: &mut rustc_interface::interface::Config) {
         config.file_loader = Some(Box::new(crate::source::Source));
     }
-    fn after_expansion(&mut self, _: &Compiler, tcx: TyCtxt<'_>) -> Compilation {
+    fn after_analysis(&mut self, _: &Compiler, tcx: TyCtxt<'_>) -> Compilation {
         stable::run(tcx, || {
+            let _queries = Scope;
             let session = Session::new(tcx);
             if let Err(message) = self.compile(session) {
                 session.err(message);

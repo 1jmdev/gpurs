@@ -1,10 +1,9 @@
+use std::mem::ManuallyDrop;
+
 use gpurs_macros::primitive;
 
-use super::{Accumulator, Element, SharedTile};
-use crate::gpu::{
-    Block,
-    intrinsics::{warpgroup_commit, warpgroup_fence, warpgroup_wait},
-};
+use super::{Accumulator, Element, Hopper, TensorTile, intrinsics};
+use crate::gpu::Block;
 
 /// The 128-byte swizzle mode of a `wgmma` matrix descriptor.
 const SWIZZLE: u64 = 1 << 62;
@@ -13,7 +12,7 @@ const SWIZZLE: u64 = 1 << 62;
 /// from [`TensorPipeline`](super::TensorPipeline) stages. Warp `w` of the block holds rows
 /// `16 * w..16 * w + 16` of the block's product as the 32 fragments of an
 /// [`Output`](super::Output) with 16x256 warp tiles.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Debug, Default)]
 pub struct WarpgroupAccumulator {
     fragments: [Accumulator<f32>; 32],
 }
@@ -25,7 +24,7 @@ impl WarpgroupAccumulator {
     #[primitive(
         lowering = Body,
         architecture = 90,
-        specific = true,
+        compatibility = Architecture,
         convergence = Block,
         memory = Encapsulated,
         proof = Uniform
@@ -33,8 +32,8 @@ impl WarpgroupAccumulator {
     pub fn multiply_accumulate<T: Element, const THREADS: usize, const ROWS: usize>(
         &mut self,
         block: &Block<THREADS>,
-        a: &SharedTile<T, ROWS, 64>,
-        b: &SharedTile<T, 256, 64>,
+        a: &TensorTile<'_, T, ROWS, 64, Hopper>,
+        b: &TensorTile<'_, T, 256, 64, Hopper>,
     ) {
         const {
             assert!(
@@ -43,15 +42,18 @@ impl WarpgroupAccumulator {
             )
         };
         let row = block.thread() / 128 * 64;
-        warpgroup_fence();
+        intrinsics::warpgroup_fence();
         for depth in 0..4 {
-            self.fragments = T::warpgroup_multiply_accumulate(
-                a.descriptor(row, depth * 16) | SWIZZLE,
-                b.descriptor(0, depth * 16) | SWIZZLE,
-                self.fragments,
-            );
+            // SAFETY: the tiles borrow aligned Hopper stages, which wait before reusing storage.
+            self.fragments = unsafe {
+                T::warpgroup_multiply_accumulate(
+                    a.descriptor(row, depth * 16) | SWIZZLE,
+                    b.descriptor(0, depth * 16) | SWIZZLE,
+                    self.fragments,
+                )
+            };
         }
-        warpgroup_commit();
+        intrinsics::warpgroup_commit();
     }
 
     /// Waits for the products and returns this warp's fragments. Every thread of the block
@@ -59,13 +61,28 @@ impl WarpgroupAccumulator {
     #[primitive(
         lowering = Body,
         architecture = 90,
-        specific = true,
+        compatibility = Architecture,
         convergence = Block,
         memory = None,
         proof = Varying
     )]
     pub fn complete(self) -> [Accumulator<f32>; 32] {
-        warpgroup_wait();
-        self.fragments
+        let accumulator = ManuallyDrop::new(self);
+        intrinsics::warpgroup_wait();
+        accumulator.fragments
+    }
+}
+
+impl Drop for WarpgroupAccumulator {
+    #[primitive(
+        lowering = Body,
+        architecture = 90,
+        compatibility = Architecture,
+        convergence = Block,
+        memory = Encapsulated,
+        proof = Uniform
+    )]
+    fn drop(&mut self) {
+        intrinsics::warpgroup_wait();
     }
 }

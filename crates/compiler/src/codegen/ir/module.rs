@@ -19,6 +19,7 @@ pub(super) struct Global {
 pub struct Module {
     pub(super) globals: Vec<Global>,
     pub(super) functions: Vec<Function>,
+    pub typed_byval: bool,
 }
 
 impl Module {
@@ -51,6 +52,10 @@ impl Module {
     /// Declares the external global `name` of type `ty`, returning its address in `space`.
     pub fn external(&mut self, name: &str, ty: Type, space: u32, align: u64) -> Value {
         let address = Value::new(ty.clone().pointer_in(space), Kind::Global(name.to_owned()));
+        if let Some(global) = self.globals.iter_mut().find(|global| global.name == name) {
+            global.align = global.align.max(align);
+            return address;
+        }
         self.globals.push(Global {
             name: name.to_owned(),
             space,
@@ -63,6 +68,7 @@ impl Module {
     }
 
     pub fn define(&mut self, mut function: Function) {
+        function.typed_byval = self.typed_byval;
         function.promote();
         self.functions.push(function);
     }

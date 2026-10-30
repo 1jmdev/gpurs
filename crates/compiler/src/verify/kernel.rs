@@ -1,12 +1,13 @@
 use gpurs_artifact::{self as artifact, Access, Extent, Parameter, Value};
 
 use super::{
+    Certificate,
     analysis::{Analysis, Kind, Obligation},
     diagnostic, policy as device_policy, render,
     symbolic::{self, Clause},
 };
 use crate::{
-    codegen::{Certificate, KernelParameter, KernelPlan, ModuleBuilder},
+    kernel::{KernelParameter, KernelPlan},
     policy::{self, Strictness},
     stable,
     stable::{CrateDef, Instance, Mutability, RigidTy, Sess, TyKind},
@@ -20,9 +21,8 @@ pub fn kernel(
     key: String,
     symbol: String,
 ) -> Option<KernelPlan> {
-    let asynchronous = device_policy::verify(sess, instance);
-    let module = ModuleBuilder::new(sess);
-    let signature = module.signature(instance);
+    let effects = device_policy::verify(sess, instance);
+    let signature = sess.signature(instance);
     let mut parameters = Vec::new();
     for (_, shape) in &signature.arguments {
         let metadata = match shape.ty.kind() {
@@ -36,7 +36,12 @@ pub fn kernel(
                     RigidTy::Slice(element) => element,
                     _ => pointee,
                 };
-                if let Err(message) = transfer::check(sess, referent) {
+                let transfer = if transfer::tensor_map(sess, pointee) && access == Access::Read {
+                    Ok(())
+                } else {
+                    transfer::check(sess, referent)
+                };
+                if let Err(message) = transfer {
                     sess.error(instance.def.def_id().span(), message);
                     return None;
                 }
@@ -97,6 +102,13 @@ pub fn kernel(
         .filter(|obligation| obligation.verdict.is_none() && obligation.kind != Kind::Arithmetic)
         .collect();
     let certified = !analysis.failed && residual.is_empty();
+    if effects.tensor && !certified {
+        sess.error_help(
+            span,
+            "asynchronous tensor kernels require a complete memory-safety and panic proof",
+            "guard data-dependent accesses or move them to another kernel; a failing thread cannot skip collective tensor cleanup",
+        );
+    }
     let warnings = if !certified && policy::strictness() != Strictness::Omit {
         diagnostic::report(&analysis, &residual)
     } else {
@@ -148,9 +160,9 @@ pub fn kernel(
         },
         certificate,
         status,
-        instrumented: !certified || policy::instrumented(),
+        instrumented: !effects.tensor && (!certified || policy::instrumented()),
         uses_index: analysis.uses_index,
-        asynchronous,
+        asynchronous: effects.asynchronous,
         summary,
         warnings,
     })

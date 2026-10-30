@@ -1,12 +1,13 @@
-use std::time::Instant;
-
 use gpurs::{
+    Buffer, Gpu, Half, LaunchConfig, gpu,
     gpu::{
         Block,
         tensor::{Accumulator, FragmentA, FragmentB, Matrix, Output, Pipeline, SharedTile},
     },
-    *,
 };
+
+#[path = "../../matrix_benchmark.rs"]
+mod matrix_benchmark;
 
 const THREADS: usize = 128;
 const SIZE: usize = 4096;
@@ -29,16 +30,23 @@ fn multiply(left: &[Half], right_transposed: &[Half], output: &mut [f32]) {
     let right = Matrix::new(right_transposed, PANEL_COLUMNS, SIZE);
     let mut output =
         Output::<_, TILE_ROWS, TILE_COLUMNS, 64, 64>::new(&block, output, SIZE, PANEL_COLUMNS);
+    let (row, column) = (output.row(), output.column());
     let mut pipeline = Pipeline::<Stage, 2>::new();
-    let (left_tile, right_tile) = pipeline.fill();
-    left_tile.load(&block, &left, output.row(), 0);
-    right_tile.load(&block, &right, output.column(), 0);
+    pipeline.fill(move |(left_tile, right_tile)| {
+        (
+            left_tile.load(&block, &left, row, 0),
+            right_tile.load(&block, &right, column, 0),
+        )
+    });
 
     let mut accumulators = [[Accumulator::<f32>::default(); FRAGMENT_COLUMNS]; FRAGMENT_ROWS];
     for depth in 0..SIZE / DEPTH {
-        let ((left_tile, right_tile), (left_next, right_next)) = pipeline.advance();
-        left_next.load(&block, &left, output.row(), (depth + 1) * DEPTH);
-        right_next.load(&block, &right, output.column(), (depth + 1) * DEPTH);
+        let (left_tile, right_tile) = pipeline.advance(move |(left_next, right_next)| {
+            (
+                left_next.load(&block, &left, row, (depth + 1) * DEPTH),
+                right_next.load(&block, &right, column, (depth + 1) * DEPTH),
+            )
+        });
 
         for slice in 0..DEPTH / 16 {
             let mut left = [FragmentA::default(); FRAGMENT_ROWS];
@@ -71,16 +79,9 @@ fn main() {
     let gpu = Gpu::new(0);
     let stream = gpu.stream();
 
-    let left = gpu.upload(
-        &(0..SIZE * SIZE)
-            .map(|index| Half::from_f32((index * 13 % 31) as f32 / 16.0 - 1.0))
-            .collect::<Vec<_>>(),
-    );
-    let right_transposed = gpu.upload(
-        &(0..SIZE * SIZE)
-            .map(|index| Half::from_f32((index * 7 % 29) as f32 / 16.0 - 1.0))
-            .collect::<Vec<_>>(),
-    );
+    let (left_host, right_host) = matrix_benchmark::inputs(SIZE);
+    let left = gpu.upload(&left_host);
+    let right_transposed = gpu.upload(&right_host);
     let mut output = gpu.zeros::<f32>(SIZE * SIZE);
     let configured = stream.with_launch(LaunchConfig {
         grid: [PANEL_COLUMNS / TILE_COLUMNS, SIZE / TILE_ROWS, 1],
@@ -99,21 +100,14 @@ fn main() {
             );
         }
     };
-    for _ in 0..5 {
+    let seconds = matrix_benchmark::measure(&stream, || {
         run(&mut output);
-    }
-    stream.synchronize();
-
-    let repetitions = 50;
-    let start = Instant::now();
-    for _ in 0..repetitions {
-        run(&mut output);
-    }
-    stream.synchronize();
-    let seconds = start.elapsed().as_secs_f64() / repetitions as f64;
-    println!(
-        "{SIZE}x{SIZE}x{SIZE}: {:.3} ms, {:.1} TFLOP/s",
-        seconds * 1e3,
-        2.0 * (SIZE as f64).powi(3) / seconds / 1e12
+    });
+    matrix_benchmark::report(
+        [SIZE, PANEL_COLUMNS],
+        seconds,
+        &left_host,
+        &right_host,
+        &output.download(),
     );
 }

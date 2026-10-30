@@ -1,5 +1,6 @@
 use super::{Analysis, Origin, Pointer, Region, State, Value, arithmetic, place::Location, state};
 use crate::{
+    layout::Shape,
     policy, stable,
     stable::{
         AdtKind, AggregateKind, Allocation, ConstantKind, NonDivergingIntrinsic, Operand, RigidTy,
@@ -221,7 +222,7 @@ impl Analysis<'_, '_> {
         {
             return Value::default();
         }
-        let shape = crate::codegen::Shape::of(self.sess, ty);
+        let shape = Shape::of(self.sess, ty);
         let bytes = stable::allocation_bytes(allocation);
         let fields = self
             .sess

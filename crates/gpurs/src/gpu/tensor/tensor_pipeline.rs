@@ -2,26 +2,24 @@ use std::marker::PhantomData;
 
 use gpurs_macros::primitive;
 
-use super::{Element, SharedTile, TensorMap, TensorStage};
-use crate::gpu::{
-    Block,
-    intrinsics::{
-        barrier_arrive, barrier_expect, barrier_fence_initialization, barrier_initialize,
-        barrier_wait, fence_proxy_asynchronous, shared_window, tensor_commit, tensor_load,
-        warpgroup_wait,
-    },
-    sync_block, thread_id,
+use self::private::Sealed;
+use super::{
+    Element, Initialized, SharedTile, TensorMap, TensorStage, intrinsics,
+    stage::{Initialize, TensorPipelineStages},
 };
+use crate::gpu::{self, Block};
 
 /// The tensor-core instructions that read a [`TensorPipeline`]'s stages.
-pub trait Consumer: private::Sealed {
+pub trait Consumer: Sealed + 'static {
     #[doc(hidden)]
     /// Arrivals that release one stage in a block of `threads` threads.
-    fn arrivals(threads: usize) -> u32;
+    fn arrivals<const THREADS: usize>() -> u32;
 
     #[doc(hidden)]
     /// Arrives on `barrier` once every product read from the stage it guards has completed.
-    fn release<const THREADS: usize>(block: &Block<THREADS>, barrier: u32);
+    /// # Safety
+    /// The barrier is initialized for this consumer's arrivals and every block thread participates.
+    unsafe fn release(barrier: u32);
 }
 
 mod private {
@@ -40,28 +38,35 @@ pub struct Hopper;
 pub struct Blackwell;
 
 impl Consumer for Hopper {
-    fn arrivals(threads: usize) -> u32 {
-        (threads / 32) as u32
+    fn arrivals<const THREADS: usize>() -> u32 {
+        const {
+            assert!(
+                THREADS % 128 == 0,
+                "Hopper pipelines require complete warpgroups"
+            )
+        };
+        (THREADS / 32) as u32
     }
 
     #[inline]
-    fn release<const THREADS: usize>(block: &Block<THREADS>, barrier: u32) {
-        warpgroup_wait();
-        if block.thread() % 32 == 0 {
-            barrier_arrive(barrier);
+    unsafe fn release(barrier: u32) {
+        intrinsics::warpgroup_wait();
+        if gpu::thread_id().x % 32 == 0 {
+            intrinsics::barrier_arrive(barrier);
         }
     }
 }
 
 impl Consumer for Blackwell {
-    fn arrivals(_: usize) -> u32 {
+    fn arrivals<const THREADS: usize>() -> u32 {
+        const { assert!(THREADS == 128, "Blackwell pipelines require 128 threads") };
         1
     }
 
     #[inline]
-    fn release<const THREADS: usize>(block: &Block<THREADS>, barrier: u32) {
-        if block.thread() == 0 {
-            tensor_commit(barrier);
+    unsafe fn release(barrier: u32) {
+        if gpu::thread_id().x == 0 {
+            intrinsics::tensor_commit(barrier);
         }
     }
 }
@@ -83,7 +88,7 @@ struct Storage<S, const STAGES: usize> {
 /// its storage is refilled only after that release, so copies never race with reads. Every
 /// method is called by every thread of the block.
 #[repr(C)]
-pub struct TensorPipeline<S, const STAGES: usize, C> {
+pub struct TensorPipeline<S, const STAGES: usize, C: Consumer> {
     storage: *mut Storage<S, STAGES>,
     filled: u32,
     consumed: u32,
@@ -92,7 +97,10 @@ pub struct TensorPipeline<S, const STAGES: usize, C> {
     consumer: PhantomData<C>,
 }
 
-impl<S: TensorStage, const STAGES: usize, C: Consumer> TensorPipeline<S, STAGES, C> {
+impl<S: TensorStage, const STAGES: usize, C: Consumer> TensorPipeline<S, STAGES, C>
+where
+    [(); STAGES]: TensorPipelineStages,
+{
     /// Allocates the stages in block-shared memory; each call site owns distinct storage.
     #[primitive(
         lowering = SharedArray,
@@ -103,26 +111,48 @@ impl<S: TensorStage, const STAGES: usize, C: Consumer> TensorPipeline<S, STAGES,
     )]
     pub fn new() -> Self;
 
-    /// Writers for the next free stage, to fill stages ahead of [`TensorPipeline::advance`].
-    /// When every stage already holds unread data, the oldest is completed and dropped first.
+    /// Initializes every tile of the next stage, returning every writer's load proof from the closure.
     #[primitive(
         lowering = Body,
         architecture = 90,
         convergence = Block,
-        memory = Encapsulated,
+        memory = ReadReachable(2),
         proof = Uniform
     )]
-    pub fn fill<const THREADS: usize>(&mut self, block: &Block<THREADS>) -> S::Writers<'_> {
+    pub fn fill<const THREADS: usize, F>(&mut self, block: &Block<THREADS>, initialize: F)
+    where
+        F: for<'stage> Initialize<S::Writers<'stage>, S::Initialized<'stage>>,
+    {
         self.commit(block);
         if self.pending() == STAGES - 1 {
-            self.consume(block);
+            self.consume();
         }
-        self.produce(block)
+        let _ = initialize(self.produce(block));
     }
 
-    /// Waits until the oldest filled stage has landed and returns it with writers for the next
-    /// free stage. The stage stays readable until the next call on the pipeline; without a
-    /// filled stage it reads as zeros.
+    /// Returns completed tiles for this consumer while initializing every tile of the next stage.
+    #[primitive(
+        lowering = Body,
+        architecture = 90,
+        convergence = Block,
+        memory = ReadReachable(2),
+        proof = Uniform
+    )]
+    pub fn advance<const THREADS: usize, F>(
+        &mut self,
+        block: &Block<THREADS>,
+        initialize: F,
+    ) -> S::Tiles<'_, C>
+    where
+        F: for<'stage> Initialize<S::Writers<'stage>, S::Initialized<'stage>>,
+    {
+        let stage = self.ready(block);
+        let _ = initialize(self.produce(block));
+        // SAFETY: the completed stage stays readable until the next mutable pipeline borrow.
+        unsafe { S::tiles(stage) }
+    }
+
+    /// Returns completed tiles without producing another; an empty pipeline yields zeros.
     #[primitive(
         lowering = Body,
         architecture = 90,
@@ -130,53 +160,50 @@ impl<S: TensorStage, const STAGES: usize, C: Consumer> TensorPipeline<S, STAGES,
         memory = Encapsulated,
         proof = Uniform
     )]
-    pub fn advance<const THREADS: usize>(
-        &mut self,
-        block: &Block<THREADS>,
-    ) -> (&S, S::Writers<'_>) {
+    pub fn drain<const THREADS: usize>(&mut self, block: &Block<THREADS>) -> S::Tiles<'_, C> {
+        // SAFETY: the completed stage stays readable until the next mutable pipeline borrow.
+        unsafe { S::tiles(self.ready(block)) }
+    }
+
+    fn ready<const THREADS: usize>(&mut self, block: &Block<THREADS>) -> *const S {
         self.commit(block);
         if self.pending() == 0 {
             self.zero(block);
         }
-        self.consume(block);
-        // SAFETY: the stage landed before the wait in `consume`, and its storage is refilled
-        // only after the release in a later call, which needs `&mut self`.
-        let stage = unsafe { &*self.slot(self.consumed.wrapping_sub(1)) };
-        (stage, self.produce(block))
+        self.consume();
+        self.slot(self.consumed.wrapping_sub(1))
     }
 
     /// Initializes the barriers on first use, then closes the stage whose copies the latest
     /// writers issued.
     fn commit<const THREADS: usize>(&mut self, block: &Block<THREADS>) {
-        const {
-            assert!(
-                STAGES >= 2 && STAGES <= 16,
-                "a tensor pipeline holds between 2 and 16 stages"
-            )
-        };
         if !self.initialized {
             if block.thread() == 0 {
                 for index in 0..STAGES as u32 {
-                    barrier_initialize(self.full(index), 1);
-                    barrier_initialize(self.empty(index), C::arrivals(THREADS));
+                    intrinsics::barrier_initialize(self.full(index), 1);
+                    intrinsics::barrier_initialize(self.empty(index), C::arrivals::<THREADS>());
                 }
-                barrier_fence_initialization();
+                intrinsics::barrier_fence_initialization();
             }
-            sync_block();
+            gpu::sync_block();
             self.initialized = true;
         }
         if self.open && block.thread() == 0 {
-            barrier_arrive(self.full(self.filled.wrapping_sub(1)));
+            intrinsics::barrier_arrive(self.full(self.filled.wrapping_sub(1)));
         }
         self.open = false;
     }
 
     /// Releases the previously consumed stage and waits until the oldest filled one landed.
-    fn consume<const THREADS: usize>(&mut self, block: &Block<THREADS>) {
+    fn consume(&mut self) {
         if self.consumed > 0 {
-            C::release(block, self.empty(self.consumed - 1));
+            // SAFETY: initialization configured the stage barrier for this consumer and block.
+            unsafe { C::release(self.empty(self.consumed - 1)) };
         }
-        barrier_wait(self.full(self.consumed), self.consumed / STAGES as u32 & 1);
+        intrinsics::barrier_wait(
+            self.full(self.consumed),
+            (self.consumed / STAGES as u32) & 1,
+        );
         self.consumed = self.consumed.wrapping_add(1);
     }
 
@@ -185,7 +212,7 @@ impl<S: TensorStage, const STAGES: usize, C: Consumer> TensorPipeline<S, STAGES,
         let index = self.filled;
         // A stage is released once per use, and this use waits for the previous one.
         if index >= STAGES as u32 && block.thread() == 0 {
-            barrier_wait(self.empty(index), (index / STAGES as u32 - 1) & 1);
+            intrinsics::barrier_wait(self.empty(index), (index / STAGES as u32 - 1) & 1);
         }
         self.filled = index.wrapping_add(1);
         self.open = true;
@@ -198,19 +225,21 @@ impl<S: TensorStage, const STAGES: usize, C: Consumer> TensorPipeline<S, STAGES,
     fn zero<const THREADS: usize>(&mut self, block: &Block<THREADS>) {
         let index = self.filled;
         let _ = self.produce(block);
-        sync_block();
+        gpu::sync_block();
         let slot = self.slot(index).cast::<u64>();
-        for word in (block.thread()..size_of::<S>() / 8).step_by(THREADS) {
+        let mut word = block.thread();
+        while word < size_of::<S>() / 8 {
             // SAFETY: the word lies inside a free stage.
             unsafe { slot.add(word).write(0) };
+            word += THREADS;
         }
-        fence_proxy_asynchronous();
-        sync_block();
+        intrinsics::fence_proxy_asynchronous();
+        gpu::sync_block();
         self.commit(block);
     }
 }
 
-impl<S, const STAGES: usize, C> TensorPipeline<S, STAGES, C> {
+impl<S, const STAGES: usize, C: Consumer> TensorPipeline<S, STAGES, C> {
     fn pending(&self) -> usize {
         self.filled.wrapping_sub(self.consumed) as usize
     }
@@ -227,35 +256,41 @@ impl<S, const STAGES: usize, C> TensorPipeline<S, STAGES, C> {
     fn full(&self, index: u32) -> u32 {
         // SAFETY: as in `slot`.
         let barrier = unsafe { (&raw mut (*self.storage).full).cast::<u64>() };
-        shared_window(barrier as u64) as u32 + index % STAGES as u32 * 8
+        gpu::intrinsics::shared_window(barrier as u64) as u32 + index % STAGES as u32 * 8
     }
 
     fn empty(&self, index: u32) -> u32 {
         // SAFETY: as in `slot`.
         let barrier = unsafe { (&raw mut (*self.storage).empty).cast::<u64>() };
-        shared_window(barrier as u64) as u32 + index % STAGES as u32 * 8
+        gpu::intrinsics::shared_window(barrier as u64) as u32 + index % STAGES as u32 * 8
     }
 }
 
-impl<S, const STAGES: usize, C> Drop for TensorPipeline<S, STAGES, C> {
+impl<S, const STAGES: usize, C: Consumer> Drop for TensorPipeline<S, STAGES, C> {
     /// Waits for copies still landing, which must not write the shared memory of a block that
     /// exited.
     #[primitive(
         lowering = Body,
         architecture = 90,
-        convergence = None,
+        convergence = Block,
         memory = Encapsulated,
         proof = Uniform
     )]
     fn drop(&mut self) {
-        if thread_id().x != 0 {
+        if self.consumed > 0 {
+            let index = self.consumed - 1;
+            // SAFETY: this stage was consumed and has not yet received its consumer arrivals.
+            unsafe { C::release(self.empty(index)) };
+            intrinsics::barrier_wait(self.empty(index), (index / STAGES as u32) & 1);
+        }
+        if gpu::thread_id().x != 0 {
             return;
         }
         if self.open {
-            barrier_arrive(self.full(self.filled.wrapping_sub(1)));
+            intrinsics::barrier_arrive(self.full(self.filled.wrapping_sub(1)));
         }
         for index in self.consumed..self.filled {
-            barrier_wait(self.full(index), index / STAGES as u32 & 1);
+            intrinsics::barrier_wait(self.full(index), (index / STAGES as u32) & 1);
         }
     }
 }
@@ -267,7 +302,7 @@ pub struct TensorWriter<'a, T, const ROWS: usize, const COLUMNS: usize> {
     stage: PhantomData<&'a mut SharedTile<T, ROWS, COLUMNS>>,
 }
 
-impl<T: Element, const ROWS: usize, const COLUMNS: usize> TensorWriter<'_, T, ROWS, COLUMNS> {
+impl<'a, T: Element, const ROWS: usize, const COLUMNS: usize> TensorWriter<'a, T, ROWS, COLUMNS> {
     pub(super) fn new(tile: *mut SharedTile<T, ROWS, COLUMNS>, barrier: u32) -> Self {
         TensorWriter {
             tile,
@@ -284,7 +319,7 @@ impl<T: Element, const ROWS: usize, const COLUMNS: usize> TensorWriter<'_, T, RO
         architecture = 90,
         convergence = Block,
         memory = ReadReachable(2),
-        proof = Uniform
+        proof = Initialized
     )]
     pub fn load<const THREADS: usize>(
         self,
@@ -292,16 +327,16 @@ impl<T: Element, const ROWS: usize, const COLUMNS: usize> TensorWriter<'_, T, RO
         source: &TensorMap<T, ROWS, COLUMNS>,
         row: usize,
         column: usize,
-    ) {
+    ) -> Initialized<'a, SharedTile<T, ROWS, COLUMNS>> {
         if block.thread() == 0 {
-            barrier_expect(
+            intrinsics::barrier_expect(
                 self.barrier,
                 size_of::<SharedTile<T, ROWS, COLUMNS>>() as u32,
             );
             // SAFETY: the pipeline hands out writers only for stages it owns.
             let destination = unsafe { &*self.tile }.address();
             // Coordinates beyond `i32` wrap to boxes outside the matrix, which read as zero.
-            tensor_load(
+            intrinsics::tensor_load(
                 destination,
                 source as *const TensorMap<T, ROWS, COLUMNS> as u64,
                 column as i32,
@@ -309,5 +344,6 @@ impl<T: Element, const ROWS: usize, const COLUMNS: usize> TensorWriter<'_, T, RO
                 self.barrier,
             );
         }
+        Initialized::new()
     }
 }

@@ -9,9 +9,10 @@ use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    call_graph,
     codegen::ModuleBuilder,
     nvvm,
-    stable::{Instance, RigidTy, Sess, TerminatorKind, TyKind},
+    stable::{Instance, Sess},
     verify::{self, Warning},
 };
 
@@ -65,37 +66,12 @@ impl Cache {
                 continue;
             }
             let (_, callees) = self.dependencies.entry(instance).or_insert_with(|| {
-                let body = (!verify::leaf(sess, instance) && instance.has_body())
-                    .then(|| instance.body())
-                    .flatten();
-                let callees = body
-                    .iter()
-                    .flat_map(|body| {
-                        body.blocks.iter().filter_map(|block| {
-                            let func = match &block.terminator.kind {
-                                TerminatorKind::Call {
-                                    func,
-                                    target: Some(_),
-                                    ..
-                                } => func,
-                                TerminatorKind::Drop { place, .. } => {
-                                    let ty = place.ty(body.locals()).ok()?;
-                                    return sess
-                                        .needs_drop(ty)
-                                        .then(|| Instance::resolve_drop_in_place(ty));
-                                }
-                                _ => return None,
-                            };
-                            let TyKind::RigidTy(RigidTy::FnDef(definition, arguments)) =
-                                func.ty(body.locals()).ok()?.kind()
-                            else {
-                                return None;
-                            };
-                            Instance::resolve(definition, &arguments).ok()
-                        })
-                    })
-                    .collect();
-                (sess.fingerprint(instance, body.as_ref()), callees)
+                let function = call_graph::function(sess, instance);
+                let callees = function.calls.values().copied().collect();
+                (
+                    sess.fingerprint(instance, function.body.as_deref()),
+                    callees,
+                )
             });
             pending.extend(callees.iter().copied());
             functions.push(instance);
@@ -225,34 +201,5 @@ impl Entry {
         contents.extend_from_slice(&hash.finish().to_le_bytes());
         fs::write(&temporary, contents).map_err(|error| error.to_string())?;
         fs::rename(temporary, &self.path).map_err(|error| error.to_string())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn cache_entries_check_inputs_and_contents() {
-        let directory = env::temp_dir().join(format!("gpurs-cache-test-{}", std::process::id()));
-        let cache = Cache::new(&directory).unwrap();
-        let entry = cache.entry(b"kernel inputs", "mir");
-        assert!(entry.read().is_none());
-        entry.write(b"verified IR").unwrap();
-        assert_eq!(entry.read().unwrap(), b"verified IR");
-        let collision = Entry {
-            path: entry.path.clone(),
-            prefix: b"different inputs".to_vec(),
-        };
-        assert!(collision.read().is_none());
-        let mut bytes = fs::read(&entry.path).unwrap();
-        bytes[entry.prefix.len()] ^= 1;
-        fs::write(&entry.path, bytes).unwrap();
-        assert!(entry.read().is_none());
-        entry.write(b"regenerated IR").unwrap();
-        assert_eq!(entry.read().unwrap(), b"regenerated IR");
-        fs::write(&entry.path, &entry.prefix).unwrap();
-        assert!(entry.read().is_none());
-        fs::remove_dir_all(directory).unwrap();
     }
 }

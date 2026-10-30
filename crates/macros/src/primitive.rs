@@ -3,8 +3,8 @@ use proc_macro2::TokenStream as Tokens;
 use quote::quote;
 use serde_json::{Map, Value};
 use syn::{
-    Attribute, Block, Error, Expr, ExprLit, ExprUnary, FnArg, Lit, MetaNameValue, Pat, Path,
-    Result, Signature, Token, UnOp, Visibility,
+    Attribute, Block, Error, Expr, ExprLit, ExprUnary, FnArg, Lit, LitStr, MetaNameValue, Pat,
+    Path, Result, Signature, Token, UnOp, Visibility,
     parse::{ParseStream, Parser},
     punctuated::Punctuated,
     spanned::Spanned,
@@ -87,10 +87,6 @@ fn value(expression: &Expr) -> Result<Value> {
             lit: Lit::Int(number),
             ..
         }) => number.base10_parse::<u64>()?.into(),
-        Expr::Lit(ExprLit {
-            lit: Lit::Bool(flag),
-            ..
-        }) => flag.value.into(),
         Expr::Unary(ExprUnary {
             op: UnOp::Neg(_),
             expr,
@@ -100,6 +96,13 @@ fn value(expression: &Expr) -> Result<Value> {
             None => return Err(Error::new(expr.span(), "expected an integer")),
         },
         Expr::Group(group) => value(&group.expr)?,
+        Expr::Macro(expression) if expression.mac.path.is_ident("concat") => expression
+            .mac
+            .parse_body_with(Punctuated::<LitStr, Token![,]>::parse_terminated)?
+            .iter()
+            .map(LitStr::value)
+            .collect::<String>()
+            .into(),
         Expr::Array(array) => array.elems.iter().map(value).collect::<Result<_>>()?,
         Expr::Call(call) if call.args.len() == 1 => {
             let Expr::Path(function) = &*call.func else {

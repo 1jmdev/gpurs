@@ -1,6 +1,6 @@
 use std::{env, fs, path::PathBuf, process};
 
-use gpurs_artifact::Artifact;
+use gpurs_artifact::{Artifact, Target};
 
 use crate::{
     object,
@@ -13,10 +13,7 @@ pub fn compile(architecture: &str) {
         process::exit(wrapper::run_wrapper());
     }
     println!("cargo::rustc-check-cfg=cfg(gpurs_device)");
-    let version = architecture
-        .strip_prefix("sm_")
-        .map(|version| version.strip_suffix(['a', 'f']).unwrap_or(version));
-    if version.is_none_or(|version| version.parse::<u32>().is_err()) {
+    if architecture.parse::<Target>().is_err() {
         fail(&format!(
             "GPU architecture must look like `sm_89`, `sm_90a`, or `sm_100f`, found `{architecture}`"
         ));
