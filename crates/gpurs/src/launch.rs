@@ -435,8 +435,8 @@ impl<S: Launch> KernelLaunch<'_, S> {
             // SAFETY: this word is exclusively reserved for this submission.
             unsafe { driver::try_fill_async(status.pointer, 0, 4, &stream.raw)? };
             stream.raw.submitted.set(stream.raw.submitted.get() + 1);
-            stream.retain_statuses(slice::from_ref(status));
         }
+        stream.retain_statuses(&sources);
         // SAFETY: the argument block follows the kernel's verified parameter layout, and the
         // recorded accesses keep every referenced allocation alive until the launch completes.
         // The certified entry point is launched only after every precondition held.

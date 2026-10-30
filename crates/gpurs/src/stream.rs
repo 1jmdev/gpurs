@@ -167,12 +167,15 @@ impl Stream {
     }
 
     pub(crate) fn retain_statuses(&self, statuses: &[Rc<Status>]) {
-        self.launched.borrow_mut().extend(
+        let mut launched = self.launched.borrow_mut();
+        launched.extend(
             statuses
                 .iter()
                 .filter(|status| status.observed.get() != Some(0) && !status.reported.get())
                 .cloned(),
         );
+        launched.sort_unstable_by_key(Rc::as_ptr);
+        launched.dedup_by_key(|status| Rc::as_ptr(status));
     }
 
     pub(crate) fn maintain(&self) -> Result<()> {
@@ -180,6 +183,7 @@ impl Stream {
         if !self.submissions.get().is_multiple_of(256) {
             return Ok(());
         }
+        let _context = self.device.context.try_enter()?;
         if self.raw.submitted.get() > self.raw.completed.get() {
             let event = self.raw.try_record()?;
             let statuses = self.launched.take();
