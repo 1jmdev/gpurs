@@ -96,9 +96,7 @@ pub fn kernel(
              })",
         );
     }
-    if configured || extent != Extent::Single {
-        analysis.races();
-    }
+    analysis.races();
 
     let residual: Vec<&Obligation> = analysis
         .obligations

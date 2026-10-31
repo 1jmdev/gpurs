@@ -2,7 +2,7 @@ use proc_macro2::TokenStream as Tokens;
 use quote::{ToTokens, format_ident, quote};
 use syn::{
     Attribute, Error, GenericParam, Ident, ImplItem, ItemFn, ItemImpl, Meta, ReceiverKind, Result,
-    Safety, Signature, parse::Parser, spanned::Spanned, visit::Visit,
+    Safety, Signature, spanned::Spanned, visit::Visit,
 };
 
 use crate::{launcher, references::References};
@@ -18,20 +18,11 @@ pub(crate) fn fast_math(attribute: Tokens) -> Result<bool> {
     }
 }
 
-fn device_attributes(tail: &str, fast_math: bool) -> Tokens {
-    let fast_math = fast_math.then(|| quote!(#[cfg_attr(gpurs_device, gpurs_tool::fast_math)]));
-    quote! {
-        #[cfg_attr(gpurs_device, gpurs_tool::device = #tail)]
-        #fast_math
-    }
-}
-
-pub(crate) fn expand_function(function: ItemFn, fast_math: bool) -> Tokens {
+pub(crate) fn expand_function(function: ItemFn) -> Tokens {
     if let Some(error) = unsupported(&function.sig) {
         return error.to_compile_error();
     }
     let tail = function.sig.ident.to_string();
-    let attributes = device_attributes(&tail, fast_math);
     let type_parameters = launcher::type_parameters(&function.sig.generics);
     let visibility = &function.vis;
     let mut references = References::default();
@@ -52,28 +43,17 @@ pub(crate) fn expand_function(function: ItemFn, fast_math: bool) -> Tokens {
         .iter()
         .filter_map(|(name, ident)| (!references.bindings.contains(name)).then_some(ident));
     quote! {
-        #[allow(rust_analyzer::inactive_code)]
-        #[cfg(gpurs_device)]
-        #attributes
-        #function
-
-        #[cfg(not(gpurs_device))]
         #[allow(clippy::too_many_arguments)]
         #visibility #launcher
 
         #(
-            #[cfg(not(gpurs_device))]
             #[allow(dead_code)]
             use #references as _;
         )*
     }
 }
 
-pub(crate) fn expand_implementation(
-    mut implementation: ItemImpl,
-    fast_math: bool,
-    host_only: bool,
-) -> Tokens {
+pub(crate) fn expand_implementation(mut implementation: ItemImpl, host_only: bool) -> Tokens {
     let self_type = &implementation.self_ty;
     let prefix = match &implementation.trait_ {
         Some((path, _)) => format!("<{} as {}>", text(self_type), text(path)),
@@ -83,14 +63,13 @@ pub(crate) fn expand_implementation(
     let mut launchers = Vec::new();
     for item in &mut implementation.items {
         let ImplItem::Fn(method) = item else { continue };
-        let mut method_fast_math = fast_math;
         let mut error = None;
         method.attrs.retain(|attribute| {
             if !attribute.path().is_ident("gpu") {
                 return true;
             }
             match attribute_fast_math(attribute) {
-                Ok(value) => method_fast_math |= value,
+                Ok(_) => {}
                 Err(failure) => error = Some(failure),
             }
             false
@@ -99,10 +78,6 @@ pub(crate) fn expand_implementation(
             return error.to_compile_error();
         }
         let tail = format!("{prefix}::{}", method.sig.ident);
-        let attributes = device_attributes(&tail, method_fast_math);
-        method.attrs.extend(
-            Parser::parse2(Attribute::parse_outer, attributes).expect("generated attributes parse"),
-        );
         let receiver = method
             .sig
             .receiver()
@@ -163,13 +138,11 @@ pub(crate) fn expand_implementation(
     quote! {
         #implementation
 
-        #[cfg(not(gpurs_device))]
         #[allow(non_camel_case_types, clippy::too_many_arguments)]
         trait #name<#(#trait_parameters),*> {
             #(#declarations)*
         }
 
-        #[cfg(not(gpurs_device))]
         #[allow(clippy::too_many_arguments)]
         impl #impl_generics #name #type_generics for ::gpurs::DeviceValue<#self_type> #where_clause {
             #(#launchers)*

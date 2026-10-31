@@ -229,7 +229,20 @@ impl Engine<'_> {
             }
             (Atom::Quotient(dividend, divisor), direction) => {
                 let mut bounds = Vec::new();
-                for (dividend, left) in self.structural(dividend, direction, depth + 1) {
+                let mut dividends = Vec::new();
+                if direction == Direction::Upper {
+                    for fact in self.facts {
+                        for bound in fact.predicate.bounds() {
+                            if let Some(upper) = bound.add(dividend, 1)
+                                && upper.launch()
+                            {
+                                dividends.push((upper, fact.requirement.clone()));
+                            }
+                        }
+                    }
+                }
+                dividends.extend(self.structural(dividend, direction, depth + 1));
+                for (dividend, left) in dividends {
                     for (divisor, right) in self.structural(divisor, direction.flip(), depth + 1) {
                         bounds.push((
                             Polynomial::quotient(dividend.clone(), divisor),

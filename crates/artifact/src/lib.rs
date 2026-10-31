@@ -108,6 +108,7 @@ pub enum Variable {
     Quotient(Polynomial, Polynomial),
     /// Remainder; division by zero yields zero, as on the device.
     Remainder(Polynomial, Polynomial),
+    ScalarElement(usize, usize, usize),
 }
 
 impl Polynomial {

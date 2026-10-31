@@ -1,16 +1,6 @@
-use std::{
-    env, fs,
-    hash::{DefaultHasher, Hash, Hasher},
-    path::{Path, PathBuf},
-    process::Command,
-    sync::atomic::{AtomicBool, Ordering},
-};
-
 use proc_macro2::{Delimiter, Group, TokenStream as Tokens, TokenTree};
 use quote::quote;
-use syn::{
-    Error, File, ImplItem, Item, Meta, Result, Visibility, parse_quote, visit_mut::VisitMut,
-};
+use syn::{File, ImplItem, Item, Meta, Result, Visibility, parse_quote, visit_mut::VisitMut};
 
 use crate::attribute;
 
@@ -68,7 +58,7 @@ pub(crate) fn expand(mut file: File) -> Result<Tokens> {
         .iter()
         .filter_map(|item| {
             let Item::Macro(item) = item else { return None };
-            (item.mac.path.is_ident("macro_rules") && device_macro(item.mac.tokens.clone()).1)
+            (item.mac.path.is_ident("macro_rules") && device_macro(item.mac.tokens.clone(), true).1)
                 .then(|| item.ident.clone())
                 .flatten()
         })
@@ -82,17 +72,19 @@ pub(crate) fn expand(mut file: File) -> Result<Tokens> {
         })
         .collect::<Vec<_>>();
     for mut item in file.items {
-        if let Item::Macro(item) = &item {
+        if let Item::Macro(item) = &mut item {
             if item
                 .ident
                 .as_ref()
                 .is_some_and(|name| macros.contains(name))
             {
-                let mut item = item.clone();
-                item.attrs
+                let mut definition = item.clone();
+                definition
+                    .attrs
                     .retain(|attribute| !attribute.path().is_ident("macro_export"));
-                item.mac.tokens = device_macro(item.mac.tokens).0;
-                device.push(quote!(#item));
+                definition.mac.tokens = device_macro(definition.mac.tokens, true).0;
+                device.push(quote!(#definition));
+                item.mac.tokens = device_macro(item.mac.tokens.clone(), false).0;
             } else if macros.iter().any(|name| item.mac.path.is_ident(name)) {
                 device.push(quote!(#item));
             }
@@ -119,7 +111,7 @@ pub(crate) fn expand(mut file: File) -> Result<Tokens> {
             });
             device.push(quote! {
                 #(#attributes)*
-                pub(super) use super::#name::__gpurs_device as #name;
+                pub(crate) use super::#name::__gpurs_device as #name;
             });
             if let Some((_, items)) = &mut module.content {
                 let contents = expand(File {
@@ -173,8 +165,7 @@ pub(crate) fn expand(mut file: File) -> Result<Tokens> {
         }
     })
 }
-
-fn device_macro(tokens: Tokens) -> (Tokens, bool) {
+fn device_macro(tokens: Tokens, device: bool) -> (Tokens, bool) {
     let mut output = Tokens::new();
     let mut found = false;
     let mut attribute = false;
@@ -182,7 +173,7 @@ fn device_macro(tokens: Tokens) -> (Tokens, bool) {
         let next_attribute = matches!(&token, TokenTree::Punct(token) if token.as_char() == '#');
         match token {
             TokenTree::Group(group) => {
-                let (mut tokens, nested) = device_macro(group.stream());
+                let (mut tokens, nested) = device_macro(group.stream(), device);
                 found |= nested;
                 if attribute
                     && group.delimiter() == Delimiter::Bracket
@@ -196,7 +187,11 @@ fn device_macro(tokens: Tokens) -> (Tokens, bool) {
                         }
                         _ => Tokens::new(),
                     };
-                    tokens = quote!(::gpurs::__private::device #arguments);
+                    tokens = if device {
+                        quote!(::gpurs::__private::device #arguments)
+                    } else {
+                        quote!(::gpurs::gpu(__gpurs_host))
+                    };
                     found = true;
                 }
                 let mut replacement = Group::new(group.delimiter(), tokens);
@@ -222,7 +217,7 @@ pub(crate) fn device_item(item: Item, fast_math: bool) -> Result<Tokens> {
                 function.attrs.push(parse_quote!(#[gpurs_tool::fast_math]));
                 function.attrs.push(marker("fast_math", ""));
             }
-            function.vis = parse_quote!(pub(super));
+            function.vis = parse_quote!(pub(crate));
             DevicePaths.visit_item_fn_mut(&mut function);
             Ok(quote!(#function))
         }
@@ -269,73 +264,4 @@ pub(crate) fn device_item(item: Item, fast_math: bool) -> Result<Tokens> {
 fn marker(name: &str, value: &str) -> syn::Attribute {
     let text = format!("<!-- gpurs::{name}={value} -->");
     parse_quote!(#[doc = #text])
-}
-
-pub(crate) fn artifact() -> Tokens {
-    static COMPILED: AtomicBool = AtomicBool::new(false);
-    let Some(wrapper) = env::var_os("GPURS_COMPILER_WRAPPER") else {
-        return Tokens::new();
-    };
-    let mut arguments = env::args_os().skip(1).collect::<Vec<_>>();
-    if !arguments
-        .windows(2)
-        .any(|pair| pair[0] == "--crate-type" && pair[1] == "bin")
-    {
-        return Tokens::new();
-    }
-    if env::var_os("GPURS_DEVICE_BUILD").is_some() || COMPILED.swap(true, Ordering::Relaxed) {
-        return Tokens::new();
-    }
-    let result = (|| {
-        let compiler = if arguments.first().is_some_and(|argument| {
-            Path::new(argument)
-                .file_stem()
-                .is_some_and(|name| name == "rustc")
-        }) {
-            arguments.remove(0)
-        } else {
-            env::current_exe()
-                .map_err(|error| error.to_string())?
-                .into_os_string()
-        };
-        if Path::new(&compiler)
-            .file_stem()
-            .is_some_and(|name| name == "rustdoc")
-        {
-            return Ok(Tokens::new());
-        }
-        let mut hash = DefaultHasher::new();
-        arguments.hash(&mut hash);
-        let path = PathBuf::from(env::var_os("GPURS_ARTIFACTS").unwrap())
-            .join(format!("{:016x}.bin", hash.finish()));
-        let output = Command::new(wrapper)
-            .arg(compiler)
-            .args(arguments)
-            .env("GPURS_TARGET_ARTIFACT", &path)
-            .env("GPURS_WRAPPER", "1")
-            .env("GPURS_DEVICE_BUILD", "1")
-            .env("RUSTC_BOOTSTRAP", "1")
-            .env("GLIBC_TUNABLES", "glibc.rtld.optional_static_tls=65536")
-            .output()
-            .map_err(|error| error.to_string())?;
-        let diagnostics = String::from_utf8_lossy(&output.stderr);
-        if !output.status.success() {
-            return Err(diagnostics.into_owned());
-        }
-        eprint!("{diagnostics}");
-        let bytes = fs::read(&path).map_err(|error| error.to_string())?;
-        let length = bytes.len();
-        let bytes = proc_macro2::Literal::byte_string(&bytes);
-        Ok(quote! {
-            #[repr(align(16))]
-            struct __GpursArtifact([u8; #length]);
-            #[used]
-            #[unsafe(no_mangle)]
-            static __gpurs_artifact: __GpursArtifact =
-                __GpursArtifact(*#bytes);
-        })
-    })();
-    result.unwrap_or_else(|message| {
-        Error::new(proc_macro2::Span::call_site(), message).into_compile_error()
-    })
 }

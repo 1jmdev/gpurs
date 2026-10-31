@@ -55,6 +55,7 @@ fn atom(atom: &Atom, names: &Names) -> String {
         Atom::GridDimension(axis) => format!("grid_dim.{}", AXES[*axis]),
         Atom::Length(parameter) => format!("{}.len()", name(*parameter)),
         Atom::Scalar(parameter) => name(*parameter),
+        Atom::ScalarElement(parameter, offset, _) => format!("{}[byte {offset}]", name(*parameter)),
         Atom::Thread(axis) => format!("thread_id.{}", AXES[*axis]),
         Atom::Block(axis) => format!("block_id.{}", AXES[*axis]),
         Atom::Index => "index()".to_owned(),

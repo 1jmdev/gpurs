@@ -16,6 +16,7 @@ pub enum Atom {
     GridDimension(usize),
     Length(usize),
     Scalar(usize),
+    ScalarElement(usize, usize, usize),
     Thread(usize),
     Block(usize),
     Index,
@@ -68,7 +69,8 @@ impl Atom {
             Atom::BlockDimension(_)
             | Atom::GridDimension(_)
             | Atom::Length(_)
-            | Atom::Scalar(_) => true,
+            | Atom::Scalar(_)
+            | Atom::ScalarElement(..) => true,
             Atom::Quotient(dividend, divisor) | Atom::Remainder(dividend, divisor) => {
                 dividend.launch() && divisor.launch()
             }
@@ -229,6 +231,9 @@ impl Polynomial {
                             Atom::GridDimension(axis) => artifact::Variable::GridDimension(*axis),
                             Atom::Length(parameter) => artifact::Variable::Length(*parameter),
                             Atom::Scalar(parameter) => artifact::Variable::Scalar(*parameter),
+                            Atom::ScalarElement(parameter, offset, size) => {
+                                artifact::Variable::ScalarElement(*parameter, *offset, *size)
+                            }
                             Atom::Quotient(dividend, divisor) => artifact::Variable::Quotient(
                                 dividend.artifact(),
                                 divisor.artifact(),

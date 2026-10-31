@@ -15,13 +15,15 @@ pub(crate) const COMPILER_LIBRARY: &str = env!("GPURS_COMPILER_LIBRARY");
 /// Delegates the private compilation to the gpurs compiler library.
 pub(crate) fn run_wrapper() -> i32 {
     let mut arguments: Vec<_> = env::args_os().collect();
+    let original = arguments.clone();
     if env::var_os("GPURS_LIBRARY_VIEW").is_some() {
         return run_library(&arguments);
     }
     let target = env::var("CARGO_PKG_NAME").ok() == env::var("GPURS_PACKAGE").ok()
-        && arguments
+        && (arguments
             .windows(2)
             .any(|pair| pair[0] == "--crate-type" && pair[1] == "bin")
+            || arguments.iter().any(|argument| argument == "--test"))
         && !arguments
             .iter()
             .any(|argument| argument == "build_script_build")
@@ -36,25 +38,37 @@ pub(crate) fn run_wrapper() -> i32 {
             .code()
             .unwrap_or(1);
     }
+    if env::var_os("GPURS_PRECOMPILE").is_some() {
+        use std::hash::{DefaultHasher, Hash, Hasher};
+
+        let mut hash = DefaultHasher::new();
+        original.hash(&mut hash);
+        let output = Path::new(&env::var_os("GPURS_ARTIFACTS").unwrap())
+            .join(format!("{:016x}.bin", hash.finish()));
+        let mut command = Command::new(&original[0]);
+        let status = command
+            .args(&original[1..])
+            .env_remove("GPURS_PRECOMPILE")
+            .env("GPURS_TARGET_ARTIFACT", output)
+            .status()
+            .unwrap_or_else(|error| build::fail(&error.to_string()));
+        if !status.success() {
+            return status.code().unwrap_or(1);
+        }
+        return Command::new(&original[1])
+            .args(&original[2..])
+            .status()
+            .unwrap_or_else(|error| build::fail(&error.to_string()))
+            .code()
+            .unwrap_or(1);
+    }
     {
         let directory = Path::new(COMPILER_LIBRARY)
             .parent()
             .expect("the compiler library has a parent directory")
             .join("metadata");
-        let mut command = Command::new(env::var_os("CARGO").unwrap());
-        let mut metadata = Command::new(env::var_os("CARGO").unwrap());
-        for (name, _) in env::vars_os() {
-            let name = name.to_string_lossy();
-            if (name.starts_with("CARGO_") && name != "CARGO_HOME")
-                || name.starts_with("RUSTC")
-                || name.starts_with("RUSTDOC")
-                || name.starts_with("__CARGO")
-                || name == "RUSTFLAGS"
-            {
-                command.env_remove(&*name);
-                metadata.env_remove(&*name);
-            }
-        }
+        let mut command = cargo();
+        let mut metadata = cargo();
         let manifest = Path::new(&env::var_os("CARGO_MANIFEST_DIR").unwrap()).join("Cargo.toml");
         let output = metadata
             .args([
@@ -76,6 +90,12 @@ pub(crate) fn run_wrapper() -> i32 {
             .iter()
             .find(|package| package["manifest_path"].as_str() == manifest.to_str())
             .expect("the launch package is in cargo metadata");
+        let runtime = metadata["packages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|package| package["name"] == "gpurs")
+            .expect("the kernel runtime is in cargo metadata");
         let dependencies = metadata["resolve"]["nodes"]
             .as_array()
             .unwrap()
@@ -95,6 +115,7 @@ pub(crate) fn run_wrapper() -> i32 {
             })
             .collect();
         command.arg("check");
+        command.args(["--package", runtime["id"].as_str().unwrap()]);
         command.args([
             "--package",
             package["id"].as_str().unwrap(),
@@ -148,6 +169,13 @@ pub(crate) fn run_wrapper() -> i32 {
             .output()
             .unwrap_or_else(|error| build::fail(&error.to_string()));
         if !output.status.success() {
+            for line in output.stdout.split(|byte| *byte == b'\n') {
+                if let Ok(message) = serde_json::from_slice::<serde_json::Value>(line)
+                    && let Some(rendered) = message["message"]["rendered"].as_str()
+                {
+                    eprint!("{rendered}");
+                }
+            }
             build::fail(&String::from_utf8_lossy(&output.stderr));
         }
         let mut libraries = Vec::new();
@@ -173,6 +201,13 @@ pub(crate) fn run_wrapper() -> i32 {
                                 file.to_owned(),
                             ));
                         }
+                        if message["package_id"] == runtime["id"]
+                            && !dependencies
+                                .iter()
+                                .any(|dependency| dependency["pkg"] == runtime["id"])
+                        {
+                            arguments.extend(["--extern".into(), format!("gpurs={file}").into()]);
+                        }
                     }
                     arguments.extend([
                         "-L".into(),
@@ -192,6 +227,22 @@ pub(crate) fn run_wrapper() -> i32 {
         }
     }
     compiler_entry(b"gpurs_compiler_main", &arguments)
+}
+
+pub(crate) fn cargo() -> Command {
+    let mut command = Command::new(env::var_os("CARGO").unwrap());
+    for (name, _) in env::vars_os() {
+        let name = name.to_string_lossy();
+        if (name.starts_with("CARGO_") && name != "CARGO_HOME")
+            || name.starts_with("RUSTC")
+            || name.starts_with("RUSTDOC")
+            || name.starts_with("__CARGO")
+            || name == "RUSTFLAGS"
+        {
+            command.env_remove(&*name);
+        }
+    }
+    command
 }
 
 /// Compiles a crate of the device-view check build. Crates that use gpurs keep their host

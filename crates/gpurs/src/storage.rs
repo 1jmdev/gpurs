@@ -12,6 +12,8 @@ mod sealed {
 /// Padding-free element types for which every bit pattern is valid.
 pub trait BitPattern: Copy + sealed::Sealed {}
 
+pub trait AtomicElement: sealed::Sealed {}
+
 impl<T: BitPattern, const N: usize> sealed::Sealed for [T; N] {}
 impl<T: BitPattern, const N: usize> BitPattern for [T; N] {}
 
@@ -42,6 +44,28 @@ bit_patterns!(
     gpu::memory::Vector2,
     gpu::memory::Vector4,
     gpu::memory::Vector2Wide,
+);
+
+macro_rules! atomic_elements {
+    ($($element:ty),* $(,)?) => {
+        $(
+            impl sealed::Sealed for $element {}
+            impl AtomicElement for $element {}
+        )*
+    };
+}
+
+atomic_elements!(
+    gpu::atomic::AtomicU32,
+    gpu::atomic::AtomicU64,
+    gpu::atomic::AtomicUsize,
+    gpu::atomic::AtomicI32,
+    gpu::atomic::AtomicI64,
+    gpu::atomic::AtomicIsize,
+    gpu::atomic::AtomicF32,
+    gpu::atomic::AtomicF64,
+    gpu::atomic::AtomicHalf,
+    gpu::atomic::AtomicBFloat16,
 );
 
 /// Initialized shared bytes. Typed handles share allocation dependency and alias checks.
@@ -91,6 +115,15 @@ impl Gpu {
 }
 
 impl Storage {
+    pub fn try_atomic_view<T: AtomicElement>(&self, bytes: Range<usize>) -> Result<Buffer<T>> {
+        self.bytes.try_cast_range(bytes)
+    }
+
+    pub fn atomic_view<T: AtomicElement>(&self, bytes: Range<usize>) -> Buffer<T> {
+        self.try_atomic_view(bytes)
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
     pub fn len(&self) -> usize {
         self.bytes.len()
     }
@@ -126,7 +159,7 @@ impl<T: BitPattern> Buffer<T> {
         self.try_cast().unwrap_or_else(|error| panic!("{error}"))
     }
 
-    pub(crate) fn try_cast_range<U: BitPattern>(&self, bytes: Range<usize>) -> Result<Buffer<U>> {
+    pub(crate) fn try_cast_range<U>(&self, bytes: Range<usize>) -> Result<Buffer<U>> {
         if bytes.start > bytes.end || bytes.end > self.len() * size_of::<T>() {
             return Err(Error::InvalidOperation(
                 "typed view exceeds its source byte range".to_owned(),

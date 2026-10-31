@@ -1,8 +1,8 @@
 use std::{ops::Range, rc::Rc, slice};
 
 use crate::{
-    Buffer, DeviceAddress, DeviceSlice, Error, Gpu, Result, buffer::Span, gpu::Strided,
-    reference::sealed::Reference, tracking::Allocation,
+    Buffer, DeviceAddress, DeviceScatter, DeviceSlice, DeviceSliceMut, Error, Gpu, Result,
+    buffer::Span, gpu::Strided, reference::sealed::Reference, tracking::Allocation,
 };
 
 /// A retained strided descriptor. Zero strides broadcast; dimensions must be nonempty.
@@ -13,6 +13,50 @@ pub struct DeviceStrided<T, const N: usize> {
 }
 
 impl Gpu {
+    pub fn try_strided_mut<T: Copy, const N: usize>(
+        &self,
+        target: &mut impl DeviceSliceMut<T>,
+        shape: [usize; N],
+        strides: [usize; N],
+        offset: usize,
+    ) -> Result<DeviceScatter<T>> {
+        let length = shape.iter().try_fold(1usize, |length, &size| {
+            (size > 0).then(|| length.checked_mul(size)).flatten()
+        });
+        let indices = length.and_then(|length| {
+            (0..length)
+                .map(|mut index| {
+                    shape
+                        .iter()
+                        .zip(strides)
+                        .rev()
+                        .try_fold(offset, |offset, (&size, stride)| {
+                            let coordinate = index % size;
+                            index /= size;
+                            offset.checked_add(coordinate.checked_mul(stride)?)
+                        })
+                })
+                .collect::<Option<Vec<_>>>()
+        });
+        self.try_scatter(
+            target,
+            &indices.ok_or_else(|| {
+                Error::InvalidOperation("strided view dimensions overflow or are empty".to_owned())
+            })?,
+        )
+    }
+
+    pub fn strided_mut<T: Copy, const N: usize>(
+        &self,
+        target: &mut impl DeviceSliceMut<T>,
+        shape: [usize; N],
+        strides: [usize; N],
+        offset: usize,
+    ) -> DeviceScatter<T> {
+        self.try_strided_mut(target, shape, strides, offset)
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
     pub fn try_strided<T: Copy, const N: usize>(
         &self,
         source: &impl DeviceSlice<T>,

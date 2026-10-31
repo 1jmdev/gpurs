@@ -4,9 +4,8 @@
 //! gpurs_build::compile("sm_89");
 //! ```
 //!
-//! `compile` configures `#[gpu]` to invoke the gpurs compiler for the selected executable.
-//! One private rustc session discovers reachable launches. Verification and lowered IR are
-//! cached per kernel; cached CUBINs and launch metadata are embedded in that executable.
+//! `compile` discovers launches in the package's targets and their dependencies, then embeds
+//! their kernels automatically. Verification, lowered IR, and native images are cached.
 
 mod build;
 mod object;

@@ -1,4 +1,8 @@
-use std::{env, fs, path::PathBuf, process};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+    process,
+};
 
 use gpurs_artifact::{Artifact, Target};
 
@@ -19,6 +23,12 @@ pub fn compile_architectures(architectures: &[&str]) {
         process::exit(wrapper::run_wrapper());
     }
     println!("cargo::rustc-check-cfg=cfg(gpurs_device)");
+    if env::var_os("GPURS_PRECOMPILE").is_some()
+        || env::var_os("GPURS_DEVICE_BUILD").is_some()
+        || env::var_os("GPURS_LIBRARY_VIEW").is_some()
+    {
+        return;
+    }
     if architectures.is_empty() {
         fail("at least one GPU architecture is required");
     }
@@ -34,23 +44,10 @@ pub fn compile_architectures(architectures: &[&str]) {
     let artifacts = directory.join("artifacts");
     fs::create_dir_all(&artifacts).unwrap_or_else(|error| fail(&error.to_string()));
     let object = directory.join("gpurs_artifact.o");
-    object::write_object(&Artifact::default().encode(), &object);
-    println!("cargo::rustc-link-arg={}", object.display());
     let compiler = fs::metadata(COMPILER_LIBRARY).unwrap();
-    for (name, value) in [
-        (
-            "GPURS_COMPILER_WRAPPER",
-            env::current_exe().unwrap().display().to_string(),
-        ),
+    let configuration = [
         ("GPURS_ARTIFACTS", artifacts.display().to_string()),
         ("GPURS_PACKAGE", env::var("CARGO_PKG_NAME").unwrap()),
-        (
-            "GPURS_RUNTIME_MANIFEST",
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../gpurs/Cargo.toml")
-                .display()
-                .to_string(),
-        ),
         (
             "GPURS_COMPILER_ID",
             format!("{:?}:{}", compiler.modified().unwrap(), compiler.len()),
@@ -65,9 +62,19 @@ pub fn compile_architectures(architectures: &[&str]) {
             }
             .to_owned(),
         ),
-    ] {
-        println!("cargo::rustc-env={name}={value}");
+    ];
+    precompile(&directory, &artifacts, &configuration);
+    let mut artifact = Artifact::default();
+    for entry in fs::read_dir(&artifacts).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_some_and(|extension| extension == "bin") {
+            let bytes = fs::read(path).unwrap();
+            let mut compiled = Artifact::decode(&bytes[8..]).unwrap();
+            merge(&mut artifact, &mut compiled);
+        }
     }
+    object::write_object(&artifact.encode(), &object);
+    println!("cargo::rustc-link-arg={}", object.display());
     println!("cargo::rerun-if-changed={COMPILER_LIBRARY}");
     for name in [
         "CUDA_PATH",
@@ -76,6 +83,115 @@ pub fn compile_architectures(architectures: &[&str]) {
         "GPURS_INSTRUMENTED",
     ] {
         println!("cargo::rerun-if-env-changed={name}");
+    }
+}
+
+fn merge(target: &mut Artifact, source: &mut Artifact) {
+    target.compiler.clone_from(&source.compiler);
+    target.architecture.clone_from(&source.architecture);
+    target.modules.append(&mut source.modules);
+    for descriptor in source.types.drain(..) {
+        if !target.types.contains(&descriptor) {
+            target.types.push(descriptor);
+        }
+    }
+    if target.alternatives.is_empty() {
+        target.alternatives = std::mem::take(&mut source.alternatives);
+    } else {
+        for (target, source) in target.alternatives.iter_mut().zip(&mut source.alternatives) {
+            merge(target, source);
+        }
+    }
+}
+
+fn precompile(directory: &Path, artifacts: &Path, configuration: &[(&str, String)]) {
+    for entry in fs::read_dir(artifacts).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_some_and(|extension| extension == "bin") {
+            fs::remove_file(path).unwrap();
+        }
+    }
+    let output = wrapper::cargo()
+        .args(["metadata", "--format-version=1"])
+        .output()
+        .unwrap_or_else(|error| fail(&error.to_string()));
+    if !output.status.success() {
+        fail(&String::from_utf8_lossy(&output.stderr));
+    }
+    let metadata: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let packages = metadata["packages"].as_array().unwrap();
+    for package in packages
+        .iter()
+        .filter(|package| package["source"].is_null())
+    {
+        println!(
+            "cargo::rerun-if-changed={}",
+            package["manifest_path"].as_str().unwrap()
+        );
+        for target in package["targets"].as_array().unwrap() {
+            if target["kind"][0] != "custom-build" {
+                println!(
+                    "cargo::rerun-if-changed={}",
+                    Path::new(target["src_path"].as_str().unwrap())
+                        .parent()
+                        .unwrap()
+                        .display()
+                );
+            }
+        }
+    }
+    let package = packages
+        .iter()
+        .find(|package| package["name"] == env::var("CARGO_PKG_NAME").unwrap())
+        .unwrap();
+    let features = package["features"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .filter(|name| {
+            env::var_os(format!(
+                "CARGO_FEATURE_{}",
+                name.to_uppercase().replace('-', "_")
+            ))
+            .is_some()
+        })
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(",");
+    let status = wrapper::cargo()
+        .args(["clean", "--quiet", "--package"])
+        .arg(env::var_os("CARGO_PKG_NAME").unwrap())
+        .arg("--target-dir")
+        .arg(directory.join("discovery"))
+        .status()
+        .unwrap_or_else(|error| fail(&error.to_string()));
+    if !status.success() {
+        fail("could not refresh kernel discovery");
+    }
+    let output = wrapper::cargo()
+        .args(["check", "--quiet", "--all-targets", "--package"])
+        .arg(env::var_os("CARGO_PKG_NAME").unwrap())
+        .args([
+            "--no-default-features",
+            "--features",
+            &features,
+            "--target-dir",
+        ])
+        .arg(directory.join("discovery"))
+        .envs(configuration.iter().map(|(name, value)| (name, value)))
+        .env("RUSTC_WRAPPER", env::current_exe().unwrap())
+        .env("GPURS_WRAPPER", "1")
+        .env("GPURS_PRECOMPILE", "1")
+        .env("GPURS_DEVICE_BUILD", "1")
+        .env("RUSTC_BOOTSTRAP", "1")
+        .env("GLIBC_TUNABLES", "glibc.rtld.optional_static_tls=65536")
+        .output()
+        .unwrap_or_else(|error| fail(&error.to_string()));
+    if !output.status.success() {
+        fail(&String::from_utf8_lossy(&output.stderr));
+    }
+    for path in ["Cargo.toml", "src", "examples", "tests"] {
+        println!("cargo::rerun-if-changed={path}");
     }
 }
 

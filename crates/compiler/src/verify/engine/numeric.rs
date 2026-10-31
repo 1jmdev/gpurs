@@ -26,6 +26,7 @@ impl Engine<'_> {
             Atom::GridDimension(axis) => (1, if *axis == 0 { (1 << 31) - 1 } else { 65535 }),
             Atom::Length(_) => (0, i64::MAX as i128),
             Atom::Scalar(parameter) => (0, (1i128 << self.scalars[*parameter]) - 1),
+            Atom::ScalarElement(_, _, size) => (0, (1i128 << (size * 8)) - 1),
             Atom::Quotient(dividend, divisor) => {
                 let low = self.numeric(dividend, Direction::Lower)?;
                 let high = self.numeric(dividend, Direction::Upper)?;

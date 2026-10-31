@@ -30,6 +30,8 @@ fn main() {
 
 The executable contains kernels compiled for the selected architecture. Choose one compatible with the GPU that will run it.
 
+Kernels can live in library crates and be re-exported from `lib.rs` like ordinary functions. Executables import and call their launchers directly; the build integration discovers and embeds them automatically, without an embedding macro. Kernel libraries do not need their own build script.
+
 ## A GPU pipeline
 
 A `#[gpu]` function can call other GPU functions. On the host, its generated launcher takes a stream followed by the function's arguments. This pipeline applies two operations to a buffer without copying it back to the host between launches:

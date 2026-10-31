@@ -126,6 +126,32 @@ impl<'a, 'sess> Analysis<'a, 'sess> {
                 {
                     Value::integer(Polynomial::atom(Atom::Scalar(index)), 0)
                 }
+                Parameter::Value(_)
+                    if matches!(stable::rigid(parameter.layout.ty), RigidTy::Array(..)) =>
+                {
+                    Value {
+                        fields: (0..parameter.layout.count())
+                            .map(|field| {
+                                let shape = parameter.layout.field(self.sess, field);
+                                if matches!(stable::rigid(shape.ty), RigidTy::Uint(_))
+                                    && shape.size().bytes() <= 8
+                                {
+                                    Value::integer(
+                                        Polynomial::atom(Atom::ScalarElement(
+                                            index,
+                                            parameter.layout.offset(field).bytes(),
+                                            shape.size().bytes(),
+                                        )),
+                                        0,
+                                    )
+                                } else {
+                                    Value::default()
+                                }
+                            })
+                            .collect(),
+                        ..Value::default()
+                    }
+                }
                 Parameter::Value(_) => Value::default(),
             };
         }

@@ -324,7 +324,15 @@ impl<S: Launch> KernelLaunch<'_, S> {
                 Variable::BlockDimension(axis) => config.block[axis] as i128,
                 Variable::GridDimension(axis) => config.grid[axis] as i128,
                 Variable::Length(parameter) => self.lengths[parameter] as i128,
-                Variable::Scalar(parameter) => self.scalar(parameter) as i128,
+                Variable::Scalar(parameter) => {
+                    let Parameter::Value(value) = metadata.parameters[parameter] else {
+                        unreachable!("scalar launch variables are value parameters")
+                    };
+                    self.scalar(parameter, 0, value.size.min(8) as usize) as i128
+                }
+                Variable::ScalarElement(parameter, offset, size) => {
+                    self.scalar(parameter, offset, size) as i128
+                }
                 Variable::Quotient(..) | Variable::Remainder(..) => {
                     unreachable!("quotients are evaluated by the polynomial")
                 }
@@ -468,12 +476,9 @@ impl<S: Launch> KernelLaunch<'_, S> {
     }
 
     /// The integer scalar parameter at `parameter`, zero-extended from its size.
-    fn scalar(&self, parameter: usize) -> u64 {
-        let offset = self.kernel.offsets[parameter] as usize;
-        let Parameter::Value(value) = self.kernel.metadata.parameters[parameter] else {
-            unreachable!("scalar launch variables are value parameters")
-        };
-        (0..value.size.min(8) as usize).fold(0, |word, byte| {
+    fn scalar(&self, parameter: usize, offset: usize, size: usize) -> u64 {
+        let offset = self.kernel.offsets[parameter] as usize + offset;
+        (0..size).fold(0, |word, byte| {
             // SAFETY: integer scalar parameters are fully initialized.
             word | (unsafe { self.arguments[offset + byte].assume_init() } as u64) << (8 * byte)
         })

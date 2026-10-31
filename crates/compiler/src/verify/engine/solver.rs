@@ -217,26 +217,23 @@ impl Engine<'_> {
                 return Some(clean(union(requirement, &decided)));
             }
         }
-        // The bounds of the most completely eliminated forms are the tightest. Any of them
-        // suffices together with its own requirement, so the host clauses are the distribution
+        // Any bound suffices together with its own requirement, so the host clauses are the distribution
         // of `⋁ (bound ≥ 0 ∧ requirement)` into conjunctive form.
         let usable = |(bound, requirement, _): &&(Polynomial, Requirement, usize)| {
             bound.value().is_none() && !tainted(requirement)
         };
-        let level = candidates
-            .iter()
-            .filter(usable)
-            .map(|(_, _, count)| *count)
-            .min()?;
         let mut options: Vec<_> = candidates
             .iter()
             .filter(usable)
-            .filter(|(_, requirement, count)| *count == level && requirement.len() <= 2)
+            .filter(|(_, requirement, _)| requirement.len() <= 2)
             .map(|(bound, requirement, _)| (bound.clone(), requirement.clone()))
             .collect();
         options.sort_by_key(|(bound, requirement)| (bound.0.len(), requirement.len()));
         options.dedup_by(|left, right| left.0 == right.0);
         options.truncate(OPTIONS);
+        if options.is_empty() {
+            return None;
+        }
         let mut clauses = vec![BTreeSet::new()];
         for (bound, requirement) in &options {
             let alternatives: Vec<BTreeSet<Predicate>> = [BTreeSet::from([Predicate::new(

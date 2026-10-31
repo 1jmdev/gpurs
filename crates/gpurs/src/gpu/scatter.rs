@@ -14,6 +14,25 @@ impl<T: Copy> Scatter<T> {
         self.len
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    #[primitive(
+        lowering = Body,
+        architecture = 0,
+        convergence = None,
+        memory = Encapsulated,
+        proof = Varying
+    )]
+    pub fn load(&self, index: usize) -> Option<T> {
+        if index < self.len {
+            unsafe { Some(self.target.read(self.indices.read(index))) }
+        } else {
+            None
+        }
+    }
+
     #[primitive(
         lowering = Body,
         architecture = 0,
@@ -22,13 +41,10 @@ impl<T: Copy> Scatter<T> {
         proof = Varying
     )]
     pub fn store(&self, index: usize, value: T) {
-        let quotient = super::strided::divide(index as u64, self.len as u64) as usize;
-        unsafe {
-            self.target.write(
-                self.indices
-                    .read(index.wrapping_sub(quotient.wrapping_mul(self.len))),
-                value,
-            );
+        if index < self.len {
+            unsafe {
+                self.target.write(self.indices.read(index), value);
+            }
         }
     }
 }

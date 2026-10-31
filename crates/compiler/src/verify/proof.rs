@@ -157,6 +157,37 @@ impl Proofs<'_> {
         if expression.value().is_some() || self.pinned(expression) {
             return Some(BTreeSet::new());
         }
+        for (term, coefficient) in &expression.0 {
+            let Some(Atom::Remainder(value, divisor)) = term.iter().find(|atom| !atom.launch())
+            else {
+                continue;
+            };
+            if !divisor.launch() {
+                continue;
+            }
+            let remainder = Polynomial::remainder((**value).clone(), (**divisor).clone());
+            let quotient = Polynomial::quotient((**value).clone(), (**divisor).clone());
+            let scale = Polynomial::monomial(
+                term.iter().filter(|atom| atom.launch()).cloned().collect(),
+                *coefficient,
+            );
+            let rest = expression.add(&remainder.multiply(&scale)?, -1)?;
+            let Some(pitch) = divide(&rest, &quotient) else {
+                continue;
+            };
+            if !pitch.launch() {
+                continue;
+            }
+            let mut proposed = clauses.clone();
+            if less_equal(&Polynomial::constant(1), divisor, &mut proposed)
+                && less_equal(&Polynomial::constant(1), &scale, &mut proposed)
+                && less_equal(&divisor.multiply(&scale)?, &pitch, &mut proposed)
+                && let Some(covered) = self.decompose(value, &mut proposed, depth + 1)
+            {
+                *clauses = proposed;
+                return Some(covered);
+            }
+        }
         if expression.0.len() == 1 {
             let (term, coefficient) = expression.0.first_key_value().unwrap();
             let varying: Vec<_> = term.iter().filter(|atom| !atom.launch()).collect();
