@@ -326,15 +326,25 @@ impl Analysis<'_, '_> {
                     && !postdominates(collective, block)
                     && reachable(&self.successors, block, collective, &reconvergence)
                 {
-                    self.sess.error_help(
+                    let context = self
+                        .contexts
+                        .iter()
+                        .rfind(|context| context.offset <= block)
+                        .unwrap();
+                    self.sess.error_notes(
                         span,
                         format!(
                             "threads may reach this GPU collective on different control-flow \
                              paths in `{}`",
                             self.kernel.name()
                         ),
-                        "move block barriers outside thread-dependent branches; warp collectives \
-                         require every lane of the warp to participate",
+                        &[format!(
+                            "controlling branch is bb{} in `{}`; block collectives require a \
+                             block-uniform branch, and warp collectives require a warp-uniform \
+                             branch",
+                            block - context.offset,
+                            context.instance.name(),
+                        )],
                     );
                 }
             }
@@ -364,11 +374,20 @@ pub fn reachable(
 
 pub fn normal_successors(body: &Body, block: usize) -> Vec<usize> {
     let terminator = &body.blocks[block].terminator;
-    match &terminator.kind {
+    let successors = match &terminator.kind {
         TerminatorKind::Call { target, .. } => target.iter().copied().collect(),
         TerminatorKind::Assert { target, .. } | TerminatorKind::Drop { target, .. } => {
             vec![*target]
         }
         _ => terminator.successors(),
-    }
+    };
+    successors
+        .into_iter()
+        .filter(|&successor| {
+            !matches!(
+                body.blocks[successor].terminator.kind,
+                TerminatorKind::Unreachable
+            )
+        })
+        .collect()
 }

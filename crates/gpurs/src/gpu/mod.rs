@@ -50,7 +50,10 @@ pub mod warp;
 pub use float8::{E4M3, E4M3x2, E5M2, E5M2x2, Tf32};
 pub use float16::{BFloat16, BFloat162, Half, Half2};
 pub use indexed::Indexed;
+pub use memory::load_or;
 pub use scatter::Scatter;
 pub use shared::{SharedArray, SharedRegion, dynamic_shared, shared_array};
 pub use strided::Strided;
-pub use thread::{Block, Dim3, block_dim, block_id, grid_dim, index, sync_block, thread_id};
+pub use thread::{
+    Block, Dim3, block_dim, block_id, block_uniform, grid_dim, index, sync_block, thread_id,
+};

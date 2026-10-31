@@ -45,7 +45,7 @@ pub struct Analysis<'a, 'sess> {
     /// The variable table changed during this round, so states derived from it are stale.
     pub changed: bool,
     /// The analysis gave up; nothing it established may be trusted.
-    pub failed: bool,
+    pub failure: Option<String>,
     pub span: Span,
     pub names: Names,
     /// Callee analyses outside the collecting pass, by context and entry state; valid while
@@ -88,7 +88,7 @@ impl<'a, 'sess> Analysis<'a, 'sess> {
             collect: false,
             quiet: 0,
             changed: false,
-            failed: false,
+            failure: None,
             span,
             memo: FxHashMap::default(),
             names: Names(
@@ -165,7 +165,9 @@ impl<'a, 'sess> Analysis<'a, 'sess> {
         let result = self
             .function(self.kernel, context, state)
             .map(|(state, _)| state);
-        self.collective_control();
+        if self.failure.is_none() {
+            self.collective_control();
+        }
         result
     }
 
@@ -269,8 +271,6 @@ impl<'a, 'sess> Analysis<'a, 'sess> {
             return;
         }
         info.updates += 1;
-        self.changed = true;
-        self.memo.clear();
         if info.updates > 3 {
             if info.lower.value() == Some(0) && info.upper.is_none() {
                 return;
@@ -283,6 +283,8 @@ impl<'a, 'sess> Analysis<'a, 'sess> {
             info.upper = upper;
             info.requirement = requirement;
         }
+        self.changed = true;
+        self.memo.clear();
     }
 
     /// Records a launch requirement of race freedom or initialization.

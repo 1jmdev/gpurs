@@ -1,8 +1,10 @@
-use super::{Analysis, Origin, Pointer, State, Value, state};
+use gpurs_artifact::{Access, Parameter};
+
+use super::{Analysis, Origin, Pointer, Region, State, Value, state};
 use crate::{
     stable,
     stable::{Operand, Place, ProjectionElem, RigidTy, Ty},
-    verify::symbolic::Polynomial,
+    verify::symbolic::{Atom, Polynomial},
 };
 
 /// Where a place lives.
@@ -137,7 +139,25 @@ impl Analysis<'_, '_> {
             Location::Slot(slot, path) => state::get(&state.slots[slot], &path),
             Location::Memory(origin) => {
                 self.access(&origin, false, false, state);
-                let mut value = Value::varying(2);
+                let mut value = Value::varying(match origin.region {
+                    Region::Parameter(parameter)
+                        if variance == 0
+                            && matches!(
+                                self.parameters[parameter].metadata,
+                                Parameter::Slice {
+                                    access: Access::Read
+                                } | Parameter::Reference {
+                                    access: Access::Read
+                                }
+                            )
+                            && origin.index.as_ref().is_some_and(|index| {
+                                index.0.keys().flatten().all(Atom::block_uniform)
+                            }) =>
+                    {
+                        0
+                    }
+                    _ => 2,
+                });
                 if matches!(
                     stable::rigid(self.place_type(place)),
                     RigidTy::Ref(..) | RigidTy::RawPtr(..)

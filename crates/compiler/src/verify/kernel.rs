@@ -96,14 +96,16 @@ pub fn kernel(
              })",
         );
     }
-    analysis.races();
+    if analysis.failure.is_none() {
+        analysis.races();
+    }
 
     let residual: Vec<&Obligation> = analysis
         .obligations
         .iter()
         .filter(|obligation| obligation.verdict.is_none() && obligation.kind != Kind::Arithmetic)
         .collect();
-    let certified = !analysis.failed && residual.is_empty();
+    let certified = analysis.failure.is_none() && residual.is_empty();
     if effects.tensor && !certified {
         sess.error_help(
             span,

@@ -56,13 +56,13 @@ pub(super) fn report(analysis: &Analysis<'_, '_>, residual: &[&Obligation]) -> V
         ),
     };
     let mut warnings = Vec::new();
-    if analysis.failed {
+    if let Some(failure) = &analysis.failure {
         warnings.push(Warning {
             function: kernel.clone(),
             block: None,
             statement: None,
             message: format!("the safety analysis of `{kernel}` did not converge"),
-            notes: vec![consequence.clone()],
+            notes: vec![failure.clone(), consequence.clone()],
         });
     }
     for obligation in residual {
@@ -140,6 +140,9 @@ pub(super) fn summary(
             "instrumented"
         }
     );
+    if let Some(failure) = &analysis.failure {
+        text.push_str(&format!("  analysis limit: {failure}\n"));
+    }
     for clause in preconditions {
         text.push_str(&format!(
             "  requires {}  ({})\n",

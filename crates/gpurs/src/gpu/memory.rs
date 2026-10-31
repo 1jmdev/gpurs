@@ -6,7 +6,7 @@
 //! DeviceAddress. Cache hints do not synchronize, order, or make races valid. ReadOnly uses
 //! the noncoherent cache: data must stay immutable throughout the kernel, including aliases.
 //!
-//! All transfers are unsafe: retain storage on the correct GPU and register queued dependency
+//! Raw transfers are unsafe: retain storage on the correct GPU and register queued dependency
 //! ranges, respect vector alignment/bounds, initialize every loaded component, and ensure writes
 //! have exclusive ownership per lane or external synchronization. No overlapping non-atomic
 //! writes or reads concurrent with writes are permitted. Stores initialize every component.
@@ -14,6 +14,22 @@
 use gpurs_macros::primitive;
 
 use crate::DeviceAddress;
+
+/// Reads an element when its index is in bounds, otherwise returning `default`.
+#[primitive(
+    lowering = Body,
+    architecture = 0,
+    convergence = None,
+    memory = ReadReachable(0),
+    proof = Varying
+)]
+pub fn load_or<T: Copy>(input: &[T], index: usize, default: T) -> T {
+    if index < input.len() {
+        input[index]
+    } else {
+        default
+    }
+}
 
 #[repr(C, align(8))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

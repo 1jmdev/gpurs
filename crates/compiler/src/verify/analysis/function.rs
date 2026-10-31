@@ -34,7 +34,7 @@ impl Analysis<'_, '_> {
         let count = body.blocks.len();
         let collect = std::mem::replace(&mut self.collect, false);
         let mut states = Vec::new();
-        for _ in 0..ROUNDS {
+        for round in 0..ROUNDS {
             let changed = std::mem::replace(&mut self.changed, false);
             states = vec![None; count];
             states[0] = Some(entry.clone());
@@ -43,7 +43,10 @@ impl Analysis<'_, '_> {
             while let Some(block) = pending.pop_front() {
                 visits[block] += 1;
                 if visits[block] > VISITS {
-                    self.failed = true;
+                    self.failure = Some(format!(
+                        "exceeded {VISITS} visits to bb{block} in `{}`",
+                        instance.name()
+                    ));
                     break;
                 }
                 let mut state = states[block].clone().unwrap();
@@ -64,11 +67,21 @@ impl Analysis<'_, '_> {
             }
             let stable = !self.changed;
             self.changed |= changed;
-            if stable || self.failed {
+            if stable || self.failure.is_some() {
                 break;
+            }
+            if round + 1 == ROUNDS {
+                self.failure = Some(format!(
+                    "exceeded {ROUNDS} fixpoint rounds in `{}`",
+                    instance.name()
+                ));
             }
         }
         self.collect = collect;
+        if self.failure.is_some() {
+            self.frames.pop();
+            return None;
+        }
         let mut exit = None;
         let mut exits = vec![None; count];
         for block in 0..count {
@@ -78,7 +91,25 @@ impl Analysis<'_, '_> {
             if !self.block(block, &mut state) {
                 continue;
             }
-            self.successors(block, &state);
+            let successors = self.successors(block, &state);
+            if self.collect
+                && self.quiet == 0
+                && matches!(
+                    body.blocks[block].terminator.kind,
+                    TerminatorKind::SwitchInt { .. }
+                )
+            {
+                self.successors[self.contexts[context].offset + block] = successors
+                    .into_iter()
+                    .filter(|(successor, _)| {
+                        !matches!(
+                            body.blocks[*successor].terminator.kind,
+                            TerminatorKind::Unreachable
+                        )
+                    })
+                    .map(|(successor, _)| self.contexts[context].offset + successor)
+                    .collect();
+            }
             if matches!(body.blocks[block].terminator.kind, TerminatorKind::Return) {
                 self.merge(&mut exit, state.clone(), count);
             }

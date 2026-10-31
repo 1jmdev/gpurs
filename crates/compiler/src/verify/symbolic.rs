@@ -63,6 +63,18 @@ pub struct Fact {
 }
 
 impl Atom {
+    pub fn block_uniform(&self) -> bool {
+        match self {
+            Atom::Block(_) => true,
+            Atom::Quotient(dividend, divisor) | Atom::Remainder(dividend, divisor) => {
+                [dividend, divisor]
+                    .iter()
+                    .all(|value| value.0.keys().flatten().all(Atom::block_uniform))
+            }
+            _ => self.launch(),
+        }
+    }
+
     /// Whether the host knows the value before submission.
     pub fn launch(&self) -> bool {
         match self {

@@ -66,6 +66,27 @@ pub fn index() -> usize;
 )]
 pub fn sync_block();
 
+/// Broadcasts the value supplied by thread `(0, 0, 0)` to every thread in the block.
+/// Every thread must participate, including when called repeatedly inside a loop.
+#[primitive(
+    lowering = Body,
+    architecture = 20,
+    convergence = Block,
+    memory = Encapsulated,
+    proof = Uniform
+)]
+pub fn block_uniform<T: Copy>(value: T) -> T {
+    let mut shared = super::shared_array::<T, 1>();
+    let thread = thread_id();
+    if thread.x == 0 && thread.y == 0 && thread.z == 0 {
+        shared[0] = value;
+    }
+    sync_block();
+    let result = shared[0];
+    sync_block();
+    result
+}
+
 /// Proof that every block has `THREADS` threads along x and one along y and z. The host checks
 /// the launch geometry against it before every launch.
 #[derive(Clone, Copy, Debug)]
