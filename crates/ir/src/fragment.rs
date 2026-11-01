@@ -14,7 +14,8 @@ use crate::{
 
 impl Module {
     /// The module as a [`Fragment`]. Internal globals and functions are named by their
-    /// contents, so identical definitions, here or in other kernels, share one symbol.
+    /// contents, so identical definitions, here or in other kernels, share one symbol;
+    /// external globals keep their names.
     pub fn fragment(&self) -> Fragment {
         let mut names = HashMap::new();
         let mut classes = HashMap::<String, usize>::new();
@@ -31,18 +32,18 @@ impl Module {
                 } else {
                     "global"
                 };
-                let definition = if global.external {
-                    format!(
-                        "= external {space}{kind} {}, align {}",
-                        global.initializer.ty, global.align
-                    )
-                } else {
-                    format!(
-                        "= internal {space}{kind} {}, align {}",
-                        Typed(&global.initializer),
-                        global.align
-                    )
-                };
+                if global.external {
+                    let text = format!(
+                        "@{} = external {space}{kind} {}, align {}\n",
+                        global.name, global.initializer.ty, global.align
+                    );
+                    return (global.name.clone(), text);
+                }
+                let definition = format!(
+                    "= internal {space}{kind} {}, align {}",
+                    Typed(&global.initializer),
+                    global.align
+                );
                 // Distinct storage with equal definitions stays distinct by its ordinal.
                 let ordinal = classes.entry(definition.clone()).or_default();
                 let name = format!(
