@@ -72,7 +72,9 @@ pub fn compile_architectures(architectures: &[&str]) {
             }
             .to_owned(),
         ),
+        ("GPURS_ARTIFACTS", artifacts.display().to_string()),
     ];
+    // Packages share one discovery per profile; a new artifact directory recompiles into it.
     let identity = configuration
         .iter()
         .map(|(_, value)| value.clone())
@@ -84,11 +86,10 @@ pub fn compile_architectures(architectures: &[&str]) {
         .join("\n");
     configuration.extend([
         ("GPURS_CONFIGURATION", content_hash(&identity)),
-        ("GPURS_ARTIFACTS", artifacts.display().to_string()),
         ("GPURS_CACHE", cache.display().to_string()),
         ("GPURS_PACKAGE", env::var("CARGO_PKG_NAME").unwrap()),
     ]);
-    let sources = precompile(&directory, compiler, &configuration);
+    let sources = precompile(compiler, &configuration);
     let mut paths: Vec<_> = fs::read_dir(&artifacts)
         .unwrap()
         .map(|entry| entry.unwrap().path())
@@ -137,11 +138,7 @@ pub fn compile_architectures(architectures: &[&str]) {
 
 /// Lowers the kernels of every changed target of the package, returning the identities of
 /// the package's crate roots.
-fn precompile(
-    directory: &Path,
-    compiler: &Path,
-    configuration: &[(&str, String)],
-) -> HashSet<String> {
+fn precompile(compiler: &Path, configuration: &[(&str, String)]) -> HashSet<String> {
     let output = wrapper::cargo()
         .args(["metadata", "--format-version=1"])
         .output()
@@ -238,7 +235,7 @@ fn precompile(
         .args(["--no-default-features", "--features"])
         .arg(features.join(","))
         .arg("--target-dir")
-        .arg(directory.join("discovery"))
+        .arg(compiler.join(format!("discovery-{}", env::var("PROFILE").unwrap())))
         .envs(configuration.iter().map(|(name, value)| (name, value)))
         .env("GPURS_LIBRARIES", libraries)
         .env("RUSTC_WRAPPER", env::current_exe().unwrap())
@@ -283,8 +280,9 @@ fn library_view(
     for dependency in dependencies {
         command.args(["--package", dependency["pkg"].as_str().unwrap()]);
     }
+    // An explicit target keeps the device-view flags off build scripts and procedural macros.
     let output = command
-        .arg("--target-dir")
+        .args(["--target", &env::var("HOST").unwrap(), "--target-dir"])
         .arg(compiler.join("metadata"))
         .env("RUSTC", env::var_os("RUSTC").unwrap())
         .env("RUSTC_WRAPPER", env::current_exe().unwrap())
