@@ -5,11 +5,12 @@ use std::{
 };
 
 use gpurs_artifact::{Kernel, Module};
+use gpurs_codegen::{self as codegen, GeneratedKernel};
 use gpurs_rustc::{FxHashMap, FxHashSet, Instance, Session, call_graph};
 use gpurs_verifier::{self as verifier, Verification, Warning};
 use serde::{Deserialize, Serialize};
 
-use crate::{codegen::ModuleBuilder, nvvm};
+use crate::nvvm;
 
 #[derive(Serialize, Deserialize)]
 struct Lowered {
@@ -103,11 +104,7 @@ impl Cache {
                 warning.emit(sess, &functions);
             }
             sess.abort_if_errors();
-            let mut module = ModuleBuilder::new(sess);
-            let mut kernel = module.kernel(plan);
-            let (ir, shared) = module.finish();
-            kernel.shared = shared;
-            sess.abort_if_errors();
+            let GeneratedKernel { kernel, ir, .. } = codegen::generate(sess, plan);
             let lowered = Lowered {
                 kernel,
                 ir,

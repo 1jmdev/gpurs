@@ -2,8 +2,9 @@
 //!
 //! Every MIR local lives in an `alloca` and values move through memory or immediates chosen by
 //! rustc's layouts, so host and device agree on representations by construction. libNVVM's
-//! optimizer promotes the memory traffic to registers. Lowering builds the typed [`ir`], which
+//! optimizer promotes the memory traffic to registers. [`generate`] builds typed IR, which
 //! is printed as NVVM IR text only once the module is complete.
+#![feature(rustc_private)]
 
 mod call;
 mod constant;
@@ -18,4 +19,4 @@ mod rvalue;
 mod shared_memory;
 mod unroll;
 
-pub use module::ModuleBuilder;
+pub use kernel::{GeneratedKernel, generate};

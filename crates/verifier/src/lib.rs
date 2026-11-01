@@ -2,7 +2,7 @@
 //!
 //! [`kernel`] verifies one kernel and plans its entry points. A kernel is compiled once with a
 //! set of obligations: every runtime check and panic of the kernel and of each function it
-//! calls, per call path. [`analysis`] establishes what is true and asks [`engine`] whether it
+//! calls, per call path. `analysis` establishes what is true and asks `engine` whether it
 //! entails each obligation. An obligation is either discharged statically, discharged under
 //! launch preconditions that the host evaluates before every launch, or residual. A kernel
 //! whose residual obligations are all data-dependent arithmetic gets a certified entry point

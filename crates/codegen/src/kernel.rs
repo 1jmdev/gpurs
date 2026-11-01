@@ -1,6 +1,7 @@
 use gpurs_artifact::{
     self as artifact, Entry, Kernel, PARAMETERS_OFFSET, RESULT_OFFSET, STATUS_OFFSET, SharedMemory,
 };
+use gpurs_rustc::Session;
 use gpurs_verifier::KernelPlan;
 
 use super::{
@@ -10,6 +11,24 @@ use super::{
     module::ModuleBuilder,
     place::Place,
 };
+
+/// Kernel metadata and NVVM IR, including all entry points and shared-memory requirements.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct GeneratedKernel {
+    pub kernel: Kernel,
+    pub ir: String,
+}
+
+/// Lowers a verified kernel and its callees, aborting the session on code generation errors.
+pub fn generate(sess: Session<'_>, plan: KernelPlan) -> GeneratedKernel {
+    let mut module = ModuleBuilder::new(sess);
+    let mut kernel = module.kernel(plan);
+    let (ir, shared) = module.finish();
+    kernel.shared = shared;
+    sess.abort_if_errors();
+    GeneratedKernel { kernel, ir }
+}
 
 impl<'sess> ModuleBuilder<'sess> {
     pub fn kernel(&mut self, plan: KernelPlan) -> Kernel {

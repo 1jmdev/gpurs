@@ -109,11 +109,21 @@ dependencies = [
 ]
 
 [[package]]
-name = "gpurs-compiler"
+name = "gpurs-codegen"
 version = "0.1.0"
 dependencies = [
  "bitflags",
  "gpurs-artifact",
+ "gpurs-rustc",
+ "gpurs-verifier",
+]
+
+[[package]]
+name = "gpurs-compiler"
+version = "0.1.0"
+dependencies = [
+ "gpurs-artifact",
+ "gpurs-codegen",
  "gpurs-rustc",
  "gpurs-verifier",
  "libloading",

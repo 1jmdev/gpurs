@@ -1,0 +1,16 @@
+[package]
+name = "gpurs-codegen"
+description = "MIR lowering, typed NVVM IR, and GPU kernel generation for gpurs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[package.metadata.rust-analyzer]
+rustc_private = true
+
+[dependencies]
+bitflags.workspace = true
+gpurs-artifact.workspace = true
+gpurs-rustc.workspace = true
+gpurs-verifier.workspace = true

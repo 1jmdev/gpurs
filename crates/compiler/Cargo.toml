@@ -1,6 +1,6 @@
 [package]
 name = "gpurs-compiler"
-description = "rustc integration lowering verified #[gpu] MIR to NVVM IR, PTX, and CUBIN"
+description = "GPU compiler orchestration, caching, and CUDA toolchain integration for gpurs"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -13,8 +13,8 @@ crate-type = ["dylib"]
 rustc_private = true
 
 [dependencies]
-bitflags.workspace = true
 gpurs-artifact.workspace = true
+gpurs-codegen.workspace = true
 gpurs-rustc.workspace = true
 gpurs-verifier.workspace = true
 libloading.workspace = true

@@ -6,7 +6,6 @@
 #![feature(rustc_private)]
 
 mod cache;
-mod codegen;
 mod device;
 mod discovery;
 mod nvvm;

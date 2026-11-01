@@ -15,7 +15,7 @@ use super::{
 type Copy = (Instance, Option<Certificate>, bool, CallPath);
 
 /// One NVVM IR module holding every device function reachable from the requested kernels.
-pub struct ModuleBuilder<'sess> {
+pub(crate) struct ModuleBuilder<'sess> {
     pub sess: Session<'sess>,
     pub ir: ir::Module,
     /// The block-shared slot holding the launch's failure status pointer.

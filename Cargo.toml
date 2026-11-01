@@ -13,6 +13,7 @@ bitflags = "2.13.2"
 gpurs = { path = "crates/gpurs" }
 gpurs-artifact = { path = "crates/artifact" }
 gpurs-build = { path = "crates/build" }
+gpurs-codegen = { path = "crates/codegen" }
 gpurs-driver = { path = "crates/driver" }
 gpurs-macros = { path = "crates/macros" }
 gpurs-rustc = { path = "crates/rustc" }

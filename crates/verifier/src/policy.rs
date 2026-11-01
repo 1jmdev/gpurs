@@ -1,7 +1,7 @@
 //! Which runtime checks the generated code carries, and how strictly unproven checks are treated.
 //!
 //! The device view always compiles with `-Coverflow-checks=on`, so every plain arithmetic operator
-//! is visible to [`crate::verify`] as a checked operation. Whether the overflow check is *emitted*
+//! is visible to [`crate::kernel`] as a checked operation. Whether the overflow check is *emitted*
 //! follows the profile of the calling crate, as it does for host code: a release build wraps, a
 //! debug build checks. Division and remainder by zero are always checked.
 
