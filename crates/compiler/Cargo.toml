@@ -1,6 +1,6 @@
 [package]
 name = "gpurs-compiler"
-description = "GPU compiler orchestration, caching, and CUDA toolchain integration for gpurs"
+description = "GPU compiler orchestration and caching for gpurs"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -15,8 +15,8 @@ rustc_private = true
 [dependencies]
 gpurs-artifact.workspace = true
 gpurs-codegen.workspace = true
+gpurs-nvvm.workspace = true
 gpurs-rustc.workspace = true
 gpurs-verifier.workspace = true
-libloading.workspace = true
 postcard.workspace = true
 serde.workspace = true

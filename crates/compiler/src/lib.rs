@@ -8,5 +8,4 @@
 mod cache;
 mod device;
 mod discovery;
-mod nvvm;
 mod wrapper;

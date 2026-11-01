@@ -5,6 +5,7 @@ use std::{
 };
 
 use gpurs_artifact::{Artifact, Target};
+use gpurs_nvvm::TOOLKIT_ENVIRONMENT;
 
 use crate::{
     object,
@@ -76,12 +77,10 @@ pub fn compile_architectures(architectures: &[&str]) {
     object::write_object(&artifact.encode(), &object);
     println!("cargo::rustc-link-arg={}", object.display());
     println!("cargo::rerun-if-changed={COMPILER_LIBRARY}");
-    for name in [
-        "CUDA_PATH",
-        "CUDA_HOME",
-        "GPURS_STRICTNESS",
-        "GPURS_INSTRUMENTED",
-    ] {
+    for name in TOOLKIT_ENVIRONMENT
+        .into_iter()
+        .chain(["GPURS_STRICTNESS", "GPURS_INSTRUMENTED"])
+    {
         println!("cargo::rerun-if-env-changed={name}");
     }
 }

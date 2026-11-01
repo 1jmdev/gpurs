@@ -6,11 +6,10 @@ use std::{
 
 use gpurs_artifact::{Kernel, Module};
 use gpurs_codegen::{self as codegen, GeneratedKernel};
+use gpurs_nvvm::Toolkit;
 use gpurs_rustc::{FxHashMap, FxHashSet, Instance, Session, call_graph};
 use gpurs_verifier::{self as verifier, Verification, Warning};
 use serde::{Deserialize, Serialize};
-
-use crate::nvvm;
 
 #[derive(Serialize, Deserialize)]
 struct Lowered {
@@ -114,22 +113,12 @@ impl Cache {
             entry.write(&postcard::to_allocvec(&lowered).map_err(|error| error.to_string())?)?;
             lowered
         };
-        let toolkit = nvvm::toolkit()?;
-        let mut input = format!("{}\n{architecture}\n", self.identity);
-        for file in [
-            "bin/ptxas",
-            "nvvm/lib64/libnvvm.so",
-            "nvvm/libdevice/libdevice.10.bc",
-        ] {
-            let path = toolkit.join(file);
-            let metadata = fs::metadata(&path).map_err(|error| error.to_string())?;
-            input.push_str(&format!(
-                "{}:{}:{:?}\n",
-                path.display(),
-                metadata.len(),
-                metadata.modified().map_err(|error| error.to_string())?,
-            ));
-        }
+        let toolkit = Toolkit::discover().map_err(|error| error.to_string())?;
+        let mut input = format!(
+            "{}\n{architecture}\n{}",
+            self.identity,
+            toolkit.fingerprint().map_err(|error| error.to_string())?,
+        );
         input.push_str(&lowered.ir);
         let entry = self.entry(input.as_bytes(), "module");
         let module = if let Some(module) = entry
@@ -138,10 +127,12 @@ impl Cache {
         {
             module
         } else {
-            let (cubin, ptx) = nvvm::compile(&lowered.ir, architecture, &toolkit, &entry.path)?;
+            let compiled = toolkit
+                .compile(&lowered.ir, architecture, &entry.path)
+                .map_err(|error| error.to_string())?;
             let module = Module {
-                cubin,
-                ptx,
+                cubin: compiled.cubin,
+                ptx: compiled.ptx,
                 kernels: vec![lowered.kernel],
             };
             entry.write(&postcard::to_allocvec(&module).map_err(|error| error.to_string())?)?;

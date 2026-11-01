@@ -9,3 +9,4 @@ gpurs.workspace = true
 
 [build-dependencies]
 gpurs-build.workspace = true
+gpurs-nvvm.workspace = true

@@ -1,11 +1,14 @@
 use std::{env, path::PathBuf, process::Command};
 
+use gpurs_nvvm::Toolkit;
+
 fn main() {
     let architecture = env::var("GPURS_BENCHMARK_ARCH").unwrap_or_else(|_| "sm_89".into());
     gpurs_build::compile(&architecture);
     let output = PathBuf::from(env::var_os("OUT_DIR").unwrap());
+    let toolkit = Toolkit::discover().expect("CUDA toolkit is installed");
     assert!(
-        Command::new("nvcc")
+        Command::new(toolkit.root.join("bin/nvcc"))
             .args([
                 "-O3",
                 "--fmad=true",
@@ -34,11 +37,10 @@ fn main() {
             .success()
     );
     println!("cargo:rustc-link-search=native={}", output.display());
-    let cuda = env::var("CUDA_PATH")
-        .or_else(|_| env::var("CUDA_HOME"))
-        .unwrap_or_else(|_| "/opt/cuda".into());
-    println!("cargo:rustc-link-search=native={cuda}/lib64");
-    println!("cargo:rustc-link-search=native=/usr/local/cuda/lib64");
+    println!(
+        "cargo:rustc-link-search=native={}",
+        toolkit.root.join("lib64").display()
+    );
     println!("cargo:rustc-link-lib=static=reference");
     println!("cargo:rustc-link-lib=cudart");
     println!("cargo:rustc-link-lib=stdc++");

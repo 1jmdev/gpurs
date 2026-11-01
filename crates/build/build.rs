@@ -24,7 +24,9 @@ fn main() {
         "cargo::rustc-env=GPURS_COMPILER_LIBRARY={}",
         library.display()
     );
-    for dependency in ["compiler", "codegen", "verifier", "rustc", "artifact"] {
+    for dependency in [
+        "compiler", "codegen", "verifier", "rustc", "artifact", "nvvm",
+    ] {
         println!(
             "cargo::rerun-if-changed={}",
             crates.join(dependency).display()
