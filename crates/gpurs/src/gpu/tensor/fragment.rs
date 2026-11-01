@@ -2,8 +2,10 @@
 
 use std::marker::PhantomData;
 
+use gpurs_macros::primitive;
+
 use super::{instructions, intrinsics, sealed::Sealed};
-use crate::gpu::{self, BFloat16, E4M3, E5M2, Half};
+use crate::gpu::{self, BFloat16, E4M3, E5M2, Half, warp, warp::Shuffle};
 
 /// An element type of tensor-core operands.
 pub trait Element: Copy + Default + 'static + Sealed {
@@ -145,6 +147,87 @@ impl<T> FragmentB<T> {
 pub struct Accumulator<T> {
     pub values: [T; 4],
 }
+
+impl<T> Accumulator<T> {
+    /// Tile-relative coordinates of `values[index]`, with `index` taken modulo four.
+    pub fn coordinates(index: usize) -> (usize, usize) {
+        let lane = warp::lane_id();
+        (lane / 4 + index % 4 / 2 * 8, lane % 4 * 2 + index % 2)
+    }
+}
+
+impl<T: Shuffle> Accumulator<T> {
+    /// Reduces each row with an associative, commutative operation. Every lane participates;
+    /// the two results name rows `lane / 4` and `lane / 4 + 8`, replicated across four lanes.
+    #[primitive(
+        lowering = Body,
+        architecture = 30,
+        convergence = Warp,
+        memory = None,
+        proof = Varying
+    )]
+    pub fn reduce_rows<F: Fn(T, T) -> T>(&self, operation: F) -> [T; 2] {
+        let [a, b, c, d] = self.values;
+        let upper = operation(a, b);
+        let lower = operation(c, d);
+        let upper = operation(upper, warp::shuffle_xor(upper, 1));
+        let lower = operation(lower, warp::shuffle_xor(lower, 1));
+        [
+            operation(upper, warp::shuffle_xor(upper, 2)),
+            operation(lower, warp::shuffle_xor(lower, 2)),
+        ]
+    }
+}
+
+macro_rules! operand_conversion {
+    ($($element:ident),*) => {
+        $(
+            impl FragmentA<$element> {
+                /// Packs adjacent 16x8 accumulator blocks as one 16x16 A operand.
+                pub fn from_accumulators(
+                    left: &Accumulator<$element>,
+                    right: &Accumulator<$element>,
+                ) -> Self {
+                    let [a, b, c, d] = left.values;
+                    let [e, f, g, h] = right.values;
+                    Self::new([
+                        a.0 as u32 | (b.0 as u32) << 16,
+                        c.0 as u32 | (d.0 as u32) << 16,
+                        e.0 as u32 | (f.0 as u32) << 16,
+                        g.0 as u32 | (h.0 as u32) << 16,
+                    ])
+                }
+            }
+
+            impl FragmentB<$element> {
+                /// Redistributes a 16x8 accumulator as a B operand. Every lane participates.
+                #[primitive(
+                    lowering = Body,
+                    architecture = 30,
+                    convergence = Warp,
+                    memory = None,
+                    proof = Varying
+                )]
+                pub fn from_accumulator(accumulator: &Accumulator<$element>) -> Self {
+                    let lane = warp::lane_id();
+                    let source = lane % 4 * 8 + lane / 8;
+                    let shift = lane / 4 % 2 * 16;
+                    let [a, b, c, d] = accumulator.values;
+                    let upper = a.0 as u32 | (b.0 as u32) << 16;
+                    let lower = c.0 as u32 | (d.0 as u32) << 16;
+                    Self::new([
+                        (warp::shuffle_index(upper, source) >> shift & 0xffff)
+                            | (warp::shuffle_index(upper, source + 4) >> shift) << 16,
+                        (warp::shuffle_index(lower, source) >> shift & 0xffff)
+                            | (warp::shuffle_index(lower, source + 4) >> shift) << 16,
+                    ])
+                }
+            }
+        )*
+    };
+}
+
+operand_conversion!(Half, BFloat16);
 
 impl Accumulator<f32> {
     /// Adds `a * b` with f32 accumulation. Every lane of the warp takes part.

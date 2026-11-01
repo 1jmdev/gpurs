@@ -84,8 +84,8 @@ pub enum Memory {
     /// Reads memory reachable from argument `n` at positions the verifier does not track.
     ReadReachable(usize),
     /// Reads elements of the first argument's referent that the calling thread owns under the
-    /// partition its type defines. The referent's first three fields are its data slice, row
-    /// count, and column count.
+    /// partition its type defines. The referent's first five fields are its data slice, row
+    /// count, column count, element strides, and base offset.
     PartitionRead,
     /// Writes owned elements of the first argument's referent, as [`Memory::PartitionRead`].
     PartitionWrite,

@@ -89,10 +89,13 @@ pub struct Output<
     const WARP_ROWS: usize,
     const WARP_COLUMNS: usize,
 > {
-    // The verifier identifies the partition by the first three fields.
+    // The verifier identifies the partition by the first five fields.
     data: &'a mut [T],
     rows: usize,
     columns: usize,
+    strides: [usize; 2],
+    offset: usize,
+    valid_columns: usize,
     limit: usize,
     paired: bool,
     row: usize,
@@ -121,6 +124,20 @@ impl<
         rows: usize,
         columns: usize,
     ) -> Self {
+        Self::with_layout(block, data, rows, columns, [columns, 1], 0)
+    }
+
+    /// Partitions a matrix with row/column strides and a base offset, all measured in elements.
+    /// Rows occupy `strides[0]` elements, including padding; incomplete rows are absent.
+    /// Columns beyond the row stride are absent; a zero stride produces an empty matrix.
+    pub fn with_layout<const THREADS: usize>(
+        block: &Block<THREADS>,
+        data: &'a mut [T],
+        rows: usize,
+        columns: usize,
+        strides: [usize; 2],
+        offset: usize,
+    ) -> Self {
         const {
             assert!(
                 WARP_ROWS > 0 && WARP_ROWS % 16 == 0 && WARP_COLUMNS > 0 && WARP_COLUMNS % 8 == 0,
@@ -135,9 +152,18 @@ impl<
                 "the block holds one warp per warp tile"
             );
         };
-        let limit = rows.min(data.len().checked_div(columns).unwrap_or(0));
-        let paired =
-            columns % 2 == 0 && (data.as_ptr() as usize).is_multiple_of(2 * size_of::<T>());
+        let valid_columns = columns.min(strides[0].checked_div(strides[1]).unwrap_or(0));
+        let limit = rows.min(
+            data.len()
+                .saturating_sub(offset)
+                .checked_div(strides[0])
+                .unwrap_or(0),
+        );
+        let paired = strides[1] == 1
+            && valid_columns % 2 == 0
+            && strides[0] % 2 == 0
+            && (data.as_ptr() as usize).is_multiple_of(2 * size_of::<T>())
+                == offset.is_multiple_of(2);
         let tile = gpu::block_id();
         let warp = block.warp();
         let warps = BLOCK_COLUMNS / WARP_COLUMNS;
@@ -145,6 +171,9 @@ impl<
             data,
             rows,
             columns,
+            strides,
+            offset,
+            valid_columns,
             limit,
             paired,
             row: tile.y * BLOCK_ROWS,
@@ -226,35 +255,41 @@ impl<
     }
 
     fn write(&mut self, row: usize, column: usize, [low, high]: [T; 2]) {
-        if row >= self.limit || column >= self.columns {
+        if row >= self.limit || column >= self.valid_columns {
             return;
         }
         // SAFETY: `row < limit` and `column < columns` put the element inside `data`, and
         // fragment columns are even, so a pair of a paired matrix is aligned to its size.
         unsafe {
-            let pointer = self.data.as_mut_ptr().add(row * self.columns + column);
+            let pointer = self
+                .data
+                .as_mut_ptr()
+                .add(self.offset + row * self.strides[0] + column * self.strides[1]);
             if self.paired {
                 T::write_pair(pointer, [low, high]);
             } else {
                 pointer.write(low);
-                if column + 1 < self.columns {
-                    pointer.add(1).write(high);
+                if column + 1 < self.valid_columns {
+                    pointer.add(self.strides[1]).write(high);
                 }
             }
         }
     }
 
     fn read(&self, row: usize, column: usize) -> [T; 2] {
-        if row >= self.limit || column >= self.columns {
+        if row >= self.limit || column >= self.valid_columns {
             return [T::default(); 2];
         }
         // SAFETY: as in `write`.
         unsafe {
-            let pointer = self.data.as_ptr().add(row * self.columns + column);
+            let pointer = self
+                .data
+                .as_ptr()
+                .add(self.offset + row * self.strides[0] + column * self.strides[1]);
             if self.paired {
                 T::read_pair(pointer)
-            } else if column + 1 < self.columns {
-                [pointer.read(), pointer.add(1).read()]
+            } else if column + 1 < self.valid_columns {
+                [pointer.read(), pointer.add(self.strides[1]).read()]
             } else {
                 [pointer.read(), T::default()]
             }

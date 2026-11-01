@@ -145,6 +145,64 @@ impl<S: Stage<Asynchronous>, const STAGES: usize> Pipeline<S, STAGES> {
 impl<'a, T: Element, const ROWS: usize, const COLUMNS: usize>
     TileWriter<'a, T, ROWS, COLUMNS, Asynchronous>
 {
+    /// Gathers rows of `source.0` named by device indices in `source.1`, starting at `row`.
+    /// Missing indices, invalid source rows, and columns outside the source are zero-filled.
+    /// Every block thread participates; the pipeline completes the writes before consumption.
+    #[primitive(
+        lowering = Body,
+        architecture = 80,
+        convergence = Block,
+        memory = ReadReachable(2),
+        proof = Initialized
+    )]
+    pub fn gather_rows<const THREADS: usize>(
+        self,
+        block: &Block<THREADS>,
+        source: (&Matrix<T>, &[usize]),
+        row: usize,
+        column: usize,
+    ) -> Initialized<'a, SharedTile<T, ROWS, COLUMNS>> {
+        let (source, indices) = source;
+        let lanes = 16 / size_of::<T>();
+        for step in 0..const { (ROWS * COLUMNS).div_ceil(THREADS) } {
+            let element = step * THREADS + block.thread();
+            if element >= ROWS * COLUMNS {
+                break;
+            }
+            let (tile_row, tile_column) = (element / COLUMNS, element % COLUMNS);
+            let index = row.saturating_add(tile_row);
+            let source_column = column.saturating_add(tile_column);
+            let value = if index < indices.len() && source_column < source.columns() {
+                let source_row = indices[index];
+                if source_row < source.rows() {
+                    // SAFETY: the row and column lie in the complete rows retained by Matrix.
+                    unsafe {
+                        source
+                            .data()
+                            .as_ptr()
+                            .add(source_row * source.columns() + source_column)
+                            .read()
+                    }
+                } else {
+                    T::default()
+                }
+            } else {
+                T::default()
+            };
+            let offset = SharedTile::<T, ROWS, COLUMNS>::offset(tile_row, tile_column / lanes);
+            // SAFETY: each thread writes distinct elements inside the tile it may fill.
+            unsafe {
+                self.tile
+                    .cast::<u8>()
+                    .add(offset as usize)
+                    .cast::<T>()
+                    .add(tile_column % lanes)
+                    .write(value)
+            };
+        }
+        Initialized::new()
+    }
+
     /// Starts copying the block of `source` at (`row`, `column`) into the tile; elements outside
     /// `source` read as zero. The copy is complete when the pipeline returns the stage. Every
     /// thread of the block takes part. A 16-byte aligned `source` whose column count and

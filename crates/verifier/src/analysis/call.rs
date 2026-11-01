@@ -1,3 +1,5 @@
+use std::slice;
+
 use gpurs_artifact::{Convergence, Memory, Primitive, Proof};
 use gpurs_rustc::{
     CrateDef, Instance, Operand, Place, RigidTy, Ty, TyKind, attributes, call_graph,
@@ -481,9 +483,20 @@ impl Analysis<'_, '_> {
                     .map(|index| (origin.region.clone(), index)),
                 _ => None,
             });
-        let rows = referent.fields.get(1).and_then(launch);
-        let columns = referent.fields.get(2).and_then(launch);
-        let (Some((region, index)), Some(rows), Some(columns)) = (data, rows, columns) else {
+        let layout = referent.fields.get(1..5).and_then(|fields| {
+            fields
+                .iter()
+                .flat_map(|field| {
+                    if field.fields.is_empty() {
+                        slice::from_ref(field)
+                    } else {
+                        &field.fields
+                    }
+                })
+                .map(launch)
+                .collect::<Option<Vec<_>>>()
+        });
+        let (Some((region, index)), Some(mut layout)) = (data, layout) else {
             self.sess.error_help(
                 self.span,
                 "the partitioned matrix may differ between GPU threads",
@@ -492,6 +505,7 @@ impl Analysis<'_, '_> {
             );
             return;
         };
+        layout.insert(0, index);
         self.requirement(
             Predicate::new(
                 Polynomial::atom(Atom::GridDimension(2)).offset(-1).unwrap(),
@@ -508,7 +522,7 @@ impl Analysis<'_, '_> {
             },
             write,
             atomic: false,
-            partition: Some((format!("{:?}", instance.args()), vec![index, rows, columns])),
+            partition: Some((format!("{:?}", instance.args()), layout)),
             block: self.kernel_block(),
             facts: state.facts.clone(),
             span: self.span,
