@@ -3,7 +3,7 @@ use gpurs_rustc::{Instance, InstanceKind, RigidTy, TyKind};
 
 use super::{
     function::FunctionBuilder,
-    layout::PassMode,
+    layout::{self, PassMode},
     place::{Operand, Place, Value},
 };
 
@@ -119,7 +119,9 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                 PassMode::Indirect => parameters.push(self.spill(argument).pointer),
             }
         }
-        let call = self.ir.call(name, signature.return_type(), parameters);
+        let call = self
+            .ir
+            .call(name, layout::return_type(&signature), parameters);
         let value = match signature.result.0 {
             PassMode::Ignore => return,
             PassMode::Indirect => self.load(&result.unwrap()).value,

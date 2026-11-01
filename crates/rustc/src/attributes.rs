@@ -1,9 +1,8 @@
 use std::rc::Rc;
 
 use gpurs_artifact::{Lowering, Memory, Primitive, Proof};
-use gpurs_rustc::{DefId, Session};
 
-use crate::queries::QUERIES;
+use crate::{DefId, Session, session::QUERIES};
 
 pub fn is_device(sess: Session<'_>, def: DefId) -> bool {
     sess.tool_attr(def, "device").is_some()

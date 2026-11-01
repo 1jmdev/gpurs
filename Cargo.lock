@@ -115,6 +115,7 @@ dependencies = [
  "bitflags",
  "gpurs-artifact",
  "gpurs-rustc",
+ "gpurs-verifier",
  "libloading",
  "postcard",
  "serde",
@@ -149,6 +150,15 @@ version = "0.1.0"
 dependencies = [
  "gpurs-artifact",
  "syn",
+]
+
+[[package]]
+name = "gpurs-verifier"
+version = "0.1.0"
+dependencies = [
+ "gpurs-artifact",
+ "gpurs-rustc",
+ "serde",
 ]
 
 [[package]]

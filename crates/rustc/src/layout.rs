@@ -1,6 +1,8 @@
+use std::rc::Rc;
+
 use crate::{
-    FieldsShape, FloatLength, LayoutShape, MachineSize, Scalar, Session, Ty, ValueRepr, VariantIdx,
-    VariantsShape,
+    FieldsShape, FloatLength, Instance, LayoutShape, MachineSize, Scalar, Session, Ty, ValueRepr,
+    VariantIdx, VariantsShape, session::QUERIES,
 };
 
 /// The layout of one fully monomorphized value, in the form the backend consumes.
@@ -150,4 +152,40 @@ pub fn is_bfloat(length: FloatLength) -> bool {
         let _ = length;
         false
     }
+}
+
+/// How a function passes its arguments and result.
+#[derive(Clone)]
+pub struct Signature {
+    pub arguments: Vec<(PassMode, Shape)>,
+    pub result: (PassMode, Shape),
+}
+
+impl Signature {
+    pub fn of(sess: Session<'_>, instance: Instance) -> Self {
+        let body = sess.body(instance);
+        let shape = |ty| {
+            let shape = Shape::of(sess, ty);
+            (pass_mode(&shape), shape)
+        };
+        Signature {
+            arguments: body
+                .arg_locals()
+                .iter()
+                .map(|local| shape(local.ty))
+                .collect(),
+            result: shape(body.ret_local().ty),
+        }
+    }
+}
+
+pub fn signature(sess: Session<'_>, instance: Instance) -> Rc<Signature> {
+    QUERIES.with(|queries| {
+        queries
+            .signatures
+            .borrow_mut()
+            .entry(instance)
+            .or_insert_with(|| Rc::new(Signature::of(sess, instance)))
+            .clone()
+    })
 }

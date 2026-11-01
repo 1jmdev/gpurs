@@ -3,8 +3,9 @@ use gpurs_artifact::{
 };
 use gpurs_rustc::{
     BinOp, CrateDef, GenericArgKind, Instance, RigidTy, Scalar, Ty, TyConst, TyConstKind, TyKind,
-    ValueRepr, session,
+    ValueRepr, attributes, call_graph, session,
 };
+use gpurs_verifier::policy;
 
 use super::{
     function::FunctionBuilder,
@@ -14,7 +15,6 @@ use super::{
     layout::{self, Shape},
     place::{Operand, Place, Value},
 };
-use crate::{attributes, call_graph, policy};
 
 impl<'sess> FunctionBuilder<'_, 'sess> {
     pub fn intrinsic(

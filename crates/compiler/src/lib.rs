@@ -5,16 +5,9 @@
 //! MIR, and lowers it to NVVM IR. `cache` stores verification, lowered IR, and CUBINs per kernel.
 #![feature(rustc_private)]
 
-mod attributes;
 mod cache;
-mod call_graph;
 mod codegen;
 mod device;
 mod discovery;
-mod kernel;
 mod nvvm;
-mod policy;
-mod queries;
-mod transfer;
-mod verify;
 mod wrapper;

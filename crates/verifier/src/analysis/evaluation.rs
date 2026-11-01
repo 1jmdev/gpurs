@@ -5,11 +5,8 @@ use gpurs_rustc::{
 
 use super::{Analysis, Origin, Pointer, Region, State, Value, arithmetic, place::Location, state};
 use crate::{
-    policy,
-    verify::{
-        engine,
-        symbolic::{Atom, Polynomial},
-    },
+    engine, policy,
+    symbolic::{Atom, Polynomial},
 };
 
 impl Analysis<'_, '_> {

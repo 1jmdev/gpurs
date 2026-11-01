@@ -1,4 +1,4 @@
-use gpurs_rustc::{FloatLength, IntegerLength, Primitive, Scalar, layout};
+use gpurs_rustc::{FloatLength, IntegerLength, Primitive, Scalar, Signature, layout};
 pub use gpurs_rustc::{PassMode, Shape};
 
 use super::ir::Type;
@@ -70,5 +70,29 @@ pub fn restrict_align(align: u64, offset: u64) -> u64 {
     match offset {
         0 => align,
         offset => align.min(1 << offset.trailing_zeros()),
+    }
+}
+
+/// IR parameter types of `signature`: the indirect result pointer, then every passed argument.
+pub fn parameters(signature: &Signature) -> Vec<Type> {
+    let result = matches!(signature.result.0, PassMode::Indirect).then(Type::byte_pointer);
+    result
+        .into_iter()
+        .chain(
+            signature
+                .arguments
+                .iter()
+                .flat_map(|(mode, _)| parameter_types(*mode)),
+        )
+        .collect()
+}
+
+pub fn return_type(signature: &Signature) -> Type {
+    match signature.result.0 {
+        PassMode::Ignore | PassMode::Indirect => Type::Void,
+        mode => match parameter_types(mode).as_slice() {
+            [ty] => ty.clone(),
+            types => Type::Struct(types.to_vec()),
+        },
     }
 }

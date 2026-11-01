@@ -4,8 +4,10 @@ use gpurs_artifact::Failure;
 use gpurs_rustc::{
     AssertMessage, BinOp, Body, CrateDef, FxHashMap, FxHashSet, Graph, Instance, Mutability,
     NonDivergingIntrinsic, Operand as MirOperand, Place as MirPlace, ProjectionElem, RETURN_LOCAL,
-    RigidTy, Rvalue, Session, Span, StatementKind, TerminatorKind, Ty, ValueRepr, session,
+    RigidTy, Rvalue, Session, Span, StatementKind, TerminatorKind, Ty, ValueRepr, attributes,
+    session,
 };
+use gpurs_verifier::{Certificate, policy};
 
 use super::{
     ir::{self, Type},
@@ -15,7 +17,6 @@ use super::{
     shared_memory::CallPath,
     unroll::{self, Loop},
 };
-use crate::{attributes, policy, verify::Certificate};
 
 /// Lowers the MIR body of one monomorphic instance to an NVVM IR function.
 pub struct FunctionBuilder<'m, 'sess> {
@@ -216,12 +217,16 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
     /// Lowers the body as the function `name` and adds it to the module.
     pub fn lower(mut self, name: &str) {
         let signature = self.module.signature(self.instance);
-        self.ir = ir::Function::new(name, signature.return_type(), signature.parameters());
+        self.ir = ir::Function::new(
+            name,
+            layout::return_type(&signature),
+            layout::parameters(&signature),
+        );
         self.ir.comment = self.instance.name();
         self.ir.inline = self.sess.is_closure_like(self.instance.def.def_id())
             || attributes::primitive(self.sess, self.instance.def.def_id()).is_some();
         let mut parameters =
-            (0..signature.parameters().len()).map(|index| self.ir.parameter(index));
+            (0..layout::parameters(&signature).len()).map(|index| self.ir.parameter(index));
         let result =
             matches!(signature.result.0, PassMode::Indirect).then(|| parameters.next().unwrap());
         let arguments: Vec<Vec<ir::Value>> = signature

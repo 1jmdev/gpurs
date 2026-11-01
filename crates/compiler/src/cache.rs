@@ -5,15 +5,11 @@ use std::{
 };
 
 use gpurs_artifact::{Kernel, Module};
-use gpurs_rustc::{FxHashMap, FxHashSet, Instance, Session};
+use gpurs_rustc::{FxHashMap, FxHashSet, Instance, Session, call_graph};
+use gpurs_verifier::{self as verifier, Verification, Warning};
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    call_graph,
-    codegen::ModuleBuilder,
-    nvvm,
-    verify::{self, Warning},
-};
+use crate::{codegen::ModuleBuilder, nvvm};
 
 #[derive(Serialize, Deserialize)]
 struct Lowered {
@@ -96,10 +92,13 @@ impl Cache {
             sess.abort_if_errors();
             lowered
         } else {
-            let verified = verify::kernel(sess, root, configured, key.to_owned());
+            let verification = verifier::kernel(sess, root, configured, key.to_owned());
             sess.abort_if_errors();
-            let (plan, summary, warnings) =
-                verified.expect("verification without errors produces a plan");
+            let Verification {
+                plan,
+                summary,
+                warnings,
+            } = verification.expect("verification without errors produces a plan");
             for warning in &warnings {
                 warning.emit(sess, &functions);
             }

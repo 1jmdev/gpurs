@@ -4,7 +4,7 @@ use std::{
 };
 
 use super::{Engine, solver};
-use crate::verify::symbolic::{self, Atom, Monomial, Polynomial, Requirement};
+use crate::symbolic::{self, Atom, Monomial, Polynomial, Requirement};
 
 const LIMIT: usize = 3;
 const DEPTH: usize = 6;

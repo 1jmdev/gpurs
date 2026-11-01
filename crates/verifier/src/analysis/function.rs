@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 use gpurs_rustc::{Instance, TerminatorKind};
 
 use super::{Analysis, Frame, Pointer, State, Value};
-use crate::verify::{
+use crate::{
     engine::{Bound, Direction},
     symbolic::{Fact, Polynomial, Predicate, Relation, Requirement},
 };

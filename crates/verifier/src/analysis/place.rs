@@ -2,7 +2,7 @@ use gpurs_artifact::{Access, Parameter};
 use gpurs_rustc::{Operand, Place, ProjectionElem, RigidTy, Ty, session};
 
 use super::{Analysis, Origin, Pointer, Region, State, Value, state};
-use crate::verify::symbolic::{Atom, Polynomial};
+use crate::symbolic::{Atom, Polynomial};
 
 /// Where a place lives.
 pub(super) enum Location {

@@ -1,0 +1,15 @@
+[package]
+name = "gpurs-verifier"
+description = "Safety verification of #[gpu] kernels and GPU transfer types for gpurs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[package.metadata.rust-analyzer]
+rustc_private = true
+
+[dependencies]
+gpurs-artifact.workspace = true
+gpurs-rustc.workspace = true
+serde.workspace = true

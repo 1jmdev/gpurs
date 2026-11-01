@@ -9,12 +9,10 @@ use super::{
     Access, Context, Frame, Obligation, Origin, Pointer, Region, State, Value, arithmetic, control,
 };
 use crate::{
+    engine::{Engine, Variable},
     kernel::KernelParameter,
-    verify::{
-        engine::{Engine, Variable},
-        render::{self, Names},
-        symbolic::{Atom, Clause, Fact, Polynomial, Predicate, Requirement},
-    },
+    render::{self, Names},
+    symbolic::{Atom, Clause, Fact, Polynomial, Predicate, Requirement},
 };
 
 pub struct Analysis<'a, 'sess> {

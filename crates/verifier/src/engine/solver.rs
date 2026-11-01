@@ -1,9 +1,7 @@
 use std::collections::BTreeSet;
 
 use super::Direction;
-use crate::verify::symbolic::{
-    self, Atom, Clause, Fact, Polynomial, Predicate, Relation, Requirement,
-};
+use crate::symbolic::{self, Atom, Clause, Fact, Polynomial, Predicate, Relation, Requirement};
 
 const OPTIONS: usize = 4;
 

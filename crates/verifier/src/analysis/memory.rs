@@ -1,7 +1,7 @@
 use gpurs_rustc::{BinOp, FxHashSet};
 
 use super::{Analysis, Region, control};
-use crate::verify::{
+use crate::{
     proof::{self, Comparison, Proofs},
     symbolic::{Atom, Polynomial, Relation},
 };

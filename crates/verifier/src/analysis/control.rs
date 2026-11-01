@@ -3,7 +3,7 @@ use gpurs_rustc::{AssertMessage, BinOp, Body, FxHashSet, Graph, TerminatorKind};
 use super::{Analysis, Kind, Obligation, Region, State, Value, arithmetic};
 use crate::{
     policy,
-    verify::symbolic::{Atom, Fact, Polynomial, Predicate, Relation, Requirement},
+    symbolic::{Atom, Fact, Polynomial, Predicate, Relation, Requirement},
 };
 
 impl Analysis<'_, '_> {

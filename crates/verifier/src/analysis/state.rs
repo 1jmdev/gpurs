@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, rc::Rc};
 
 use gpurs_rustc::{Body, Instance, Span};
 
-use super::super::symbolic::{Fact, Polynomial, Predicate, Requirement};
+use crate::symbolic::{Fact, Polynomial, Predicate, Requirement};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Region {

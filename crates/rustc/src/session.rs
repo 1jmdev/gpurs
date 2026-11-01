@@ -6,7 +6,7 @@
 
 use std::{cell::RefCell, env, ops::ControlFlow, rc::Rc};
 
-use gpurs_artifact::Target;
+use gpurs_artifact::{Primitive, Target};
 use rustc_abi::{self, FieldIdx};
 #[cfg(gpurs_api_value_repr)]
 use rustc_ast::attr::AttributeExt;
@@ -31,18 +31,22 @@ use rustc_span::{self, Symbol};
 
 use crate::{
     Allocation, Body, ConstOperand, ConstantKind, CrateDef, CrateItem, DefId, GlobalAlloc,
-    Instance, Location, MirVisitor, RigidTy, Span, Ty, TyKind, VariantIdx,
+    Instance, Location, MirVisitor, RigidTy, Span, Ty, TyKind, VariantIdx, call_graph::Function,
+    layout::Signature,
 };
 
 /// Per-session caches of derived queries, keyed by stable-interface identities.
 #[derive(Default)]
-struct Queries {
+pub(crate) struct Queries {
     bodies: RefCell<FxHashMap<Instance, Rc<Body>>>,
     paths: RefCell<FxHashMap<DefId, Rc<str>>>,
+    pub(crate) functions: RefCell<FxHashMap<Instance, Rc<Function>>>,
+    pub(crate) primitives: RefCell<FxHashMap<DefId, Option<Rc<Primitive>>>>,
+    pub(crate) signatures: RefCell<FxHashMap<Instance, Rc<Signature>>>,
 }
 
 thread_local! {
-    static QUERIES: Queries = Queries::default();
+    pub(crate) static QUERIES: Queries = Queries::default();
 }
 
 #[derive(Default)]
@@ -535,6 +539,9 @@ pub(crate) fn enter<T>(tcx: TyCtxt<'_>, f: impl FnOnce() -> T) -> T {
     QUERIES.with(|queries| {
         queries.bodies.take();
         queries.paths.take();
+        queries.functions.take();
+        queries.primitives.take();
+        queries.signatures.take();
     });
     result
 }

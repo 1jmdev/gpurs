@@ -1,26 +1,64 @@
 use gpurs_artifact::{self as artifact, Access, Extent, Parameter, Value};
-use gpurs_rustc::{CrateDef, Instance, Mutability, RigidTy, Session, TyKind, session};
+use gpurs_rustc::{
+    CrateDef, Instance, Mutability, RigidTy, Session, Shape, TyKind, layout, session,
+};
 
-use super::{
+use crate::{
     Certificate,
     analysis::{Analysis, Kind, Obligation},
-    diagnostic, render, support,
-    symbolic::{self, Clause},
-};
-use crate::{
-    kernel::{self, KernelParameter, KernelPlan},
+    diagnostic::{self, Warning},
     policy::{self, Strictness},
+    render, support,
+    symbolic::{self, Clause},
     transfer,
 };
 
+#[derive(Clone)]
+pub struct KernelParameter {
+    pub layout: Shape,
+    pub metadata: Parameter,
+}
+
+/// What code generation emits for one verified kernel.
+pub struct KernelPlan {
+    pub instance: Instance,
+    pub key: String,
+    pub parameters: Vec<KernelParameter>,
+    pub extent: Extent,
+    /// The per-thread result a launch returns, when the kernel returns one.
+    pub result: Option<Value>,
+    pub requirements: Vec<artifact::Clause>,
+    pub preconditions: Vec<artifact::Clause>,
+    /// The checks the certified entry point omits; `None` when it does not exist.
+    pub certificate: Option<Certificate>,
+    /// Whether the certified entry point records arithmetic failures in the status word.
+    pub status: bool,
+    /// Whether the instrumented entry point exists.
+    pub instrumented: bool,
+    /// Whether the kernel reads the linear thread index.
+    pub uses_index: bool,
+    /// Whether the kernel issues asynchronous copies, which must land before the block exits.
+    pub asynchronous: bool,
+}
+
+/// The outcome of verifying one kernel.
+pub struct Verification {
+    pub plan: KernelPlan,
+    /// The human-readable account of every obligation and precondition.
+    pub summary: String,
+    /// One warning per residual obligation, emitted on every build of the kernel.
+    pub warnings: Vec<Warning>,
+}
+
+/// Verifies `instance` and plans its entry points. `None` after a reported compile error.
 pub fn kernel(
     sess: Session<'_>,
     instance: Instance,
     configured: bool,
     key: String,
-) -> Option<(KernelPlan, String, Vec<diagnostic::Warning>)> {
+) -> Option<Verification> {
     let effects = support::check(sess, instance);
-    let signature = kernel::signature(sess, instance);
+    let signature = layout::signature(sess, instance);
     let mut parameters = Vec::new();
     for (_, shape) in &signature.arguments {
         let metadata = match shape.ty.kind() {
@@ -170,7 +208,11 @@ pub fn kernel(
         uses_index: analysis.uses_index,
         asynchronous: effects.asynchronous,
     };
-    Some((plan, summary, warnings))
+    Some(Verification {
+        plan,
+        summary,
+        warnings,
+    })
 }
 
 /// Which checks of `context` and its callees the certified entry point omits or records.

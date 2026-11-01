@@ -1,17 +1,13 @@
 use std::rc::Rc;
 
 use gpurs_artifact::SharedMemory;
-use gpurs_rustc::{AllocId, FxHashMap, Instance, PassMode, Session};
+use gpurs_rustc::{AllocId, FxHashMap, Instance, Session, Signature, layout};
+use gpurs_verifier::Certificate;
 
 use super::{
     function::FunctionBuilder,
     ir::{self, Access, Ordering, Type},
-    layout,
     shared_memory::{CallPath, SharedAllocations},
-};
-use crate::{
-    kernel::{self, Signature},
-    verify::Certificate,
 };
 
 /// One copy of a function: certified with its certificate, or instrumented; `linear` folds a
@@ -82,7 +78,7 @@ impl<'sess> ModuleBuilder<'sess> {
     }
 
     pub fn signature(&self, instance: Instance) -> Rc<Signature> {
-        kernel::signature(self.sess, instance)
+        layout::signature(self.sess, instance)
     }
 
     /// Lowers every queued function and renders the module, with the dynamic block-shared
@@ -141,30 +137,5 @@ impl<'sess> ModuleBuilder<'sess> {
             function.ret(None);
         }
         function
-    }
-}
-
-impl Signature {
-    /// IR parameter types: the indirect result pointer, then every passed argument.
-    pub fn parameters(&self) -> Vec<Type> {
-        let result = matches!(self.result.0, PassMode::Indirect).then(Type::byte_pointer);
-        result
-            .into_iter()
-            .chain(
-                self.arguments
-                    .iter()
-                    .flat_map(|(mode, _)| layout::parameter_types(*mode)),
-            )
-            .collect()
-    }
-
-    pub fn return_type(&self) -> Type {
-        match self.result.0 {
-            PassMode::Ignore | PassMode::Indirect => Type::Void,
-            mode => match layout::parameter_types(mode).as_slice() {
-                [ty] => ty.clone(),
-                types => Type::Struct(types.to_vec()),
-            },
-        }
     }
 }

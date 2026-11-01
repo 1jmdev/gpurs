@@ -1,12 +1,14 @@
 use gpurs_artifact::{Convergence, Memory, Primitive, Proof};
-use gpurs_rustc::{CrateDef, Instance, Operand, Place, RigidTy, Ty, TyKind};
+use gpurs_rustc::{
+    CrateDef, Instance, Operand, Place, RigidTy, Ty, TyKind, attributes, call_graph,
+};
 
 use super::{
     Access, Analysis, Kind, Obligation, Origin, Pointer, Region, State, Value, arithmetic, state,
 };
 use crate::{
-    attributes, call_graph, policy,
-    verify::symbolic::{self, Atom, Polynomial, Predicate, Relation, Requirement},
+    policy,
+    symbolic::{self, Atom, Polynomial, Predicate, Relation, Requirement},
 };
 
 const DEPTH: usize = 48;

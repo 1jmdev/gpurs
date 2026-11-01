@@ -1,11 +1,9 @@
 use std::rc::Rc;
 
-use gpurs_rustc::{
+use crate::{
     Body, CrateDef, DefId, FxHashMap, Instance, InstanceKind, RigidTy, Session, TerminatorKind,
-    TyKind,
+    TyKind, attributes, session::QUERIES,
 };
-
-use crate::{attributes, queries::QUERIES};
 
 pub struct Function {
     pub body: Option<Rc<Body>>,

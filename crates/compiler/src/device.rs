@@ -6,7 +6,7 @@ use gpurs_rustc::{
     driver,
 };
 
-use crate::{cache::Cache, discovery::HostView, queries::QUERIES};
+use crate::{cache::Cache, discovery::HostView};
 
 pub struct DeviceView;
 
@@ -130,9 +130,4 @@ pub fn analyze(session: Session<'_>) {
     if let Err(message) = DeviceView.compile(session) {
         session.err(message);
     }
-    QUERIES.with(|queries| {
-        queries.functions.take();
-        queries.primitives.take();
-        queries.signatures.take();
-    });
 }

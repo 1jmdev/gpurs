@@ -1,5 +1,5 @@
 use super::{Direction, Engine};
-use crate::verify::symbolic::{Atom, Polynomial};
+use crate::symbolic::{Atom, Polynomial};
 
 impl Engine<'_> {
     /// Numeric bound of a launch polynomial over the hardware ranges of launch variables.

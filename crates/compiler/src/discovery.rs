@@ -8,8 +8,7 @@ use gpurs_rustc::{
     MirVisitor, Operand, ProjectionElem, RigidTy, Rvalue, Session, StatementKind, TerminatorKind,
     Ty, TyKind, Visitable, Visitor,
 };
-
-use crate::transfer;
+use gpurs_verifier::transfer;
 
 /// One launcher instantiation found in host code.
 pub struct Launch {

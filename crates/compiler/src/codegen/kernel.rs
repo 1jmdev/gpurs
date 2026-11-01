@@ -1,6 +1,7 @@
 use gpurs_artifact::{
     self as artifact, Entry, Kernel, PARAMETERS_OFFSET, RESULT_OFFSET, STATUS_OFFSET, SharedMemory,
 };
+use gpurs_verifier::KernelPlan;
 
 use super::{
     function::FunctionBuilder,
@@ -9,7 +10,6 @@ use super::{
     module::ModuleBuilder,
     place::Place,
 };
-use crate::kernel::KernelPlan;
 
 impl<'sess> ModuleBuilder<'sess> {
     pub fn kernel(&mut self, plan: KernelPlan) -> Kernel {
