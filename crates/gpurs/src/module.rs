@@ -86,6 +86,32 @@ impl Kernel {
         self.function.attribute(attribute)
     }
 
+    pub fn try_set_attribute(&self, attribute: i32, value: i32) -> Result<()> {
+        let _context = self.module.0.device.context.try_enter()?;
+        Ok(self.function.try_set_attribute(attribute, value)?)
+    }
+
+    pub fn registers(&self) -> u32 {
+        self.attribute(4) as u32
+    }
+
+    pub fn shared_bytes(&self) -> u32 {
+        self.attribute(1) as u32
+    }
+
+    pub fn max_dynamic_shared_bytes(&self) -> u32 {
+        self.attribute(8) as u32
+    }
+
+    pub fn try_shared_carveout(&self, percent: i32) -> Result<()> {
+        self.try_set_attribute(9, percent)
+    }
+
+    pub fn try_active_blocks(&self, block_size: u32, shared_bytes: usize) -> Result<u32> {
+        let _context = self.module.0.device.context.try_enter()?;
+        Ok(self.function.try_active_blocks(block_size, shared_bytes)?)
+    }
+
     pub fn reserve_shared(&self, bytes: u32) {
         let _context = self.module.0.device.context.enter();
         self.function.reserve_shared(bytes);

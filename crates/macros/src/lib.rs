@@ -9,9 +9,18 @@ mod compilation;
 mod launcher;
 mod primitive;
 mod references;
+mod storage;
 
 use proc_macro::TokenStream;
 use syn::{Error, Item, parse_macro_input, spanned::Spanned};
+
+/// Verifies a concrete padding-free `repr(C)` struct with `BitPattern` fields.
+#[proc_macro_derive(BitPattern)]
+pub fn bit_pattern(item: TokenStream) -> TokenStream {
+    storage::derive(parse_macro_input!(item as syn::DeriveInput))
+        .unwrap_or_else(Error::into_compile_error)
+        .into()
+}
 
 #[proc_macro_attribute]
 pub fn gpu(attribute: TokenStream, item: TokenStream) -> TokenStream {

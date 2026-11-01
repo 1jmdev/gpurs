@@ -1,4 +1,4 @@
-use std::{fs, io, path::Path, process::Command};
+use std::{env, fs, io, path::Path, process::Command};
 
 use crate::{Toolkit, toolkit::PTXAS};
 
@@ -11,7 +11,11 @@ impl Toolkit {
         let source = directory.join("kernels.ptx");
         let output = directory.join("kernels.cubin");
         fs::write(&source, ptx)?;
-        let result = Command::new(self.root.join(PTXAS))
+        let mut command = Command::new(self.root.join(PTXAS));
+        if let Ok(registers) = env::var("GPURS_MAX_REGISTERS") {
+            command.arg(format!("--maxrregcount={registers}"));
+        }
+        let result = command
             .arg(format!("-arch={architecture}"))
             .arg("-O3")
             .arg("--split-compile=0")

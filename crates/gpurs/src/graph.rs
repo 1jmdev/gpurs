@@ -1,6 +1,6 @@
 use std::{
     any::Any,
-    cell::{Cell, RefCell},
+    cell::RefCell,
     ffi::c_void,
     mem::{self, MaybeUninit},
     rc::Rc,
@@ -66,7 +66,7 @@ struct GraphInner {
     pending: RefCell<Option<Event>>,
 }
 
-/// An executable graph. Replays serialize before reusing failure status words.
+/// An executable graph. Replays order status reuse through stream dependencies.
 pub struct GraphExec {
     raw: driver::GraphExec,
     graph: Graph,
@@ -367,7 +367,7 @@ impl GraphExec {
         self.raw.as_raw()
     }
 
-    /// Orders declared dependencies and launches; prior replay failures are observed first.
+    /// Orders declared dependencies and launches without waiting for prior replays.
     pub fn launch(&self, stream: &Stream) -> Event {
         self.try_launch(stream)
             .unwrap_or_else(|error| panic!("{error}"))
@@ -380,21 +380,30 @@ impl GraphExec {
             ));
         }
         stream.maintain()?;
-        self.try_finish()?;
         let _context = stream.device.context.try_enter()?;
+        for pending in [&self.graph.0.pending, &self.pending] {
+            if let Some(event) = pending.borrow().as_ref() {
+                stream.raw.try_wait(&event.raw)?;
+            }
+        }
         let mut statuses = tracking::try_order(&stream.raw, &self.graph.0.accesses)?;
-        statuses.extend(self.graph.0.statuses.iter().map(|status| {
-            Rc::new(Status {
-                pointer: status.pointer,
-                chunk: status.chunk,
-                kernel: status.kernel.clone(),
-                observed: Cell::new(None),
-                reported: Cell::new(false),
-                slot: status.slot.clone(),
-                error: None,
-            })
-        }));
+        let snapshots = self
+            .graph
+            .0
+            .statuses
+            .iter()
+            .map(|status| stream.device.status(&status.kernel))
+            .collect::<Result<Vec<_>>>()?;
         unsafe { self.raw.try_launch(&stream.raw)? };
+        for (source, destination) in self.graph.0.statuses.iter().zip(&snapshots) {
+            if let Err(error) = unsafe {
+                driver::try_copy_device_async(destination.pointer, source.pointer, 4, &stream.raw)
+            } {
+                stream.raw.try_synchronize()?;
+                return Err(error.into());
+            }
+        }
+        statuses.extend(snapshots);
         tracking::complete(&stream.raw, &self.graph.0.accesses, &statuses);
         stream.retain_statuses(&statuses);
         let event = match stream.try_record_statuses(statuses.clone()) {
@@ -429,7 +438,7 @@ impl GraphExec {
         Ok(result)
     }
 
-    /// Updates a native kernel node using CUDA's individual-parameter pointer ABI.
+    /// Updates future launches of a native kernel node without waiting for queued work.
     ///
     /// # Safety
     /// The node must belong to this graph. New arguments must satisfy the original verifier
@@ -451,7 +460,7 @@ impl GraphExec {
         node: *mut c_void,
         parameters: &driver::KernelNodeParameters,
     ) -> Result<()> {
-        self.try_finish()?;
+        let _context = self.graph.0.device.context.try_enter()?;
         unsafe { self.raw.try_set_kernel(node, parameters)? };
         Ok(())
     }

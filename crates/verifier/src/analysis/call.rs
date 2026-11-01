@@ -60,6 +60,11 @@ impl Analysis<'_, '_> {
                 )),
                 domain: Some(2),
                 ..Value::default()
+            })
+            .or_else(|| {
+                (instance.intrinsic_name().as_deref() == Some("arith_offset")).then(|| {
+                    Value::varying(values.iter().map(|value| value.variance).max().unwrap_or(0))
+                })
             });
         let model = match &primitive {
             Some(primitive) => Some(self.primitive(primitive, instance, &values, state)),

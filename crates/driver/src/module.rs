@@ -148,6 +148,30 @@ impl Function {
         Ok(value)
     }
 
+    pub fn try_set_attribute(&self, attribute: i32, value: i32) -> Result<()> {
+        ffi::result(
+            unsafe { ffi::cuFuncSetAttribute(self.raw, attribute, value) },
+            "cuFuncSetAttribute",
+        )
+    }
+
+    /// Maximum resident blocks per multiprocessor for the specified launch resources.
+    pub fn try_active_blocks(&self, block_size: u32, shared_bytes: usize) -> Result<u32> {
+        let mut blocks = 0;
+        ffi::result(
+            unsafe {
+                ffi::cuOccupancyMaxActiveBlocksPerMultiprocessor(
+                    &mut blocks,
+                    self.raw,
+                    block_size as i32,
+                    shared_bytes,
+                )
+            },
+            "cuOccupancyMaxActiveBlocksPerMultiprocessor",
+        )?;
+        Ok(blocks as u32)
+    }
+
     /// Block size that maximizes occupancy for this kernel.
     pub fn preferred_block_size(&self) -> u32 {
         self.try_preferred_block_size()

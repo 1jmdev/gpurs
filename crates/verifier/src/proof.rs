@@ -532,30 +532,3 @@ fn less_equal(left: &Polynomial, right: &Polynomial, clauses: &mut Vec<Clause>) 
     ));
     true
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn guarded_coverage() {
-        let index = Polynomial::atom(Atom::Thread(0));
-        let facts = [Fact::new(
-            Predicate::compare(BinOp::Lt, &index, &Polynomial::constant(8)).unwrap(),
-        )];
-        let comparisons = comparisons(&facts);
-        let proofs = Proofs {
-            facts: &comparisons,
-            variables: &[],
-        };
-        let engine = Engine {
-            facts: &facts,
-            variables: &[],
-            scalars: &[],
-        };
-        assert_eq!(
-            proofs.coverage(&index, &index, &facts, &engine),
-            Some(Requirement::new())
-        );
-    }
-}

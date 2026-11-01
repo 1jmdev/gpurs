@@ -1,8 +1,8 @@
 use std::{collections::HashSet, rc::Rc, slice};
 
 use crate::{
-    Buffer, DeviceAddress, DeviceSlice, DeviceSliceMut, Error, ExternalAccess, Gpu, Result, Stream,
-    gpu::Scatter, reference::sealed::Reference,
+    Buffer, DeviceAddress, DeviceSlice, DeviceSliceMut, Error, ExternalAccess, Gpu, PinnedBuffer,
+    Result, Stream, Transfer, gpu::Scatter, reference::sealed::Reference,
 };
 
 pub struct DeviceScatter<T> {
@@ -109,6 +109,17 @@ impl<T> DeviceScatter<T> {
     }
 
     pub fn try_update(&mut self, stream: &Stream, indices: &[usize]) -> Result<()> {
+        self.try_update_async(stream, indices)?
+            .try_wait()
+            .map(|_| ())
+    }
+
+    /// Enqueues validated replacement indices without waiting for prior descriptor reads.
+    pub fn try_update_async(
+        &mut self,
+        stream: &Stream,
+        indices: &[usize],
+    ) -> Result<Transfer<PinnedBuffer<usize>>> {
         if indices.len() != self.len()
             || indices.iter().any(|&index| index >= self.target_len)
             || indices.iter().collect::<HashSet<_>>().len() != indices.len()
@@ -117,7 +128,7 @@ impl<T> DeviceScatter<T> {
                 "scatter updates require the same length and unique, in-bounds indices".to_owned(),
             ));
         }
-        stream.try_copy_from_host(&mut self.indices, indices)
+        stream.try_copy_from_host_async(&mut self.indices, indices)
     }
 
     pub fn update(&mut self, stream: &Stream, indices: &[usize]) {

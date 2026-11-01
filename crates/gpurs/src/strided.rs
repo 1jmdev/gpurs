@@ -1,8 +1,9 @@
 use std::{ops::Range, rc::Rc, slice};
 
 use crate::{
-    Buffer, DeviceAddress, DeviceScatter, DeviceSlice, DeviceSliceMut, Error, Gpu, Result,
-    buffer::Span, gpu::Strided, reference::sealed::Reference, tracking::Allocation,
+    Buffer, DeviceAddress, DeviceScatter, DeviceSlice, DeviceSliceMut, Error, Gpu, PinnedBuffer,
+    Result, Stream, Transfer, buffer::Span, gpu::Strided, reference::sealed::Reference,
+    tracking::Allocation,
 };
 
 /// A retained strided descriptor. Zero strides broadcast; dimensions must be nonempty.
@@ -65,41 +66,16 @@ impl Gpu {
         offset: usize,
     ) -> Result<DeviceStrided<T, N>> {
         let span = source.span();
-        if N > 8 || shape.contains(&0) || !Rc::ptr_eq(&self.device, &span.allocation.device) {
+        if !Rc::ptr_eq(&self.device, &span.allocation.device) {
             return Err(Error::InvalidOperation(
-                "strided views require rank at most eight, nonzero extents and matching devices"
-                    .to_owned(),
+                "strided view belongs to another GPU".to_owned(),
             ));
         }
-        let end = shape
-            .iter()
-            .zip(strides)
-            .try_fold(offset, |end, (&size, stride)| {
-                end.checked_add((size - 1).checked_mul(stride)?)
-            });
-        let len = shape
-            .iter()
-            .try_fold(1usize, |len, size| len.checked_mul(*size));
-        let (Some(end), Some(len)) = (end.filter(|end| *end < span.len), len) else {
-            return Err(Error::InvalidOperation(
-                "strided view exceeds its source or the addressable element count".to_owned(),
-            ));
-        };
-        let descriptor = Strided {
-            // SAFETY: the source range is retained and every reachable offset was checked.
-            address: unsafe {
-                DeviceAddress::from_raw(
-                    span.allocation.pointer + (span.start + offset * size_of::<T>()) as u64,
-                )
-            },
-            shape,
-            strides,
-            len,
-        };
+        let descriptor = descriptor::<T, N>(span, shape, strides, offset)?;
         Ok(DeviceStrided {
             buffer: self.try_copy(slice::from_ref(&descriptor))?,
             source: span.allocation.clone(),
-            range: span.start + offset * size_of::<T>()..span.start + (end + 1) * size_of::<T>(),
+            range: span.bytes::<T>(),
         })
     }
 
@@ -113,6 +89,68 @@ impl Gpu {
         self.try_strided(source, shape, strides, offset)
             .unwrap_or_else(|error| panic!("{error}"))
     }
+}
+
+impl<T: Copy, const N: usize> DeviceStrided<T, N> {
+    /// Updates geometry within the retained source range, preserving captured graph accesses.
+    pub fn try_update_async(
+        &mut self,
+        stream: &Stream,
+        shape: [usize; N],
+        strides: [usize; N],
+        offset: usize,
+    ) -> Result<Transfer<PinnedBuffer<Strided<T, N>>>> {
+        let descriptor = descriptor::<T, N>(
+            Span {
+                allocation: &self.source,
+                start: self.range.start,
+                len: self.range.len() / size_of::<T>(),
+            },
+            shape,
+            strides,
+            offset,
+        )?;
+        stream.try_copy_descriptor(&mut self.buffer, slice::from_ref(&descriptor))
+    }
+}
+
+fn descriptor<T, const N: usize>(
+    span: Span<'_>,
+    shape: [usize; N],
+    strides: [usize; N],
+    offset: usize,
+) -> Result<Strided<T, N>> {
+    if N > 8 || shape.contains(&0) || size_of::<T>() == 0 {
+        return Err(Error::InvalidOperation(
+            "strided views require rank at most eight and nonzero extents and element size"
+                .to_owned(),
+        ));
+    }
+    let end = shape
+        .iter()
+        .zip(strides)
+        .try_fold(offset, |end, (&size, stride)| {
+            end.checked_add((size - 1).checked_mul(stride)?)
+        });
+    let len = shape
+        .iter()
+        .try_fold(1usize, |len, size| len.checked_mul(*size));
+    let (Some(_), Some(len)) = (end.filter(|end| *end < span.len), len) else {
+        return Err(Error::InvalidOperation(
+            "strided view exceeds its source or the addressable element count".to_owned(),
+        ));
+    };
+    Ok(Strided {
+        // SAFETY: every reachable offset lies within the retained source range.
+        address: unsafe {
+            DeviceAddress::from_raw(
+                span.allocation.pointer + (span.start + offset * size_of::<T>()) as u64,
+            )
+        },
+        shape,
+        strides,
+        len,
+    })
 }
 
 impl<T, const N: usize> Reference<Strided<T, N>> for DeviceStrided<T, N> {

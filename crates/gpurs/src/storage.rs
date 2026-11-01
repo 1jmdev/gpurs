@@ -10,18 +10,37 @@ mod sealed {
 }
 
 /// Padding-free element types for which every bit pattern is valid.
-pub trait BitPattern: Copy + sealed::Sealed {}
+///
+/// # Safety
+/// Every byte must be initialized, every bit pattern valid, and no field may hold a
+/// reference or pointer. Use the `BitPattern` derive to check a concrete `repr(C)` struct.
+///
+/// ```compile_fail
+/// #[repr(C)]
+/// #[derive(Clone, Copy, gpurs::BitPattern)]
+/// struct Padded {
+///     flag: u8,
+///     value: u32,
+/// }
+/// ```
+///
+/// ```compile_fail
+/// #[repr(C)]
+/// #[derive(Clone, Copy, gpurs::BitPattern)]
+/// struct Restricted {
+///     flag: bool,
+/// }
+/// ```
+pub unsafe trait BitPattern: Copy {}
 
 pub trait AtomicElement: sealed::Sealed {}
 
-impl<T: BitPattern, const N: usize> sealed::Sealed for [T; N] {}
-impl<T: BitPattern, const N: usize> BitPattern for [T; N] {}
+unsafe impl<T: BitPattern, const N: usize> BitPattern for [T; N] {}
 
 macro_rules! bit_patterns {
     ($($element:ty),* $(,)?) => {
         $(
-            impl sealed::Sealed for $element {}
-            impl BitPattern for $element {}
+            unsafe impl BitPattern for $element {}
         )*
     };
 }

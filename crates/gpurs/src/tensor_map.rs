@@ -3,13 +3,13 @@ use std::{marker::PhantomData, ops::Range, rc::Rc, slice};
 use gpurs_driver as driver;
 
 use crate::{
-    DeviceSlice, Gpu,
+    DeviceSlice, Error, Gpu, PinnedBuffer, Result, Stream, Transfer,
     buffer::Buffer,
     gpu::tensor::{Element, TensorMap},
     tracking::Allocation,
 };
 
-/// An immutable device descriptor retaining the matrix it describes until queued reads finish.
+/// A reusable device descriptor retaining its source range until queued reads finish.
 pub struct DeviceTensorMap<T, const ROWS: usize, const COLUMNS: usize> {
     pub(crate) buffer: Buffer<TensorMap<T, ROWS, COLUMNS>>,
     pub(crate) source: Rc<Allocation>,
@@ -53,7 +53,40 @@ impl Gpu {
         DeviceTensorMap {
             buffer: self.copy(slice::from_ref(&map)),
             source: span.allocation.clone(),
-            range: span.start..span.start + rows * columns * size_of::<T>(),
+            range: span.bytes::<T>(),
         }
+    }
+}
+
+impl<T: Element, const ROWS: usize, const COLUMNS: usize> DeviceTensorMap<T, ROWS, COLUMNS> {
+    /// Updates dimensions within the retained source range without changing the device address.
+    pub fn try_update_async(
+        &mut self,
+        stream: &Stream,
+        rows: usize,
+        columns: usize,
+    ) -> Result<Transfer<PinnedBuffer<TensorMap<T, ROWS, COLUMNS>>>> {
+        let _context = self.source.device.context.try_enter()?;
+        if !rows
+            .checked_mul(columns)
+            .and_then(|elements| elements.checked_mul(size_of::<T>()))
+            .is_some_and(|bytes| bytes <= self.range.len())
+        {
+            return Err(Error::InvalidOperation(
+                "tensor map dimensions exceed the retained source range".to_owned(),
+            ));
+        }
+        let map = TensorMap::<T, ROWS, COLUMNS> {
+            descriptor: driver::try_tensor_map(
+                T::TENSOR_MAP_TYPE,
+                size_of::<T>() as u64,
+                self.source.pointer + self.range.start as u64,
+                [rows as u64, columns as u64],
+                [ROWS as u32, COLUMNS as u32],
+            )?
+            .0,
+            element: PhantomData,
+        };
+        stream.try_copy_descriptor(&mut self.buffer, slice::from_ref(&map))
     }
 }

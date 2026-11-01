@@ -78,6 +78,26 @@ pub struct SharedRegion<T> {
 )]
 pub unsafe fn dynamic_shared() -> SharedRegion<u8>;
 
+impl SharedRegion<u8> {
+    /// Removes a typed, aligned prefix, returning the remaining disjoint bytes.
+    pub fn partition<T>(self, length: usize) -> (SharedRegion<T>, Self) {
+        assert!(size_of::<T>() != 0);
+        assert!((self.pointer as usize).is_multiple_of(align_of::<T>()));
+        let (region, remainder) = self.split_at(
+            length
+                .checked_mul(size_of::<T>())
+                .expect("shared partition size exceeds the addressable byte count"),
+        );
+        (
+            SharedRegion {
+                pointer: region.pointer.cast(),
+                length,
+            },
+            remainder,
+        )
+    }
+}
+
 impl<T> SharedRegion<T> {
     pub fn len(&self) -> usize {
         self.length

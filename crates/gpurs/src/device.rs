@@ -15,7 +15,7 @@ use crate::{
     buffer::{Buffer, DeviceValue},
     launch,
     stream::Stream,
-    tracking::{self, Access, Allocation, Status, StatusSlot},
+    tracking::{self, Access, Allocation, Status},
 };
 
 const STATUS_CHUNK: usize = 1024;
@@ -406,11 +406,7 @@ impl Device {
             observed: Cell::new(None),
             reported: Cell::new(false),
             error: None,
-            slot: Some(Rc::new(StatusSlot {
-                pointer,
-                chunk,
-                pool: self.statuses.clone(),
-            })),
+            pool: Some(self.statuses.clone()),
         }))
     }
 }

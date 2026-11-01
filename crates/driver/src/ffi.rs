@@ -91,6 +91,12 @@ unsafe extern "C" {
         dynamic_shared_memory_size: usize,
         block_size_limit: c_int,
     ) -> CUresult;
+    pub fn cuOccupancyMaxActiveBlocksPerMultiprocessor(
+        blocks: *mut c_int,
+        function: CUfunction,
+        block_size: c_int,
+        dynamic_shared_memory_size: usize,
+    ) -> CUresult;
     pub fn cuLaunchKernel(
         function: CUfunction,
         grid_x: c_uint,

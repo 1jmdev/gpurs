@@ -79,8 +79,12 @@ pub fn compile_architectures(architectures: &[&str]) {
         .iter()
         .map(|(_, value)| value.clone())
         .chain(
-            ["GPURS_STRICTNESS", "GPURS_INSTRUMENTED"]
-                .map(|name| env::var(name).unwrap_or_default()),
+            [
+                "GPURS_STRICTNESS",
+                "GPURS_INSTRUMENTED",
+                "GPURS_MAX_REGISTERS",
+            ]
+            .map(|name| env::var(name).unwrap_or_default()),
         )
         .collect::<Vec<_>>()
         .join("\n");
@@ -128,10 +132,11 @@ pub fn compile_architectures(architectures: &[&str]) {
     object::write_object(&artifact.encode(), &object);
     println!("cargo::rustc-link-arg={}", object.display());
     println!("cargo::rerun-if-changed={COMPILER_LIBRARY}");
-    for name in TOOLKIT_ENVIRONMENT
-        .into_iter()
-        .chain(["GPURS_STRICTNESS", "GPURS_INSTRUMENTED"])
-    {
+    for name in TOOLKIT_ENVIRONMENT.into_iter().chain([
+        "GPURS_STRICTNESS",
+        "GPURS_INSTRUMENTED",
+        "GPURS_MAX_REGISTERS",
+    ]) {
         println!("cargo::rerun-if-env-changed={name}");
     }
 }
@@ -411,7 +416,10 @@ fn link(lowered: &[&LoweredCrate], architecture: &str, cache: &Path) -> Artifact
             .collect()
     });
     let ptx = gpurs_nvvm::link_ptx(&modules);
-    let hash = content_hash(&format!("{fingerprint}\n{architecture}\n{ptx}"));
+    let registers = env::var("GPURS_MAX_REGISTERS").unwrap_or_default();
+    let hash = content_hash(&format!(
+        "{fingerprint}\n{architecture}\n{registers}\n{ptx}"
+    ));
     let path = cache.join(format!("{hash}.cubin"));
     let cubin = fs::read(&path).unwrap_or_else(|_| {
         let scratch = cache.join(format!("{hash}.{}.ptxas", process::id()));

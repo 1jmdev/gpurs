@@ -3,7 +3,7 @@ use std::{
     any::Any,
     ffi::c_void,
     mem::{self, MaybeUninit},
-    ops::{Deref, DerefMut},
+    ops::{Deref, DerefMut, Range},
     rc::Rc,
     slice,
 };
@@ -118,6 +118,10 @@ impl Gpu {
 
     pub fn try_pin<T>(&self, data: &[T]) -> Result<PinnedBuffer<T>> {
         launch::try_verified::<T>(&self.device)?;
+        self.try_pin_copy(data)
+    }
+
+    pub(crate) fn try_pin_copy<T>(&self, data: &[T]) -> Result<PinnedBuffer<T>> {
         let host = self.try_pinned_uninit::<T>(data.len())?;
         // SAFETY: storage holds the slice, including padding, and does not overlap it.
         unsafe {
@@ -441,12 +445,30 @@ impl Stream {
         destination: &mut impl DeviceSliceMut<T>,
         source: &[T],
     ) -> Result<()> {
+        self.try_copy_from_host_async(destination, source)?
+            .try_wait()
+            .map(|_| ())
+    }
+
+    /// Stages host values in owned pinned storage and enqueues an upload.
+    pub fn try_copy_from_host_async<T>(
+        &self,
+        destination: &mut impl DeviceSliceMut<T>,
+        source: &[T],
+    ) -> Result<Transfer<PinnedBuffer<T>>> {
+        launch::try_verified::<T>(&self.device)?;
+        self.try_copy_descriptor(destination, source)
+    }
+
+    pub(crate) fn try_copy_descriptor<T>(
+        &self,
+        destination: &mut impl DeviceSliceMut<T>,
+        source: &[T],
+    ) -> Result<Transfer<PinnedBuffer<T>>> {
         let gpu = Gpu {
             device: self.device.clone(),
         };
-        self.try_upload(destination, gpu.try_pin(source)?)?
-            .try_wait()
-            .map(|_| ())
+        self.try_upload(destination, gpu.try_pin_copy(source)?)
     }
 
     /// Enqueues a direct pinned upload, returning host storage through the completion handle.
@@ -455,8 +477,22 @@ impl Stream {
         destination: &mut impl DeviceSliceMut<T>,
         source: PinnedBuffer<T>,
     ) -> Result<Transfer<PinnedBuffer<T>>> {
+        let len = source.len;
+        self.try_upload_range(destination, source, 0..len)
+    }
+
+    /// Uploads a host sub-range, retaining the entire pinned buffer until completion.
+    pub fn try_upload_range<T>(
+        &self,
+        destination: &mut impl DeviceSliceMut<T>,
+        source: PinnedBuffer<T>,
+        elements: Range<usize>,
+    ) -> Result<Transfer<PinnedBuffer<T>>> {
         let destination = destination.span();
-        if destination.len != source.len {
+        if elements.start > elements.end
+            || elements.end > source.len
+            || destination.len != elements.len()
+        {
             return Err(Error::InvalidOperation(
                 "host upload lengths differ".to_owned(),
             ));
@@ -470,7 +506,7 @@ impl Stream {
                 unsafe {
                     driver::try_copy_to_device_async(
                         destination.allocation.pointer + range.start as u64,
-                        slice::from_raw_parts(host.pointer.cast(), range.len()),
+                        slice::from_raw_parts(host.pointer.add(elements.start).cast(), range.len()),
                         &self.raw,
                     )?;
                 }
@@ -504,8 +540,22 @@ impl Stream {
         source: &impl DeviceSlice<T>,
         destination: PinnedBuffer<T>,
     ) -> Result<Transfer<PinnedBuffer<T>>> {
+        let len = destination.len;
+        self.try_download_into_range(source, destination, 0..len)
+    }
+
+    /// Downloads into a host sub-range, preserving values outside that range.
+    pub fn try_download_into_range<T>(
+        &self,
+        source: &impl DeviceSlice<T>,
+        destination: PinnedBuffer<T>,
+        elements: Range<usize>,
+    ) -> Result<Transfer<PinnedBuffer<T>>> {
         let source = source.span();
-        if source.len != destination.len {
+        if elements.start > elements.end
+            || elements.end > destination.len
+            || source.len != elements.len()
+        {
             return Err(Error::InvalidOperation(
                 "host download lengths differ".to_owned(),
             ));
@@ -518,7 +568,10 @@ impl Stream {
                 // SAFETY: the transfer owns the destination and retains the source.
                 unsafe {
                     driver::try_copy_from_device_async(
-                        slice::from_raw_parts_mut(host.pointer.cast(), range.len()),
+                        slice::from_raw_parts_mut(
+                            host.pointer.add(elements.start).cast(),
+                            range.len(),
+                        ),
                         source.allocation.pointer + range.start as u64,
                         &self.raw,
                     )?;

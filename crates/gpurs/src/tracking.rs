@@ -46,7 +46,7 @@ pub(crate) struct Status {
     pub kernel: String,
     pub observed: Cell<Option<u32>>,
     pub reported: Cell<bool>,
-    pub slot: Option<Rc<StatusSlot>>,
+    pub pool: Option<Rc<StatusPool>>,
     pub error: Option<Error>,
 }
 
@@ -122,15 +122,11 @@ impl Access {
     }
 }
 
-pub(crate) struct StatusSlot {
-    pub pointer: DevicePointer,
-    pub chunk: DevicePointer,
-    pub pool: Rc<StatusPool>,
-}
-
-impl Drop for StatusSlot {
+impl Drop for Status {
     fn drop(&mut self) {
-        self.pool.free.borrow_mut().push((self.pointer, self.chunk));
+        if let Some(pool) = &self.pool {
+            pool.free.borrow_mut().push((self.pointer, self.chunk));
+        }
     }
 }
 
@@ -142,7 +138,7 @@ impl Status {
             kernel: String::new(),
             observed: Cell::new(Some(u32::MAX)),
             reported: Cell::new(true),
-            slot: None,
+            pool: None,
             error: Some(error),
         })
     }
