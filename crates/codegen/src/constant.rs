@@ -1,3 +1,4 @@
+use gpurs_ir::{Type, Value as IRValue};
 use gpurs_rustc::{
     AllocId, Allocation, ConstOperand, ConstantKind, GlobalAlloc, Scalar, TyConstKind, ValueRepr,
     session,
@@ -5,7 +6,6 @@ use gpurs_rustc::{
 
 use super::{
     function::FunctionBuilder,
-    ir::{self, Type},
     layout::{self, Shape},
     module::ModuleBuilder,
     place::{Operand, Place, Value},
@@ -53,7 +53,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
 impl ModuleBuilder<'_> {
     /// The scalar stored at `offset` of `allocation`, pointing into a global when it carries
     /// provenance.
-    fn scalar(&mut self, allocation: &Allocation, offset: usize, scalar: Scalar) -> ir::Value {
+    fn scalar(&mut self, allocation: &Allocation, offset: usize, scalar: Scalar) -> IRValue {
         let ty = layout::immediate_type(scalar);
         let width = (ty.bits() as usize).div_ceil(8);
         let value = session::allocation_bytes(allocation)
@@ -73,20 +73,20 @@ impl ModuleBuilder<'_> {
             return self.global_pointer(provenance.0, value as u64);
         }
         match ty {
-            Type::Float => ir::Value::float(ty, f32::from_bits(value as u32) as f64),
-            Type::Double => ir::Value::float(ty, f64::from_bits(value as u64)),
-            ty if ty.is_pointer() => ir::Value::address(value as u64),
-            ty => ir::Value::int(ty, value),
+            Type::Float => IRValue::float(ty, f32::from_bits(value as u32) as f64),
+            Type::Double => IRValue::float(ty, f64::from_bits(value as u64)),
+            ty if ty.is_pointer() => IRValue::address(value as u64),
+            ty => IRValue::int(ty, value),
         }
     }
 
     /// The generic address `offset` bytes into the global holding `alloc_id`.
-    pub fn global_pointer(&mut self, alloc_id: AllocId, offset: u64) -> ir::Value {
+    pub fn global_pointer(&mut self, alloc_id: AllocId, offset: u64) -> IRValue {
         if !self.allocations.contains_key(&alloc_id) {
             let GlobalAlloc::Memory(allocation) = GlobalAlloc::from(alloc_id) else {
                 self.sess
                     .err("static storage and function pointers are not supported in GPU constants");
-                return ir::Value::address(0);
+                return IRValue::address(0);
             };
             let pointer = self.allocation(&allocation);
             self.allocations.insert(alloc_id, pointer);
@@ -96,13 +96,13 @@ impl ModuleBuilder<'_> {
 
     /// A constant global holding `allocation`, with its pointers relocated to their own
     /// globals.
-    pub fn allocation(&mut self, allocation: &Allocation) -> ir::Value {
+    pub fn allocation(&mut self, allocation: &Allocation) -> IRValue {
         let bytes = session::allocation_bytes(allocation);
         let mut fields = Vec::new();
         let mut position = 0;
         for &(offset, provenance) in &allocation.provenance.ptrs {
             if offset > position {
-                fields.push(ir::Value::bytes(bytes[position..offset].to_vec()));
+                fields.push(IRValue::bytes(bytes[position..offset].to_vec()));
             }
             let inner = bytes
                 .get(offset..offset + 8)
@@ -112,11 +112,11 @@ impl ModuleBuilder<'_> {
             position = offset + 8;
         }
         if position < bytes.len() || fields.is_empty() {
-            fields.push(ir::Value::bytes(bytes[position..].to_vec()));
+            fields.push(IRValue::bytes(bytes[position..].to_vec()));
         }
         let initializer = match <[_; 1]>::try_from(fields) {
             Ok([bytes]) => bytes,
-            Err(fields) => ir::Value::packed(fields),
+            Err(fields) => IRValue::packed(fields),
         };
         self.ir
             .global("gpurs.constant", 1, true, initializer, allocation.align)

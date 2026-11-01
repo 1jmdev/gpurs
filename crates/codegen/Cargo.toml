@@ -10,7 +10,7 @@ repository.workspace = true
 rustc_private = true
 
 [dependencies]
-bitflags.workspace = true
 gpurs-artifact.workspace = true
+gpurs-ir.workspace = true
 gpurs-rustc.workspace = true
 gpurs-verifier.workspace = true

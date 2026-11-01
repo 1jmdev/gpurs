@@ -1,7 +1,6 @@
+use gpurs_ir::Type;
 use gpurs_rustc::{FloatLength, IntegerLength, Primitive, Scalar, Signature, layout};
 pub use gpurs_rustc::{PassMode, Shape};
-
-use super::ir::Type;
 
 pub fn primitive(scalar: Scalar) -> Primitive {
     match scalar {

@@ -114,8 +114,8 @@ dependencies = [
 name = "gpurs-codegen"
 version = "0.1.0"
 dependencies = [
- "bitflags",
  "gpurs-artifact",
+ "gpurs-ir",
  "gpurs-rustc",
  "gpurs-verifier",
 ]
@@ -153,6 +153,14 @@ version = "0.1.0"
 dependencies = [
  "gpurs",
  "gpurs-build",
+]
+
+[[package]]
+name = "gpurs-ir"
+version = "0.1.0"
+dependencies = [
+ "bitflags",
+ "gpurs-rustc",
 ]
 
 [[package]]

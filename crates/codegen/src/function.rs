@@ -1,6 +1,7 @@
 use std::{collections::BTreeSet, rc::Rc};
 
 use gpurs_artifact::Failure;
+use gpurs_ir::{Type, Value as IRValue};
 use gpurs_rustc::{
     AssertMessage, BinOp, Body, CrateDef, FxHashMap, FxHashSet, Graph, Instance, Mutability,
     NonDivergingIntrinsic, Operand as MirOperand, Place as MirPlace, ProjectionElem, RETURN_LOCAL,
@@ -10,7 +11,6 @@ use gpurs_rustc::{
 use gpurs_verifier::{Certificate, policy};
 
 use super::{
-    ir::{self, Type},
     layout::{self, PassMode, Shape},
     module::ModuleBuilder,
     place::{Operand, Place, Value},
@@ -29,18 +29,18 @@ pub struct FunctionBuilder<'m, 'sess> {
     slots: Vec<Option<u64>>,
     pub fast_math: bool,
     pub span: Span,
-    pub ir: ir::Function,
+    pub ir: gpurs_ir::Function,
     /// The IR block of each MIR block, in the first copy of every unrolled loop.
-    blocks: Vec<ir::Block>,
+    blocks: Vec<gpurs_ir::Block>,
     /// The loops lowered as one copy of their body per iteration, outermost first.
     unrolled: Vec<unroll::Loop>,
     /// The copy of each unrolled loop enclosing the current block, outermost first.
     pub(super) copy: Vec<u64>,
     /// The IR blocks of further copies, and the copies awaiting lowering.
-    copies: FxHashMap<(usize, Vec<u64>), ir::Block>,
+    copies: FxHashMap<(usize, Vec<u64>), gpurs_ir::Block>,
     pending: Vec<(usize, Vec<u64>)>,
     /// The block an unrolled loop continues to after its last iteration, which is unreachable.
-    exhausted: Option<ir::Block>,
+    exhausted: Option<gpurs_ir::Block>,
     /// The checks this certified copy omits or records; `None` for the instrumented copy.
     pub certificate: Option<Certificate>,
     /// Blocks whose divisions follow a recorded zero-divisor check and use a safe divisor.
@@ -65,7 +65,7 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
             locals: Vec::new(),
             slots: Vec::new(),
             span,
-            ir: ir::Function::new("", Type::Void, Vec::new()),
+            ir: gpurs_ir::Function::new("", Type::Void, Vec::new()),
             blocks: Vec::new(),
             unrolled: Vec::new(),
             copy: Vec::new(),
@@ -85,7 +85,7 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
     }
 
     /// The address `offset` bytes into `place`, with the alignment it keeps there.
-    pub fn interior(&mut self, place: &Place, offset: u64) -> (ir::Value, u64) {
+    pub fn interior(&mut self, place: &Place, offset: u64) -> (IRValue, u64) {
         let pointer = self.offset(place.pointer.clone(), offset);
         (pointer, layout::restrict_align(place.align, offset))
     }
@@ -143,23 +143,20 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
         self.ir.call(
             "gpurs.record",
             Type::Void,
-            vec![ir::Value::i32(failure as i32)],
+            vec![IRValue::i32(failure as i32)],
         );
     }
 
     /// Records a device failure and terminates the thread.
     pub fn fail(&mut self, failure: Failure) {
-        self.ir.call(
-            "gpurs.fail",
-            Type::Void,
-            vec![ir::Value::i32(failure as i32)],
-        );
+        self.ir
+            .call("gpurs.fail", Type::Void, vec![IRValue::i32(failure as i32)]);
         self.ir.unreachable();
     }
 
     /// The IR block lowering MIR block `block` when the current block branches to it, which is
     /// the next copy when the branch closes an iteration of an unrolled loop.
-    pub fn target(&mut self, block: usize) -> ir::Block {
+    pub fn target(&mut self, block: usize) -> gpurs_ir::Block {
         let from = self.enclosing(self.block);
         let mut copy = Vec::new();
         for unrolled in self.enclosing(block) {
@@ -186,7 +183,7 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
     }
 
     /// The IR block of copy `copy` of `block`, queued for lowering when new.
-    fn instance(&mut self, block: usize, copy: Vec<u64>) -> ir::Block {
+    fn instance(&mut self, block: usize, copy: Vec<u64>) -> gpurs_ir::Block {
         let key = (block, copy);
         if let Some(&target) = self.copies.get(&key) {
             return target;
@@ -201,7 +198,7 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
         target
     }
 
-    fn exhausted(&mut self) -> ir::Block {
+    fn exhausted(&mut self) -> gpurs_ir::Block {
         if let Some(block) = self.exhausted {
             return block;
         }
@@ -217,7 +214,7 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
     /// Lowers the body as the function `name` and adds it to the module.
     pub fn lower(mut self, name: &str) {
         let signature = self.module.signature(self.instance);
-        self.ir = ir::Function::new(
+        self.ir = gpurs_ir::Function::new(
             name,
             layout::return_type(&signature),
             layout::parameters(&signature),
@@ -229,7 +226,7 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
             (0..layout::parameters(&signature).len()).map(|index| self.ir.parameter(index));
         let result =
             matches!(signature.result.0, PassMode::Indirect).then(|| parameters.next().unwrap());
-        let arguments: Vec<Vec<ir::Value>> = signature
+        let arguments: Vec<Vec<IRValue>> = signature
             .arguments
             .iter()
             .map(|(mode, _)| {
@@ -243,7 +240,7 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
         for (local, declaration) in declarations.iter().enumerate() {
             let shape = self.shape_of(declaration.ty);
             let place = if shape.is_zst() || shape.is_unsized() {
-                Place::new(ir::Value::address(shape.align()), shape)
+                Place::new(IRValue::address(shape.align()), shape)
             } else if local == RETURN_LOCAL
                 && let Some(result) = &result
             {
@@ -348,13 +345,13 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
                         .expect("pointer");
                     let size = self.shape_of(pointee.ty).size().bytes() as u64;
                     let bytes = self.ir.binary(
-                        ir::Binary::Mul,
-                        ir::Flags::empty(),
+                        gpurs_ir::Binary::Mul,
+                        gpurs_ir::Flags::empty(),
                         count.scalar(),
-                        ir::Value::i64(size),
+                        IRValue::i64(size),
                     );
                     self.ir.transfer(
-                        ir::Transfer::Copy,
+                        gpurs_ir::Transfer::Copy,
                         destination.scalar(),
                         source.scalar(),
                         bytes,
@@ -371,7 +368,7 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
                     };
                     let pointer = self.locals[*local].pointer.clone();
                     self.ir
-                        .call(symbol, Type::Void, vec![ir::Value::i64(*size), pointer]);
+                        .call(symbol, Type::Void, vec![IRValue::i64(*size), pointer]);
                 }
             }
             _ => {}
@@ -394,7 +391,7 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
                     && let Some((value, target)) = targets.branches().next()
                     && self.select_branch(
                         discriminant.scalar(),
-                        ir::Value::int(ty.clone(), value),
+                        IRValue::int(ty.clone(), value),
                         target,
                         targets.otherwise(),
                     )
@@ -403,7 +400,7 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
                 }
                 let cases = targets
                     .branches()
-                    .map(|(value, target)| (ir::Value::int(ty.clone(), value), self.target(target)))
+                    .map(|(value, target)| (IRValue::int(ty.clone(), value), self.target(target)))
                     .collect();
                 let otherwise = self.target(targets.otherwise());
                 self.ir.switch(discriminant.scalar(), otherwise, cases);
@@ -416,7 +413,7 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
                     PassMode::Pair(..) => {
                         let (first, second) = self.load(&place).pair();
                         let ty = Type::Struct(vec![first.ty.clone(), second.ty.clone()]);
-                        let partial = self.ir.insert(ir::Value::undef(ty), first, 0);
+                        let partial = self.ir.insert(IRValue::undef(ty), first, 0);
                         Some(self.ir.insert(partial, second, 1))
                     }
                 };
@@ -501,8 +498,8 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
 
     fn select_branch(
         &mut self,
-        discriminant: ir::Value,
-        value: ir::Value,
+        discriminant: IRValue,
+        value: IRValue,
         first: usize,
         second: usize,
     ) -> bool {
@@ -613,7 +610,9 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
                 self.statement(&statement.kind);
             }
         }
-        let condition = self.ir.compare(ir::Predicate::Eq, discriminant, value);
+        let condition = self
+            .ir
+            .compare(gpurs_ir::Predicate::Eq, discriminant, value);
         for (local, selected) in locals.into_iter().zip(selected) {
             let place = self.locals[local].clone();
             let other = self.load(&place);
@@ -653,7 +652,7 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
             MirOperand::Constant(constant) => self.constant(constant),
             MirOperand::RuntimeChecks(checks) => {
                 let value = policy::runtime_check(self.sess, checks);
-                Operand::immediate(ir::Value::bool(value), self.shape_of(Ty::bool_ty()))
+                Operand::immediate(IRValue::bool(value), self.shape_of(Ty::bool_ty()))
             }
         }
     }

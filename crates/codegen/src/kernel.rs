@@ -1,16 +1,11 @@
 use gpurs_artifact::{
     self as artifact, Entry, Kernel, PARAMETERS_OFFSET, RESULT_OFFSET, STATUS_OFFSET, SharedMemory,
 };
+use gpurs_ir::{Access, Binary, Conversion, Flags, Type, Value as IRValue};
 use gpurs_rustc::Session;
 use gpurs_verifier::KernelPlan;
 
-use super::{
-    function::FunctionBuilder,
-    intrinsic::GEOMETRY,
-    ir::{self, Access, Binary, Conversion, Flags, Type},
-    module::ModuleBuilder,
-    place::Place,
-};
+use super::{function::FunctionBuilder, intrinsic::GEOMETRY, module::ModuleBuilder, place::Place};
 
 /// Kernel metadata and NVVM IR, including all entry points and shared-memory requirements.
 #[derive(Clone, Debug)]
@@ -104,7 +99,8 @@ impl<'sess> ModuleBuilder<'sess> {
         let size = size - argument_offset;
         let mut function = FunctionBuilder::new(self, plan.instance);
         function.linear = linear;
-        function.ir = ir::Function::new(symbol, Type::Void, vec![Type::bytes(size).pointer()]);
+        function.ir =
+            gpurs_ir::Function::new(symbol, Type::Void, vec![Type::bytes(size).pointer()]);
         function.ir.internal = false;
         function.ir.byval(0, align);
         let arguments = function.ir.parameter(0);
@@ -140,7 +136,7 @@ impl<'sess> ModuleBuilder<'sess> {
                 Binary::Mul,
                 Flags::empty(),
                 index,
-                ir::Value::i64(result.size),
+                IRValue::i64(result.size),
             );
             let pointer = function.offset(arguments, RESULT_OFFSET - argument_offset);
             let pointer = function

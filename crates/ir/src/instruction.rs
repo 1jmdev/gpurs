@@ -1,9 +1,9 @@
 use bitflags::bitflags;
 
-use super::{Type, Value};
+use crate::{Type, Value};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Block(pub(super) usize);
+pub struct Block(pub(crate) usize);
 
 /// Binary operations, printed as their lowercase names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -175,7 +175,7 @@ pub enum Terminator {
 }
 
 impl Transfer {
-    pub(super) fn symbol(self) -> &'static str {
+    pub(crate) fn symbol(self) -> &'static str {
         match self {
             Transfer::Copy => "llvm.memcpy.p0i8.p0i8.i64",
             Transfer::Move => "llvm.memmove.p0i8.p0i8.i64",

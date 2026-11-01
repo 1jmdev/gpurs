@@ -10,7 +10,6 @@ mod call;
 mod constant;
 mod function;
 mod intrinsic;
-mod ir;
 mod kernel;
 mod layout;
 mod module;

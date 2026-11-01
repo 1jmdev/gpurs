@@ -1,6 +1,10 @@
 use gpurs_artifact::{
     Compatibility, Convergence, Failure, Lowering, Memory, Operand as CallOperand, Primitive,
 };
+use gpurs_ir::{
+    Access, Binary, Conversion, Flags, Modification, Ordering, Predicate, Transfer, Type,
+    Value as IRValue,
+};
 use gpurs_rustc::{
     BinOp, CrateDef, GenericArgKind, Instance, RigidTy, Scalar, Ty, TyConst, TyConstKind, TyKind,
     ValueRepr, attributes, call_graph, session,
@@ -9,9 +13,6 @@ use gpurs_verifier::policy;
 
 use super::{
     function::FunctionBuilder,
-    ir::{
-        self, Access, Binary, Conversion, Flags, Modification, Ordering, Predicate, Transfer, Type,
-    },
     layout::{self, Shape},
     place::{Operand, Place, Value},
 };
@@ -58,7 +59,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                 return true;
             }
             "ub_checks" | "contract_checks" | "overflow_checks" => {
-                Value::Scalar(ir::Value::bool(policy::intrinsic_check(self.sess, name)))
+                Value::Scalar(IRValue::bool(policy::intrinsic_check(self.sess, name)))
             }
             "black_box" | "likely" | "unlikely" => arguments[0].value.clone(),
             "read_via_copy" => {
@@ -83,13 +84,13 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                     _ => layout.size().bytes() as u64,
                 };
                 let value = if name != "size_of_val" {
-                    ir::Value::i64(layout.align())
+                    IRValue::i64(layout.align())
                 } else if layout.is_unsized() {
                     let length = arguments[0].pair().1;
                     self.ir
-                        .binary(Binary::Mul, Flags::empty(), length, ir::Value::i64(size))
+                        .binary(Binary::Mul, Flags::empty(), length, IRValue::i64(size))
                 } else {
-                    ir::Value::i64(size)
+                    IRValue::i64(size)
                 };
                 Value::Scalar(value)
             }
@@ -100,7 +101,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                 let operation = name.trim_end_matches("_nonzero");
                 let mut operands = vec![value];
                 if matches!(operation, "ctlz" | "cttz") {
-                    operands.push(ir::Value::bool(false));
+                    operands.push(IRValue::bool(false));
                 }
                 let value = self.ir.call(format!("llvm.{operation}.{ty}"), ty, operands);
                 let result = layout::immediate_type(destination.shape.scalar());
@@ -109,12 +110,12 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
             "rotate_left" | "rotate_right" => {
                 let value = arguments[0].scalar();
                 let ty = value.ty.clone();
-                let mask = ir::Value::int(ty.clone(), ty.bits() as u128 - 1);
+                let mask = IRValue::int(ty.clone(), ty.bits() as u128 - 1);
                 let shift = self.ir.resize(arguments[1].scalar(), ty.clone(), false);
                 let shift = self
                     .ir
                     .binary(Binary::And, Flags::empty(), shift, mask.clone());
-                let zero = ir::Value::int(ty, 0);
+                let zero = IRValue::int(ty, 0);
                 let reverse = self
                     .ir
                     .binary(Binary::Sub, Flags::empty(), zero, shift.clone());
@@ -145,16 +146,16 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                 );
                 let (value, overflow) = pair.pair();
                 let limit = if layout::is_signed(scalar) {
-                    let zero = ir::Value::int(ty.clone(), 0);
+                    let zero = IRValue::int(ty.clone(), 0);
                     let negative = self.ir.compare(Predicate::Slt, arguments[0].scalar(), zero);
                     let minimum = 1u128 << (ty.bits() - 1);
-                    let low = ir::Value::int(ty.clone(), minimum);
-                    let high = ir::Value::int(ty.clone(), minimum - 1);
+                    let low = IRValue::int(ty.clone(), minimum);
+                    let high = IRValue::int(ty.clone(), minimum - 1);
                     self.ir.select(negative, low, high)
                 } else if name == "saturating_sub" {
-                    ir::Value::int(ty, 0)
+                    IRValue::int(ty, 0)
                 } else {
-                    ir::Value::int(ty, u128::MAX)
+                    IRValue::int(ty, u128::MAX)
                 };
                 Value::Scalar(self.ir.select(overflow, limit, value))
             }
@@ -183,7 +184,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                     Binary::Mul,
                     Flags::empty(),
                     arguments[1].scalar(),
-                    ir::Value::i64(size),
+                    IRValue::i64(size),
                 );
                 Value::Scalar(self.ir.offset(arguments[0].scalar(), offset, false))
             }
@@ -205,7 +206,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                     division,
                     Flags::EXACT,
                     difference,
-                    ir::Value::i64(size),
+                    IRValue::i64(size),
                 ))
             }
             "ptr_mask" => {
@@ -231,7 +232,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                     Binary::Mul,
                     Flags::empty(),
                     arguments[2].scalar(),
-                    ir::Value::i64(size),
+                    IRValue::i64(size),
                 );
                 let operation = match name {
                     "write_bytes" | "volatile_set_memory" => Transfer::Set,
@@ -295,7 +296,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                     "gpurs.location",
                     1,
                     true,
-                    ir::Value::bytes(vec![0; size]),
+                    IRValue::bytes(vec![0; size]),
                     layout.align(),
                 );
                 Value::Scalar(location.generic())
@@ -314,7 +315,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
             let mask = self
                 .ir
                 .assembly("activemask.b32 $0;", "=r", true, Type::I32, Vec::new());
-            let complete = self.ir.compare(Predicate::Eq, mask, ir::Value::i32(-1));
+            let complete = self.ir.compare(Predicate::Eq, mask, IRValue::i32(-1));
             let ready = self.ir.fresh_block("warp");
             let failed = self.ir.fresh_block("warp");
             self.ir.branch_if(complete, ready, failed);
@@ -335,7 +336,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                 let thread = self.special_register("tid.x");
                 let lane = self
                     .ir
-                    .binary(Binary::And, Flags::empty(), thread, ir::Value::i32(31));
+                    .binary(Binary::And, Flags::empty(), thread, IRValue::i32(31));
                 self.ir.cast(Conversion::ZExt, lane, Type::I64)
             }
             Lowering::Register(register) => self.extended_register(&register),
@@ -375,7 +376,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                     .iter()
                     .map(|operand| match operand {
                         CallOperand::Argument(index) => arguments[*index].scalar(),
-                        CallOperand::I32(value) => ir::Value::i32(*value),
+                        CallOperand::I32(value) => IRValue::i32(*value),
                     })
                     .collect();
                 let result = layout::immediate_type(destination.shape.scalar());
@@ -450,7 +451,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                 let base = self
                     .ir
                     .cast(Conversion::AddrSpaceCast, base, Type::byte_pointer());
-                let shared = self.ir.offset(base, ir::Value::i64(offset), true);
+                let shared = self.ir.offset(base, IRValue::i64(offset), true);
                 if matches!(destination.shape.repr(), ValueRepr::Scalar(_)) {
                     shared
                 } else {
@@ -458,7 +459,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                     for (offset, scalar) in self.scalars(&destination.shape) {
                         let value = match offset {
                             0 => shared.clone(),
-                            _ => ir::Value::int(layout::immediate_type(scalar), 0),
+                            _ => IRValue::int(layout::immediate_type(scalar), 0),
                         };
                         let (pointer, align) = self.interior(destination, offset);
                         self.store_scalar(pointer, value, scalar, align);
@@ -474,7 +475,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
     /// The linear thread index from the twelve geometry registers, in `tid`, `ctaid`, `ntid`,
     /// `nctaid` order. The arithmetic is 32-bit, as the geometry registers are, and only the
     /// result is widened for slice offsets. A one-dimensional launch uses the x axis alone.
-    pub(super) fn linear_index(&mut self, registers: &[ir::Value; 12]) -> ir::Value {
+    pub(super) fn linear_index(&mut self, registers: &[IRValue; 12]) -> IRValue {
         let flags = Flags::empty();
         let registers = registers
             .clone()
@@ -485,7 +486,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
             let index = self.ir.binary(Binary::Add, flags, offset, tx);
             return self.ir.cast(Conversion::ZExt, index, Type::I64);
         }
-        let mut multiply_add = |product: ir::Value, factor, addend| {
+        let mut multiply_add = |product: IRValue, factor, addend| {
             let product = self.ir.binary(Binary::Mul, flags, product, factor);
             self.ir.binary(Binary::Add, flags, product, addend)
         };
@@ -501,7 +502,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
     }
 
     /// The registers holding `operand`: a scalar directly, an aggregate as its scalar leaves.
-    fn registers(&mut self, operand: &Operand) -> Vec<ir::Value> {
+    fn registers(&mut self, operand: &Operand) -> Vec<IRValue> {
         if let Value::Scalar(value) = &operand.value {
             return vec![value.clone()];
         }
@@ -537,12 +538,12 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
         }
     }
 
-    fn extended_register(&mut self, register: &str) -> ir::Value {
+    fn extended_register(&mut self, register: &str) -> IRValue {
         let value = self.special_register(register);
         self.ir.cast(Conversion::ZExt, value, Type::I64)
     }
 
-    pub(super) fn special_register(&mut self, register: &str) -> ir::Value {
+    pub(super) fn special_register(&mut self, register: &str) -> IRValue {
         self.ir.call(
             format!("llvm.nvvm.read.ptx.sreg.{register}"),
             Type::I32,
@@ -559,11 +560,9 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
             self.ir.call("llvm.nvvm.barrier0", Type::Void, Vec::new());
             return;
         }
-        let arrived = self.ir.call(
-            "llvm.nvvm.barrier0.popc",
-            Type::I32,
-            vec![ir::Value::i32(1)],
-        );
+        let arrived = self
+            .ir
+            .call("llvm.nvvm.barrier0.popc", Type::I32, vec![IRValue::i32(1)]);
         let x = self.special_register("ntid.x");
         let y = self.special_register("ntid.y");
         let z = self.special_register("ntid.z");

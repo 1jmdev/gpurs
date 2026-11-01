@@ -16,6 +16,7 @@ gpurs-build = { path = "crates/build" }
 gpurs-codegen = { path = "crates/codegen" }
 gpurs-driver = { path = "crates/driver" }
 gpurs-frontend = { path = "crates/frontend" }
+gpurs-ir = { path = "crates/ir" }
 gpurs-macros = { path = "crates/macros" }
 gpurs-nvvm = { path = "crates/nvvm" }
 gpurs-rustc = { path = "crates/rustc" }

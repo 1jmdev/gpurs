@@ -1,12 +1,12 @@
 use std::rc::Rc;
 
 use gpurs_artifact::SharedMemory;
+use gpurs_ir::{Access, Ordering, Type, Value as IRValue};
 use gpurs_rustc::{AllocId, FxHashMap, Instance, Session, Signature, layout};
 use gpurs_verifier::Certificate;
 
 use super::{
     function::FunctionBuilder,
-    ir::{self, Access, Ordering, Type},
     shared_memory::{CallPath, SharedAllocations},
 };
 
@@ -17,27 +17,21 @@ type Copy = (Instance, Option<Certificate>, bool, CallPath);
 /// One NVVM IR module holding every device function reachable from the requested kernels.
 pub(crate) struct ModuleBuilder<'sess> {
     pub sess: Session<'sess>,
-    pub ir: ir::Module,
+    pub ir: gpurs_ir::Module,
     /// The block-shared slot holding the launch's failure status pointer.
-    pub status: ir::Value,
+    pub status: IRValue,
     functions: FxHashMap<Copy, String>,
     queue: Vec<Copy>,
-    pub(super) allocations: FxHashMap<AllocId, ir::Value>,
+    pub(super) allocations: FxHashMap<AllocId, IRValue>,
     pub shared: SharedAllocations,
 }
 
 impl<'sess> ModuleBuilder<'sess> {
     pub fn new(sess: Session<'sess>) -> Self {
-        let mut ir = ir::Module::default();
+        let mut ir = gpurs_ir::Module::default();
         ir.typed_byval = sess.target.capability() >= 100;
         let status_pointer = Type::I32.pointer();
-        let status = ir.global(
-            "gpurs.status",
-            3,
-            false,
-            ir::Value::undef(status_pointer),
-            8,
-        );
+        let status = ir.global("gpurs.status", 3, false, IRValue::undef(status_pointer), 8);
         ModuleBuilder {
             sess,
             ir,
@@ -98,9 +92,9 @@ impl<'sess> ModuleBuilder<'sess> {
         if self.shared.dynamic {
             self.shared.required.dynamic_bytes =
                 self.shared.required.dynamic_bytes.next_multiple_of(16);
-            let mut offset = ir::Function::new("gpurs.dynamic_offset", Type::I64, vec![]);
+            let mut offset = gpurs_ir::Function::new("gpurs.dynamic_offset", Type::I64, vec![]);
             offset.inline = true;
-            offset.ret(Some(ir::Value::i64(self.shared.required.dynamic_bytes)));
+            offset.ret(Some(IRValue::i64(self.shared.required.dynamic_bytes)));
             self.ir.define(offset);
         }
         (self.ir.to_string(), self.shared.required)
@@ -108,14 +102,14 @@ impl<'sess> ModuleBuilder<'sess> {
 
     /// `gpurs.fail(code)` records the first failure of the launch and stops the thread;
     /// `gpurs.record(code)` records it and returns.
-    fn failure(&self, name: &str, stop: bool) -> ir::Function {
-        let mut function = ir::Function::new(name, Type::Void, vec![Type::I32]);
+    fn failure(&self, name: &str, stop: bool) -> gpurs_ir::Function {
+        let mut function = gpurs_ir::Function::new(name, Type::Void, vec![Type::I32]);
         function.cold = true;
         let status = function.load(Type::I32.pointer(), self.status.clone(), 8, Access::Plain);
         let code = function.parameter(0);
         function.compare_exchange(
             status,
-            ir::Value::i32(0),
+            IRValue::i32(0),
             code,
             (Ordering::Monotonic, Ordering::Monotonic),
             false,

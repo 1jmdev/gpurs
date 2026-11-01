@@ -9,14 +9,14 @@ use std::collections::hash_map::Entry;
 
 use gpurs_rustc::{FxHashMap, FxHashSet, Graph};
 
-use super::{
+use crate::{
     Access, Block, Conversion, Function, Type, Value,
     instruction::{Callee, Instruction, Terminator},
     value::Kind,
 };
 
 impl Function {
-    pub(super) fn promote(&mut self) {
+    pub(crate) fn promote(&mut self) {
         let addresses = self.addresses();
         let types = self.promotable(&addresses);
         if types.is_empty() {

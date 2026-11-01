@@ -1,14 +1,14 @@
-use super::{Conversion, Type};
+use crate::{Conversion, Type};
 
 /// A typed operand: an instruction result, a parameter, or a constant.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Value {
     pub ty: Type,
-    pub(super) kind: Kind,
+    pub(crate) kind: Kind,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(super) enum Kind {
+pub(crate) enum Kind {
     Register(u32),
     Integer(i128),
     Float(f64),
@@ -22,7 +22,7 @@ pub(super) enum Kind {
 }
 
 impl Value {
-    pub(super) fn new(ty: Type, kind: Kind) -> Value {
+    pub(crate) fn new(ty: Type, kind: Kind) -> Value {
         Value { ty, kind }
     }
 

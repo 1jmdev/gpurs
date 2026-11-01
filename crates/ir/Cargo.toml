@@ -1,0 +1,14 @@
+[package]
+name = "gpurs-ir"
+description = "Typed NVVM IR construction and printing for gpurs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[package.metadata.rust-analyzer]
+rustc_private = true
+
+[dependencies]
+bitflags.workspace = true
+gpurs-rustc.workspace = true

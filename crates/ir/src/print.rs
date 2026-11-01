@@ -2,7 +2,7 @@
 
 use std::fmt::{self, Debug, Display, Formatter};
 
-use super::{
+use crate::{
     Access, Block, Flags, Function, Module, Ordering, Predicate, Transfer, Type, Value,
     instruction::{Callee, Instruction, Terminator},
     value::Kind,

@@ -1,12 +1,12 @@
 use std::collections::BTreeMap;
 
-use super::{
+use crate::{
     Function, Type, Value,
     instruction::{Callee, Instruction},
     value::Kind,
 };
 
-pub(super) struct Global {
+pub(crate) struct Global {
     pub name: String,
     pub space: u32,
     pub constant: bool,
@@ -17,8 +17,8 @@ pub(super) struct Global {
 
 #[derive(Default)]
 pub struct Module {
-    pub(super) globals: Vec<Global>,
-    pub(super) functions: Vec<Function>,
+    pub(crate) globals: Vec<Global>,
+    pub(crate) functions: Vec<Function>,
     pub typed_byval: bool,
 }
 
@@ -75,7 +75,7 @@ impl Module {
 
     /// Declarations of the called symbols the module does not define, as result and
     /// parameter types by name.
-    pub(super) fn declarations(&self) -> BTreeMap<String, (Type, Vec<Type>)> {
+    pub(crate) fn declarations(&self) -> BTreeMap<String, (Type, Vec<Type>)> {
         let mut declarations = BTreeMap::new();
         let instructions = self
             .functions

@@ -1,7 +1,6 @@
 use gpurs_artifact::SharedMemory;
+use gpurs_ir::{Module, Type, Value};
 use gpurs_rustc::{FxHashMap, Instance};
-
-use super::ir::{Module, Type, Value};
 
 const STATIC_LIMIT: u64 = 48 * 1024;
 

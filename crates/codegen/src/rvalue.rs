@@ -1,3 +1,4 @@
+use gpurs_ir::{Binary, Conversion, Flags, Predicate, Type, Value as IRValue};
 use gpurs_rustc::{
     AggregateKind, BinOp, CastKind, PointerCoercion, RigidTy, Rvalue, Scalar, TagEncoding, Ty,
     TyKind, UnOp, ValueRepr, VariantIdx, VariantsShape, session,
@@ -5,7 +6,6 @@ use gpurs_rustc::{
 
 use super::{
     function::FunctionBuilder,
-    ir::{self, Binary, Conversion, Flags, Predicate, Type},
     layout::{self, Shape},
     place::{Operand, Place, Value},
 };
@@ -93,7 +93,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
         // Short arrays are stored element by element, so that LLVM can split them into registers.
         if count <= 16 {
             for index in 0..count {
-                let element = self.index(destination, ir::Value::i64(index));
+                let element = self.index(destination, IRValue::i64(index));
                 self.store(&element, operand);
             }
             return;
@@ -106,20 +106,17 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
         let entry = self.ir.current();
         self.ir.branch(head);
         self.ir.position(head);
-        let index = self.ir.phi(vec![(ir::Value::i64(0), entry)]);
+        let index = self.ir.phi(vec![(IRValue::i64(0), entry)]);
         let done = self
             .ir
-            .compare(Predicate::Eq, index.clone(), ir::Value::i64(count));
+            .compare(Predicate::Eq, index.clone(), IRValue::i64(count));
         self.ir.branch_if(done, end, body);
         self.ir.position(body);
         let element = self.index(destination, index.clone());
         self.store(&element, operand);
-        let next = self.ir.binary(
-            Binary::Add,
-            Flags::empty(),
-            index.clone(),
-            ir::Value::i64(1),
-        );
+        let next = self
+            .ir
+            .binary(Binary::Add, Flags::empty(), index.clone(), IRValue::i64(1));
         let latch = self.ir.current();
         self.ir.incoming(&index, next, latch);
         self.ir.branch(head);
@@ -158,7 +155,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
         };
         for (index, operand) in operands.iter().enumerate() {
             let place = match kind {
-                AggregateKind::Array(_) => self.index(&target, ir::Value::i64(index as u64)),
+                AggregateKind::Array(_) => self.index(&target, IRValue::i64(index as u64)),
                 _ => {
                     let field = active.unwrap_or(index);
                     self.field_place(&target, field)
@@ -274,7 +271,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                 let size = self.shape_of(pointee.ty).size().bytes() as u64;
                 let bytes = self
                     .ir
-                    .binary(Binary::Mul, Flags::empty(), b, ir::Value::i64(size));
+                    .binary(Binary::Mul, Flags::empty(), b, IRValue::i64(size));
                 return Operand::immediate(self.ir.offset(a, bytes, true), result);
             }
             _ => unreachable!("`{operation:?}` is a comparison"),
@@ -286,23 +283,21 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
     /// division that follows a recorded failure stays defined.
     fn safe_divisor(
         &mut self,
-        dividend: ir::Value,
-        divisor: ir::Value,
+        dividend: IRValue,
+        divisor: IRValue,
         ty: &Type,
         signed: bool,
-    ) -> ir::Value {
-        let invalid = self.ir.compare(
-            Predicate::Eq,
-            divisor.clone(),
-            ir::Value::int(ty.clone(), 0),
-        );
+    ) -> IRValue {
+        let invalid = self
+            .ir
+            .compare(Predicate::Eq, divisor.clone(), IRValue::int(ty.clone(), 0));
         let invalid = if signed {
-            let minimum = ir::Value::int(ty.clone(), 1 << (ty.bits() - 1));
+            let minimum = IRValue::int(ty.clone(), 1 << (ty.bits() - 1));
             let minimum = self.ir.compare(Predicate::Eq, dividend, minimum);
             let negative = self.ir.compare(
                 Predicate::Eq,
                 divisor.clone(),
-                ir::Value::int(ty.clone(), u128::MAX),
+                IRValue::int(ty.clone(), u128::MAX),
             );
             let overflow = self
                 .ir
@@ -313,16 +308,16 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
             invalid
         };
         self.ir
-            .select(invalid, ir::Value::int(ty.clone(), 1), divisor)
+            .select(invalid, IRValue::int(ty.clone(), 1), divisor)
     }
 
     /// Shift amount cast to the shifted type; masked unless the shift is unchecked.
-    fn shift_amount(&mut self, right: &Operand, scalar: Scalar, operation: BinOp) -> ir::Value {
+    fn shift_amount(&mut self, right: &Operand, scalar: Scalar, operation: BinOp) -> IRValue {
         let ty = layout::immediate_type(scalar);
         let amount = self.ir.resize(right.scalar(), ty.clone(), false);
         match operation {
             BinOp::Shl | BinOp::Shr => {
-                let mask = ir::Value::int(ty.clone(), ty.bits() as u128 - 1);
+                let mask = IRValue::int(ty.clone(), ty.bits() as u128 - 1);
                 self.ir.binary(Binary::And, Flags::empty(), amount, mask)
             }
             _ => amount,
@@ -330,7 +325,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
     }
 
     /// `Ordering` of `a` and `b` as `-1`, `0`, or `1`.
-    fn ordering(&mut self, a: ir::Value, b: ir::Value, less: Predicate) -> ir::Value {
+    fn ordering(&mut self, a: IRValue, b: IRValue, less: Predicate) -> IRValue {
         let equal = if a.ty.is_float() {
             Predicate::Oeq
         } else {
@@ -338,7 +333,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
         };
         let is_less = self.ir.compare(less, a.clone(), b.clone());
         let is_equal = self.ir.compare(equal, a, b);
-        let byte = |value| ir::Value::int(Type::I8, value as u128);
+        let byte = |value| IRValue::int(Type::I8, value as u128);
         let not_less = self.ir.select(is_equal, byte(0), byte(1));
         self.ir.select(is_less, byte(-1i8 as u8), not_less)
     }
@@ -351,18 +346,18 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                 let ty = value.ty.clone();
                 match operation {
                     UnOp::Not => {
-                        let ones = ir::Value::int(ty, u128::MAX);
+                        let ones = IRValue::int(ty, u128::MAX);
                         self.ir
                             .binary(Binary::Xor, Flags::empty(), value.clone(), ones)
                     }
                     UnOp::Neg if ty.is_float() => self.ir.binary(
                         Binary::FSub,
                         Flags::empty(),
-                        ir::Value::float(ty, -0.0),
+                        IRValue::float(ty, -0.0),
                         value.clone(),
                     ),
                     UnOp::Neg => {
-                        let zero = ir::Value::int(ty, 0);
+                        let zero = IRValue::int(ty, 0);
                         self.ir
                             .binary(Binary::Sub, Flags::empty(), zero, value.clone())
                     }
@@ -432,7 +427,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                     .map(|ty| self.sess.struct_tail(ty.ty).kind());
                 match source {
                     Some(TyKind::RigidTy(RigidTy::Array(_, length))) => {
-                        let length = ir::Value::i64(length.eval_target_usize().unwrap_or(0));
+                        let length = IRValue::i64(length.eval_target_usize().unwrap_or(0));
                         Value::Pair(operand.scalar(), length)
                     }
                     Some(TyKind::RigidTy(RigidTy::Slice(_) | RigidTy::Str)) => {
@@ -462,7 +457,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
     }
 
     /// Rust `as` semantics: NaN becomes zero and out-of-range values saturate.
-    fn saturating_float_to_int(&mut self, value: ir::Value, to: Scalar) -> ir::Value {
+    fn saturating_float_to_int(&mut self, value: IRValue, to: Scalar) -> IRValue {
         let float = value.ty.clone();
         let integer = layout::immediate_type(to);
         let signed = layout::is_signed(to);
@@ -473,8 +468,8 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
             (0, u128::MAX >> (128 - width))
         };
         let (low, high) = (
-            ir::Value::float(float.clone(), minimum as f64),
-            ir::Value::float(float, maximum as f64),
+            IRValue::float(float.clone(), minimum as f64),
+            IRValue::float(float, maximum as f64),
         );
         let convert = if signed {
             Conversion::FPToSI
@@ -487,11 +482,11 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
         let is_nan = self.ir.compare(Predicate::Uno, value.clone(), value);
         let clamped = self
             .ir
-            .select(below, ir::Value::int(integer.clone(), minimum as u128), raw);
+            .select(below, IRValue::int(integer.clone(), minimum as u128), raw);
         let clamped = self
             .ir
-            .select(above, ir::Value::int(integer.clone(), maximum), clamped);
-        self.ir.select(is_nan, ir::Value::int(integer, 0), clamped)
+            .select(above, IRValue::int(integer.clone(), maximum), clamped);
+        self.ir.select(is_nan, IRValue::int(integer, 0), clamped)
     }
 
     pub fn set_discriminant(&mut self, place: &Place, variant: VariantIdx) {
@@ -524,8 +519,8 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
         let scalar = *tag;
         let (pointer, align) = self.interior(place, shape.offset(*tag_field).bytes() as u64);
         let value = match layout::immediate_type(scalar) {
-            ty if ty.is_pointer() => ir::Value::address(value as u64),
-            ty => ir::Value::int(ty, value),
+            ty if ty.is_pointer() => IRValue::address(value as u64),
+            ty => IRValue::int(ty, value),
         };
         self.store_scalar(pointer, value, scalar, align);
     }
@@ -533,10 +528,10 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
     fn discriminant(&mut self, place: &Place, result: Shape) -> Operand {
         let shape = &place.shape;
         let target_type = layout::immediate_type(result.scalar());
-        let constant = |value: u128| ir::Value::int(target_type.clone(), value);
+        let constant = |value: u128| IRValue::int(target_type.clone(), value);
         let (tag_scalar, tag_field, encoding) = match &shape.layout.variants {
             VariantsShape::Empty => {
-                return Operand::immediate(ir::Value::undef(target_type), result);
+                return Operand::immediate(IRValue::undef(target_type), result);
             }
             VariantsShape::Single { index } => {
                 let value = discriminant_value(shape, *index)
@@ -568,9 +563,9 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                 let start_index = variant_position(shape, *niche_variants.start()).unwrap_or(0);
                 let last_index = variant_position(shape, *niche_variants.end()).unwrap_or(0);
                 let tag_type = tag.ty.clone();
-                let start = ir::Value::int(tag_type.clone(), niche_start);
+                let start = IRValue::int(tag_type.clone(), niche_start);
                 let relative = self.ir.binary(Binary::Sub, Flags::empty(), tag, start);
-                let limit = ir::Value::int(tag_type, (last_index - start_index) as u128);
+                let limit = IRValue::int(tag_type, (last_index - start_index) as u128);
                 let is_niche = self.ir.compare(Predicate::Ule, relative.clone(), limit);
                 let relative = self.ir.resize(relative, target_type.clone(), false);
                 let first = constant(start_index as u128);

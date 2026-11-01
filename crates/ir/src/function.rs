@@ -1,13 +1,13 @@
 use std::cmp;
 
-use super::{
+use crate::{
     Access, Binary, Block, Conversion, Flags, Modification, Ordering, Predicate, Transfer, Type,
     Value,
     instruction::{Callee, Instruction, Terminator},
     value::Kind,
 };
 
-pub(super) struct BlockData {
+pub(crate) struct BlockData {
     pub name: String,
     pub instructions: Vec<(Option<u32>, Instruction)>,
     pub terminator: Option<Terminator>,
@@ -25,14 +25,14 @@ pub struct Function {
     pub inline: bool,
     /// `!nvvm.annotations` entries of a kernel entry point.
     pub annotations: Vec<(&'static str, u32)>,
-    pub(super) result: Type,
+    pub(crate) result: Type,
     /// Parameters with their `byval` alignment.
-    pub(super) parameters: Vec<(Value, Option<u64>)>,
-    pub(super) blocks: Vec<BlockData>,
+    pub(crate) parameters: Vec<(Value, Option<u64>)>,
+    pub(crate) blocks: Vec<BlockData>,
     /// Blocks in the order they were first entered, which is the printed order.
-    pub(super) layout: Vec<Block>,
+    pub(crate) layout: Vec<Block>,
     current: Block,
-    pub(super) registers: u32,
+    pub(crate) registers: u32,
     allocas: usize,
 }
 

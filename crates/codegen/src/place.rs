@@ -1,3 +1,4 @@
+use gpurs_ir::{Access, Binary, Conversion, Flags, Transfer, Type, Value as IRValue};
 use gpurs_rustc::{
     AdtKind, FieldsShape, FloatTy, MachineSize, ProjectionElem, RigidTy, Scalar, Ty, TyKind,
     ValueRepr, VariantIdx, session,
@@ -5,7 +6,6 @@ use gpurs_rustc::{
 
 use super::{
     function::FunctionBuilder,
-    ir::{self, Access, Binary, Conversion, Flags, Transfer, Type},
     layout::{self, Shape},
 };
 
@@ -13,9 +13,9 @@ use super::{
 #[derive(Clone, Debug)]
 pub enum Value {
     Zst,
-    Scalar(ir::Value),
-    Pair(ir::Value, ir::Value),
-    Memory(ir::Value, u64),
+    Scalar(IRValue),
+    Pair(IRValue, IRValue),
+    Memory(IRValue, u64),
 }
 
 #[derive(Clone, Debug)]
@@ -27,14 +27,14 @@ pub struct Operand {
 /// Memory location of a MIR place; `meta` holds the length of unsized slices.
 #[derive(Clone, Debug)]
 pub struct Place {
-    pub pointer: ir::Value,
-    pub meta: Option<ir::Value>,
+    pub pointer: IRValue,
+    pub meta: Option<IRValue>,
     pub shape: Shape,
     pub align: u64,
 }
 
 impl Operand {
-    pub fn immediate(value: ir::Value, shape: Shape) -> Self {
+    pub fn immediate(value: IRValue, shape: Shape) -> Self {
         Operand {
             value: Value::Scalar(value),
             shape,
@@ -48,7 +48,7 @@ impl Operand {
         }
     }
 
-    pub fn scalar(&self) -> ir::Value {
+    pub fn scalar(&self) -> IRValue {
         match &self.value {
             Value::Scalar(value) => value.clone(),
             value => panic!(
@@ -58,7 +58,7 @@ impl Operand {
         }
     }
 
-    pub fn pair(&self) -> (ir::Value, ir::Value) {
+    pub fn pair(&self) -> (IRValue, IRValue) {
         match &self.value {
             Value::Pair(a, b) => (a.clone(), b.clone()),
             value => panic!(
@@ -70,7 +70,7 @@ impl Operand {
 }
 
 impl Place {
-    pub fn new(pointer: ir::Value, shape: Shape) -> Self {
+    pub fn new(pointer: IRValue, shape: Shape) -> Self {
         let align = shape.align();
         Place {
             pointer,
@@ -123,9 +123,9 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                 let index = if from_end {
                     let length = self.length(&place);
                     self.ir
-                        .binary(Binary::Sub, Flags::empty(), length, ir::Value::i64(offset))
+                        .binary(Binary::Sub, Flags::empty(), length, IRValue::i64(offset))
                 } else {
-                    ir::Value::i64(offset)
+                    IRValue::i64(offset)
                 };
                 self.index(&place, index)
             }
@@ -139,7 +139,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                         Binary::Sub,
                         Flags::empty(),
                         length,
-                        ir::Value::i64(from + to),
+                        IRValue::i64(from + to),
                     );
                     Place {
                         pointer,
@@ -188,7 +188,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
         }
     }
 
-    pub fn index(&mut self, place: &Place, index: ir::Value) -> Place {
+    pub fn index(&mut self, place: &Place, index: IRValue) -> Place {
         let element = self.element_shape(place);
         let stride = match &place.shape.layout.fields {
             FieldsShape::Array { stride, .. } => *stride,
@@ -197,7 +197,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
         .bytes() as u64;
         let bytes = self
             .ir
-            .binary(Binary::Mul, Flags::empty(), index, ir::Value::i64(stride));
+            .binary(Binary::Mul, Flags::empty(), index, IRValue::i64(stride));
         Place {
             pointer: self.ir.offset(place.pointer.clone(), bytes, true),
             meta: None,
@@ -207,18 +207,18 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
     }
 
     /// Number of elements of an array or slice place.
-    pub fn length(&mut self, place: &Place) -> ir::Value {
+    pub fn length(&mut self, place: &Place) -> IRValue {
         match (place.shape.ty.kind(), &place.meta) {
             (TyKind::RigidTy(RigidTy::Array(_, length)), _) => {
-                ir::Value::i64(length.eval_target_usize().unwrap_or(0))
+                IRValue::i64(length.eval_target_usize().unwrap_or(0))
             }
             (_, Some(meta)) => meta.clone(),
             _ => panic!("length of `{:?}`", place.shape.ty.kind()),
         }
     }
 
-    pub fn offset(&mut self, pointer: ir::Value, bytes: u64) -> ir::Value {
-        self.ir.offset(pointer, ir::Value::i64(bytes), true)
+    pub fn offset(&mut self, pointer: IRValue, bytes: u64) -> IRValue {
+        self.ir.offset(pointer, IRValue::i64(bytes), true)
     }
 
     /// Pointer (and length for unsized places) produced by `&place`.
@@ -333,7 +333,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
         (leaves.len() <= 16).then_some(leaves)
     }
 
-    pub fn load_scalar(&mut self, pointer: ir::Value, scalar: Scalar, align: u64) -> ir::Value {
+    pub fn load_scalar(&mut self, pointer: IRValue, scalar: Scalar, align: u64) -> IRValue {
         let ty = layout::memory_type(layout::primitive(scalar));
         let value = self.ir.load(ty, pointer, align, Access::Plain);
         match layout::is_bool(scalar) {
@@ -342,13 +342,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
         }
     }
 
-    pub fn store_scalar(
-        &mut self,
-        pointer: ir::Value,
-        value: ir::Value,
-        scalar: Scalar,
-        align: u64,
-    ) {
+    pub fn store_scalar(&mut self, pointer: IRValue, value: IRValue, scalar: Scalar, align: u64) {
         let value = match layout::is_bool(scalar) {
             true => self.ir.cast(Conversion::ZExt, value, Type::I8),
             false => value,
@@ -358,8 +352,8 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
 
     pub fn copy(
         &mut self,
-        destination: ir::Value,
-        source: ir::Value,
+        destination: IRValue,
+        source: IRValue,
         size: MachineSize,
         destination_align: u64,
         source_align: u64,
@@ -381,7 +375,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                 Transfer::Copy,
                 destination,
                 source,
-                ir::Value::i64(bytes),
+                IRValue::i64(bytes),
                 destination_align.min(source_align),
                 false,
             );
