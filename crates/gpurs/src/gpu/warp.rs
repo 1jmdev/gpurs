@@ -8,6 +8,41 @@ use super::intrinsics;
 
 pub const WIDTH: usize = 32;
 
+/// Inclusive prefix in lane order. All 32 lanes use the same associative operation.
+#[primitive(
+    lowering = Body,
+    architecture = 30,
+    convergence = Warp,
+    memory = None,
+    proof = Varying
+)]
+pub fn inclusive_scan<T: Shuffle, F: Fn(T, T) -> T>(mut value: T, operation: F) -> T {
+    let mut distance = 1;
+    while distance < WIDTH {
+        let previous = shuffle_up(value, distance);
+        if lane_id() >= distance {
+            value = operation(previous, value);
+        }
+        distance <<= 1;
+    }
+    value
+}
+
+/// Exclusive prefix in lane order. All 32 lanes use the same associative operation and
+/// two-sided identity.
+#[primitive(
+    lowering = Body,
+    architecture = 30,
+    convergence = Warp,
+    memory = None,
+    proof = Varying
+)]
+pub fn exclusive_scan<T: Shuffle, F: Fn(T, T) -> T>(value: T, identity: T, operation: F) -> T {
+    let value = inclusive_scan(value, operation);
+    let previous = shuffle_up(value, 1);
+    if lane_id() == 0 { identity } else { previous }
+}
+
 #[primitive(
     lowering = Register("laneid"),
     architecture = 0,

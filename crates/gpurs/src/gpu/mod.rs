@@ -31,6 +31,7 @@ macro_rules! assembly {
 pub mod asynchronous;
 pub mod atomic;
 pub mod bit;
+pub mod block;
 pub mod convert;
 pub mod float;
 mod float16;
