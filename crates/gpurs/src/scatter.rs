@@ -1,7 +1,7 @@
 use std::{collections::HashSet, rc::Rc, slice};
 
 use crate::{
-    Buffer, DeviceAddress, DeviceSliceMut, Error, ExternalAccess, Gpu, Result, Stream,
+    Buffer, DeviceAddress, DeviceSlice, DeviceSliceMut, Error, ExternalAccess, Gpu, Result, Stream,
     gpu::Scatter, reference::sealed::Reference,
 };
 
@@ -32,11 +32,40 @@ impl Gpu {
             ));
         }
         let indices = self.try_copy(indices)?;
+        unsafe { self.try_scatter_unchecked(target, &indices) }
+    }
+
+    /// Retains GPU-resident indices without downloading or validating their contents.
+    /// Out-of-range destinations are ignored by stores and return `None` from loads.
+    ///
+    /// # Safety
+    /// In-bounds destinations must be unique for every launch using this descriptor,
+    /// including after changes through aliases of the index buffer. The index range
+    /// must not overlap the target range. Index producers must use tracked GPU accesses.
+    pub unsafe fn try_scatter_unchecked<T: Copy>(
+        &self,
+        target: &mut impl DeviceSliceMut<T>,
+        indices: &impl DeviceSlice<usize>,
+    ) -> Result<DeviceScatter<T>> {
+        let span = target.span();
+        let indices_span = indices.span();
+        if span.len == 0
+            || indices_span.len == 0
+            || !Rc::ptr_eq(&self.device, &span.allocation.device)
+            || !Rc::ptr_eq(&self.device, &indices_span.allocation.device)
+        {
+            return Err(Error::InvalidOperation(
+                "scatter views require nonempty ranges on the same GPU".to_owned(),
+            ));
+        }
+        let mut indices = Buffer::new(indices_span.allocation.clone(), indices_span.len);
+        indices.offset = indices_span.start;
         let target_len = span.len;
         let descriptor = Scatter {
             target: unsafe { DeviceAddress::from_raw(span.allocation.pointer + span.start as u64) },
             indices: indices.address(),
             len: indices.len(),
+            target_len,
         };
         Ok(DeviceScatter {
             buffer: self.try_copy(slice::from_ref(&descriptor))?,
@@ -55,6 +84,17 @@ impl Gpu {
         indices: &[usize],
     ) -> DeviceScatter<T> {
         self.try_scatter(target, indices)
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    /// # Safety
+    /// Follow the index ownership contract of [`Gpu::try_scatter_unchecked`].
+    pub unsafe fn scatter_unchecked<T: Copy>(
+        &self,
+        target: &mut impl DeviceSliceMut<T>,
+        indices: &impl DeviceSlice<usize>,
+    ) -> DeviceScatter<T> {
+        unsafe { self.try_scatter_unchecked(target, indices) }
             .unwrap_or_else(|error| panic!("{error}"))
     }
 }

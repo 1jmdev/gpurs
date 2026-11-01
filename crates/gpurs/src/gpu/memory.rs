@@ -31,6 +31,24 @@ pub fn load_or<T: Copy>(input: &[T], index: usize, default: T) -> T {
     }
 }
 
+/// Writes an element when its device-computed index is in bounds.
+///
+/// # Safety
+/// The calling thread must exclusively own the selected element for this access.
+/// No other thread may read or write it concurrently, including through aliases.
+#[primitive(
+    lowering = Body,
+    architecture = 0,
+    convergence = None,
+    memory = Encapsulated,
+    proof = Varying
+)]
+pub unsafe fn store_exclusive<T: Copy>(output: &mut [T], index: usize, value: T) {
+    if index < output.len() {
+        output[index] = value;
+    }
+}
+
 #[repr(C, align(8))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Vector2(pub [u32; 2]);

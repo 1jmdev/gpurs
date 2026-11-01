@@ -7,6 +7,7 @@ pub struct Scatter<T> {
     pub(crate) target: DeviceAddress<T>,
     pub(crate) indices: DeviceAddress<usize>,
     pub(crate) len: usize,
+    pub(crate) target_len: usize,
 }
 
 impl<T: Copy> Scatter<T> {
@@ -27,10 +28,12 @@ impl<T: Copy> Scatter<T> {
     )]
     pub fn load(&self, index: usize) -> Option<T> {
         if index < self.len {
-            unsafe { Some(self.target.read(self.indices.read(index))) }
-        } else {
-            None
+            let index = unsafe { self.indices.read(index) };
+            if index < self.target_len {
+                return unsafe { Some(self.target.read(index)) };
+            }
         }
+        None
     }
 
     #[primitive(
@@ -42,8 +45,11 @@ impl<T: Copy> Scatter<T> {
     )]
     pub fn store(&self, index: usize, value: T) {
         if index < self.len {
-            unsafe {
-                self.target.write(self.indices.read(index), value);
+            let index = unsafe { self.indices.read(index) };
+            if index < self.target_len {
+                unsafe {
+                    self.target.write(index, value);
+                }
             }
         }
     }
