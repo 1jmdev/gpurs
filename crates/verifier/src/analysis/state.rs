@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, rc::Rc};
 
-use gpurs_rustc::{Body, Instance, Span};
+use gpurs_rustc::{Body, Dominators, Instance, Span};
 
 use crate::symbolic::{Fact, Polynomial, Predicate, Requirement};
 
@@ -18,6 +18,7 @@ pub struct Origin {
     pub region: Region,
     pub index: Option<Polynomial>,
     pub inner: bool,
+    pub path: Vec<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -36,6 +37,7 @@ pub struct Value {
     pub requirement: Requirement,
     /// Facts that hold when the value, or the discriminant it holds, equals the key.
     pub guards: Vec<(i128, Vec<Fact>)>,
+    pub exact_guards: bool,
     /// Number of values a boolean or discriminant can take.
     pub domain: Option<usize>,
     pub variant: Option<i128>,
@@ -49,6 +51,7 @@ pub struct Value {
 pub struct State {
     pub slots: Vec<Value>,
     pub facts: Vec<Fact>,
+    pub controls: BTreeMap<usize, (usize, u8)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -80,6 +83,7 @@ pub struct Context {
 
 pub struct Frame {
     pub body: Rc<Body>,
+    pub postdominators: Dominators<usize>,
     /// Facts the caller established before entering; a panic is never blamed on them.
     pub inherited: Vec<Fact>,
     pub base: usize,
@@ -131,10 +135,14 @@ impl Value {
 pub fn get(value: &Value, path: &[usize]) -> Value {
     match path.split_first() {
         None => value.clone(),
-        Some((field, rest)) => value
-            .fields
-            .get(*field)
-            .map_or_else(|| Value::varying(value.variance), |field| get(field, rest)),
+        Some((field, rest)) => {
+            let mut field = value
+                .fields
+                .get(*field)
+                .map_or_else(|| Value::varying(value.variance), |field| get(field, rest));
+            field.variance = field.variance.max(value.variance);
+            field
+        }
     }
 }
 

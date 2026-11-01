@@ -5,8 +5,8 @@ use std::collections::BTreeSet;
 use gpurs_rustc::BinOp;
 
 use super::{
-    engine::Variable,
-    symbolic::{Atom, Clause, Fact, Polynomial, Predicate, Relation},
+    engine::{Engine, Variable},
+    symbolic::{Atom, Clause, Fact, Polynomial, Predicate, Relation, Requirement},
 };
 
 /// A path fact as an ordered comparison between a per-thread side and a launch side.
@@ -104,46 +104,138 @@ impl Proofs<'_> {
         Some(clauses)
     }
 
-    pub fn coverage(&self, expression: &Polynomial, length: u64) -> Option<Vec<Clause>> {
-        let dimensions = match expression.variable() {
-            Some(Atom::Thread(0)) => [length, 1, 1],
+    pub fn coverage(
+        &self,
+        expression: &Polynomial,
+        index: &Polynomial,
+        guards: &[Fact],
+        engine: &Engine<'_>,
+    ) -> Option<Requirement> {
+        let mut coordinates = [0, 1, 2].map(|axis| {
+            self.facts
+                .iter()
+                .find_map(|Comparison(operation, left, right)| {
+                    (*operation == BinOp::Eq && left.variable() == Some(&Atom::Thread(axis)))
+                        .then(|| right.value())
+                        .flatten()
+                })
+                .map_or_else(Polynomial::default, Polynomial::constant)
+        });
+        let mut goals = Vec::new();
+        match expression.variable() {
+            Some(Atom::Thread(axis)) => coordinates[*axis] = index.clone(),
             Some(atom @ Atom::Quotient(..))
                 if let Some((value, divisor)) = division(atom)
-                    && value.variable() == Some(&Atom::Thread(0))
-                    && self.pinned(&remainder(value, divisor)) =>
+                    && let Some(Atom::Thread(axis)) = value.variable() =>
             {
-                [length.checked_mul(divisor)?, 1, 1]
-            }
-            _ => {
-                let x = expression.0.get(&vec![Atom::Thread(0)]).copied();
-                let y = expression.0.get(&vec![Atom::Thread(1)]).copied();
-                let (Some(1), Some(stride)) = (x, y) else {
-                    return None;
-                };
-                let stride = u64::try_from(stride).ok().filter(|stride| *stride > 0)?;
-                if expression.0.len() != 2 || !length.is_multiple_of(stride) {
+                let lane = self
+                    .facts
+                    .iter()
+                    .find_map(|Comparison(operation, left, right)| {
+                        (*operation == BinOp::Eq && *left == remainder(value, divisor))
+                            .then(|| right.value())
+                            .flatten()
+                    })?;
+                if lane < 0 || lane >= divisor as i128 {
                     return None;
                 }
-                [stride, length / stride, 1]
+                coordinates[*axis] = index.scale(divisor as i128)?.offset(lane)?;
             }
-        };
-        Some(
-            dimensions
-                .into_iter()
-                .enumerate()
-                .map(|(axis, value)| {
-                    Clause::single(
-                        Predicate::new(
-                            Polynomial::atom(Atom::BlockDimension(axis))
-                                .offset(-(value as i128))
-                                .unwrap(),
+            _ => {
+                let offset = expression.0.get(&Vec::new()).copied().unwrap_or(0);
+                let target = index.offset(-offset)?;
+                goals.push(Predicate::new(target.clone(), Relation::NonNegative));
+                let x = expression.0.get(&vec![Atom::Thread(0)]).copied();
+                let y = expression.0.get(&vec![Atom::Thread(1)]).copied();
+                let terms =
+                    usize::from(offset != 0) + usize::from(x.is_some()) + usize::from(y.is_some());
+                if expression.0.len() != terms {
+                    return None;
+                }
+                match (x, y) {
+                    (Some(stride), None) if stride > 0 => {
+                        coordinates[0] =
+                            Polynomial::quotient(index.clone(), Polynomial::constant(stride))
+                                .offset(-offset.div_euclid(stride))?;
+                        goals.push(Predicate::new(
+                            Polynomial::remainder(index.clone(), Polynomial::constant(stride))
+                                .offset(-offset.rem_euclid(stride))?,
                             Relation::Zero,
-                        ),
-                        "every shared-memory element must be initialized before it is read",
-                    )
-                })
-                .collect(),
-        )
+                        ));
+                    }
+                    (Some(1), Some(stride)) if stride > 0 => {
+                        coordinates[0] =
+                            Polynomial::remainder(target.clone(), Polynomial::constant(stride));
+                        coordinates[1] = Polynomial::quotient(target, Polynomial::constant(stride));
+                    }
+                    _ => return None,
+                }
+            }
+        }
+        for (axis, coordinate) in coordinates.iter().enumerate() {
+            goals.push(Predicate::new(coordinate.clone(), Relation::NonNegative));
+            goals.push(Predicate::new(
+                Polynomial::atom(Atom::BlockDimension(axis))
+                    .add(coordinate, -1)?
+                    .offset(-1)?,
+                Relation::NonNegative,
+            ));
+        }
+        let reason = "every shared-memory read must be covered by an initialized element";
+        let mut requirement = Requirement::new();
+        for goal in goals {
+            if engine
+                .prove(&goal.negate()?, reason)
+                .is_some_and(|requirement| requirement.is_empty())
+            {
+                return None;
+            }
+            requirement.extend(engine.prove(&goal, reason)?);
+        }
+        for guard in guards {
+            let predicate = Predicate::new(
+                self.substitute(&guard.predicate.polynomial, &coordinates)?,
+                guard.predicate.relation,
+            );
+            requirement.extend(engine.prove(&predicate, reason)?);
+            requirement.extend(guard.requirement.iter().cloned());
+        }
+        Some(requirement)
+    }
+
+    fn substitute(
+        &self,
+        expression: &Polynomial,
+        coordinates: &[Polynomial; 3],
+    ) -> Option<Polynomial> {
+        expression
+            .0
+            .iter()
+            .try_fold(Polynomial::default(), |sum, (monomial, coefficient)| {
+                let product = monomial.iter().try_fold(
+                    Polynomial::constant(*coefficient),
+                    |product, atom| {
+                        let value = match atom {
+                            Atom::Thread(axis) => coordinates[*axis].clone(),
+                            Atom::Quotient(value, divisor) => Polynomial::quotient(
+                                self.substitute(value, coordinates)?,
+                                self.substitute(divisor, coordinates)?,
+                            ),
+                            Atom::Remainder(value, divisor) => Polynomial::remainder(
+                                self.substitute(value, coordinates)?,
+                                self.substitute(divisor, coordinates)?,
+                            ),
+                            Atom::Variable(variable) if self.variables[*variable].variance == 0 => {
+                                Polynomial::atom(atom.clone())
+                            }
+                            _ if atom.block_uniform() => Polynomial::atom(atom.clone()),
+                            _ => return None,
+                        };
+                        product.multiply(&value)
+                    },
+                )?;
+                sum.add(&product, 1)
+            })
     }
 
     fn decompose(
@@ -358,6 +450,23 @@ impl Proofs<'_> {
 
 pub fn disjoint(left: &Polynomial, right: &Polynomial) -> Option<Vec<Clause>> {
     let difference = left.add(right, -1)?.value()?;
+    let stride = left
+        .0
+        .iter()
+        .filter(|(term, _)| !term.is_empty())
+        .map(|(_, coefficient)| coefficient.checked_abs())
+        .collect::<Option<Vec<_>>>()?
+        .into_iter()
+        .min()?;
+    if stride > 1
+        && difference.rem_euclid(stride) != 0
+        && left
+            .0
+            .iter()
+            .all(|(term, coefficient)| term.is_empty() || coefficient % stride == 0)
+    {
+        return Some(Vec::new());
+    }
     let modulus = left
         .0
         .iter()
@@ -422,4 +531,31 @@ fn less_equal(left: &Polynomial, right: &Polynomial, clauses: &mut Vec<Clause>) 
         "index strides must keep accesses from different threads disjoint",
     ));
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn guarded_coverage() {
+        let index = Polynomial::atom(Atom::Thread(0));
+        let facts = [Fact::new(
+            Predicate::compare(BinOp::Lt, &index, &Polynomial::constant(8)).unwrap(),
+        )];
+        let comparisons = comparisons(&facts);
+        let proofs = Proofs {
+            facts: &comparisons,
+            variables: &[],
+        };
+        let engine = Engine {
+            facts: &facts,
+            variables: &[],
+            scalars: &[],
+        };
+        assert_eq!(
+            proofs.coverage(&index, &index, &facts, &engine),
+            Some(Requirement::new())
+        );
+    }
 }

@@ -1,4 +1,4 @@
-use gpurs_rustc::{AssertMessage, BinOp, Body, FxHashSet, Graph, TerminatorKind};
+use gpurs_rustc::{AssertMessage, BinOp, Body, Dominators, FxHashSet, Graph, TerminatorKind};
 
 use super::{Analysis, Kind, Obligation, Region, State, Value, arithmetic};
 use crate::{
@@ -24,9 +24,11 @@ impl Analysis<'_, '_> {
                     return vec![(target, Vec::new())];
                 }
                 let integer = value.integer.clone().filter(|_| {
-                    self.operand_type(discr)
-                        .and_then(arithmetic::integer_kind)
-                        .is_some()
+                    !value.exact_guards
+                        && self
+                            .operand_type(discr)
+                            .and_then(arithmetic::integer_kind)
+                            .is_some()
                 });
                 let branches: Vec<_> = targets.branches().collect();
                 let mut successors: Vec<_> = branches
@@ -290,27 +292,16 @@ impl Analysis<'_, '_> {
             return;
         }
         let count = self.successors.len();
-        // Normal edges reversed, entered at a virtual exit that blocks without successors reach.
-        let mut reversed = vec![Vec::new(); count + 1];
-        for (block, successors) in self.successors.iter().enumerate() {
-            if successors.is_empty() {
-                reversed[count].push(block);
-            }
-            for &successor in successors {
-                reversed[successor].push(block);
-            }
-        }
-        let postdominators = Graph::new(count, reversed).dominators();
-        // Blocks that never exit are postdominated by every block.
+        let postdominators = postdominators(&self.successors);
         let postdominates = |first: usize, second: usize| {
-            !postdominators.is_reachable(second) || postdominators.dominates(first, second)
+            postdominators.is_reachable(second) && postdominators.dominates(first, second)
         };
         for block in 0..count {
             let Some(value) = &self.branches[block] else {
                 continue;
             };
             let reconvergence: FxHashSet<usize> = (0..count)
-                .filter(|&candidate| candidate != block && postdominates(candidate, block))
+                .filter(|&candidate| candidate == block || postdominates(candidate, block))
                 .collect();
             for successor in self.successors[block].clone() {
                 for (target, controls) in self.controls.iter_mut().enumerate() {
@@ -319,10 +310,42 @@ impl Analysis<'_, '_> {
                     }
                 }
             }
-            for &(collective, permitted, span) in &self.collectives {
+            for &(collective, permitted, span, instance) in &self.collectives {
+                let context = self
+                    .contexts
+                    .iter()
+                    .rposition(|context| context.offset <= collective)
+                    .unwrap();
+                let copies: FxHashSet<_> = self
+                    .collectives
+                    .iter()
+                    .filter(|(node, scope, source, operation)| {
+                        *scope == permitted
+                            && *source == span
+                            && *operation == instance
+                            && self
+                                .contexts
+                                .iter()
+                                .rposition(|context| context.offset <= *node)
+                                == Some(context)
+                    })
+                    .map(|(node, _, _, _)| *node)
+                    .collect();
+                let reconverged = copies.len() > 1
+                    && postdominators.is_reachable(block)
+                    && !(0..count).any(|exit| {
+                        self.successors[exit].is_empty()
+                            && reachable(&self.successors, block, exit, &copies)
+                    })
+                    && !self.successors[block]
+                        .iter()
+                        .any(|&successor| reachable(&self.successors, successor, block, &copies));
                 if value.variance > permitted
+                    && !reconverged
                     && !postdominates(collective, block)
-                    && reachable(&self.successors, block, collective, &reconvergence)
+                    && self.successors[block].iter().any(|&successor| {
+                        reachable(&self.successors, successor, collective, &reconvergence)
+                    })
                 {
                     let context = self
                         .contexts
@@ -337,17 +360,52 @@ impl Analysis<'_, '_> {
                             self.kernel.name()
                         ),
                         &[format!(
-                            "controlling branch is bb{} in `{}`; block collectives require a \
-                             block-uniform branch, and warp collectives require a warp-uniform \
-                             branch",
+                            "controlling branch bb{} in `{}` is {}; this collective requires {} \
+                             control flow",
                             block - context.offset,
                             context.instance.name(),
+                            if value.variance == 1 {
+                                "warp-uniform"
+                            } else {
+                                "per-thread"
+                            },
+                            if permitted == 0 {
+                                "block-uniform"
+                            } else {
+                                "warp-uniform"
+                            },
                         )],
                     );
                 }
             }
         }
     }
+}
+
+pub fn postdominators(successors: &[Vec<usize>]) -> Dominators<usize> {
+    let count = successors.len();
+    let mut reversed = vec![Vec::new(); count + 1];
+    for (block, targets) in successors.iter().enumerate() {
+        if targets.is_empty() {
+            reversed[count].push(block);
+        }
+        for &target in targets {
+            reversed[target].push(block);
+        }
+    }
+    let exiting = Graph::new(count, reversed.clone()).reachable();
+    let dominators = Graph::new(0, successors.to_vec()).dominators();
+    for (block, targets) in successors.iter().enumerate() {
+        if !exiting[block]
+            && dominators.is_reachable(block)
+            && targets
+                .iter()
+                .any(|&target| dominators.dominates(target, block))
+        {
+            reversed[count].push(block);
+        }
+    }
+    Graph::new(count, reversed).dominators()
 }
 
 pub fn reachable(

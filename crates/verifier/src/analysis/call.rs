@@ -133,6 +133,7 @@ impl Analysis<'_, '_> {
         let mut entry = State {
             slots: state.slots.clone(),
             facts: state.facts.clone(),
+            controls: state.controls.clone(),
         };
         entry
             .slots
@@ -219,6 +220,7 @@ impl Analysis<'_, '_> {
                 start.unwrap_or_default(),
                 end.and_then(|end| end.offset(-1)),
                 requirement,
+                iterator.variance,
                 "a loop counter",
             );
             return Some(Value {
@@ -324,6 +326,7 @@ impl Analysis<'_, '_> {
                         region,
                         index: None,
                         inner: false,
+                        path: Vec::new(),
                     };
                     self.access(&origin, false, false, state);
                 }
@@ -347,7 +350,7 @@ impl Analysis<'_, '_> {
             match primitive.convergence {
                 Convergence::None => {}
                 Convergence::Warp => {
-                    self.collectives.push((block, 1, self.span));
+                    self.collectives.push((block, 1, self.span, instance));
                     let threads = (0..3).fold(Polynomial::constant(1), |product, axis| {
                         product
                             .multiply(&Polynomial::atom(Atom::BlockDimension(axis)))
@@ -362,7 +365,7 @@ impl Analysis<'_, '_> {
                     );
                 }
                 Convergence::Block => {
-                    self.collectives.push((block, 0, self.span));
+                    self.collectives.push((block, 0, self.span, instance));
                     if matches!(
                         primitive.memory,
                         Memory::BlockFence | Memory::BlockFenceReadReachable(_)
@@ -415,6 +418,7 @@ impl Analysis<'_, '_> {
                     region: Region::Shared(self.kernel_block(), length),
                     index: Some(Polynomial::default()),
                     inner: false,
+                    path: Vec::new(),
                 }));
                 Value {
                     fields: vec![Value {
@@ -500,6 +504,7 @@ impl Analysis<'_, '_> {
                 region,
                 index: None,
                 inner: false,
+                path: Vec::new(),
             },
             write,
             atomic: false,

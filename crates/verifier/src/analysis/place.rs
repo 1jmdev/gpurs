@@ -2,7 +2,7 @@ use gpurs_artifact::{Access, Parameter};
 use gpurs_rustc::{Operand, Place, ProjectionElem, RigidTy, Ty, session};
 
 use super::{Analysis, Origin, Pointer, Region, State, Value, state};
-use crate::symbolic::{Atom, Polynomial};
+use crate::symbolic::Polynomial;
 
 /// Where a place lives.
 pub(super) enum Location {
@@ -30,6 +30,10 @@ impl Analysis<'_, '_> {
                 (Location::Slot(slot, mut path), ProjectionElem::Field(field, _)) => {
                     path.push(*field);
                     Location::Slot(slot, path)
+                }
+                (Location::Memory(mut origin), ProjectionElem::Field(field, _)) => {
+                    origin.path.push(*field);
+                    Location::Memory(origin)
                 }
                 (Location::Slot(slot, mut path), ProjectionElem::Index(local)) => {
                     let index = state.slots[self.frame().base + local]
@@ -79,7 +83,13 @@ impl Analysis<'_, '_> {
                 ) => {
                     if !origin.inner {
                         origin.index = None;
+                    } else {
+                        origin.path.push(usize::MAX);
                     }
+                    Location::Memory(origin)
+                }
+                (Location::Memory(mut origin), _) => {
+                    origin.path.push(usize::MAX);
                     Location::Memory(origin)
                 }
                 (location, _) => location,
@@ -91,6 +101,12 @@ impl Analysis<'_, '_> {
     /// Steps a pointer to a sequence onto element `index`.
     fn element(&self, origin: &mut Origin, index: Option<Polynomial>) {
         if origin.inner {
+            origin.path.push(
+                index
+                    .as_ref()
+                    .and_then(Polynomial::value)
+                    .map_or(usize::MAX, |index| index as usize),
+            );
             return;
         }
         origin.index = origin
@@ -146,10 +162,7 @@ impl Analysis<'_, '_> {
                                 } | Parameter::Reference {
                                     access: Access::Read
                                 }
-                            )
-                            && origin.index.as_ref().is_some_and(|index| {
-                                index.0.keys().flatten().all(Atom::block_uniform)
-                            }) =>
+                            ) =>
                     {
                         0
                     }
@@ -162,19 +175,38 @@ impl Analysis<'_, '_> {
                     value.pointer = Some(Pointer::Unknown);
                 }
                 let ty = self.place_type(place);
+                let key = (value.variance == 0
+                    && origin.index.is_some()
+                    && !origin.path.contains(&usize::MAX))
+                .then_some((origin, ty));
+                if let Some(key) = &key {
+                    value.integer = self.loads.get(key).cloned();
+                }
                 self.opaque(
                     &mut value,
                     ty,
                     vec![usize::MAX],
                     "a value loaded from memory",
                 );
+                if let Some(key) = key
+                    && let Some(integer) = &value.integer
+                {
+                    self.loads.insert(key, integer.clone());
+                }
                 value
             }
             Location::Unknown => Value::varying(variance.max(2)),
         }
     }
 
-    pub fn assign(&mut self, place: &Place, value: Value, state: &mut State) {
+    pub fn assign(&mut self, place: &Place, mut value: Value, state: &mut State) {
+        value.variance = state
+            .controls
+            .values()
+            .map(|(_, variance)| *variance)
+            .chain([value.variance])
+            .max()
+            .unwrap_or(0);
         match self.locate(place, state) {
             Location::Slot(slot, path) => state::set(&mut state.slots[slot], &path, value),
             Location::Memory(origin) => self.access(&origin, true, false, state),

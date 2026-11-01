@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use gpurs_artifact::Parameter;
 use gpurs_rustc::{
-    FxHashMap, FxHashSet, Instance, RigidTy, Session, Span, TerminatorKind, session,
+    FxHashMap, FxHashSet, Instance, RigidTy, Session, Span, TerminatorKind, Ty, session,
 };
 
 use super::{
@@ -22,14 +22,15 @@ pub struct Analysis<'a, 'sess> {
     pub scalars: Vec<u32>,
     pub variables: Vec<Variable>,
     keys: FxHashMap<(usize, usize, usize, Vec<usize>), usize>,
+    pub loads: FxHashMap<(Origin, Ty), Polynomial>,
     pub contexts: Vec<Context>,
     pub obligations: Vec<Obligation>,
     pub frames: Vec<Frame>,
     pub accesses: Vec<Access>,
     pub barriers: FxHashSet<usize>,
-    pub collectives: Vec<(usize, u8, Span)>,
+    pub collectives: Vec<(usize, u8, Span, Instance)>,
     pub controls: Vec<Vec<(usize, usize)>>,
-    pub comparisons: Vec<Option<Predicate>>,
+    pub edges: Vec<Vec<(usize, Vec<Fact>)>>,
     pub branches: Vec<Option<Value>>,
     pub successors: Vec<Vec<usize>>,
     pub requirements: Vec<Clause>,
@@ -69,6 +70,7 @@ impl<'a, 'sess> Analysis<'a, 'sess> {
                 .collect(),
             variables: Vec::new(),
             keys: FxHashMap::default(),
+            loads: FxHashMap::default(),
             contexts: Vec::new(),
             obligations: Vec::new(),
             frames: Vec::new(),
@@ -76,7 +78,7 @@ impl<'a, 'sess> Analysis<'a, 'sess> {
             barriers: FxHashSet::default(),
             collectives: Vec::new(),
             controls: vec![Vec::new(); blocks],
-            comparisons: vec![None; blocks],
+            edges: vec![Vec::new(); blocks],
             branches: Vec::new(),
             successors: Vec::new(),
             requirements: Vec::new(),
@@ -116,6 +118,7 @@ impl<'a, 'sess> Analysis<'a, 'sess> {
                         region: Region::Parameter(index),
                         index: Some(Polynomial::default()),
                         inner: matches!(parameter.metadata, Parameter::Reference { .. }),
+                        path: Vec::new(),
                     })),
                     ..Value::default()
                 },
@@ -156,9 +159,13 @@ impl<'a, 'sess> Analysis<'a, 'sess> {
         let state = State {
             slots,
             facts: Vec::new(),
+            controls: BTreeMap::new(),
         };
         let context = self.context(None, self.kernel);
-        self.function(self.kernel, context, state.clone())?;
+        self.function(self.kernel, context, state.clone());
+        if self.failure.is_some() {
+            return None;
+        }
         self.collect = true;
         let result = self
             .function(self.kernel, context, state)
@@ -185,7 +192,7 @@ impl<'a, 'sess> Analysis<'a, 'sess> {
                 .collect()
         }));
         self.branches.resize(self.successors.len(), None);
-        self.comparisons.resize(self.successors.len(), None);
+        self.edges.resize(self.successors.len(), Vec::new());
         self.controls.resize(self.successors.len(), Vec::new());
         self.contexts.push(Context {
             instance,
@@ -234,6 +241,7 @@ impl<'a, 'sess> Analysis<'a, 'sess> {
         lower: Polynomial,
         upper: Option<Polynomial>,
         requirement: Requirement,
+        variance: u8,
         description: impl Into<String>,
     ) -> Polynomial {
         let frame = self.frame();
@@ -247,11 +255,13 @@ impl<'a, 'sess> Analysis<'a, 'sess> {
                     requirement: requirement.clone(),
                     description: description.into(),
                     updates: 0,
+                    variance,
                 });
                 self.keys.insert(key, self.variables.len() - 1);
                 return Polynomial::atom(Atom::Variable(self.variables.len() - 1));
             }
         };
+        self.variables[variable].variance = self.variables[variable].variance.max(variance);
         self.update(variable, lower, upper, requirement);
         Polynomial::atom(Atom::Variable(variable))
     }

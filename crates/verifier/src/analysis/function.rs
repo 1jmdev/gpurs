@@ -2,10 +2,10 @@ use std::collections::VecDeque;
 
 use gpurs_rustc::{Instance, TerminatorKind};
 
-use super::{Analysis, Frame, Pointer, State, Value};
+use super::{Analysis, Frame, Pointer, State, Value, control};
 use crate::{
     engine::{Bound, Direction},
-    symbolic::{Fact, Polynomial, Predicate, Relation, Requirement},
+    symbolic::{Fact, Polynomial, Requirement},
 };
 
 const ROUNDS: usize = 8;
@@ -24,6 +24,11 @@ impl Analysis<'_, '_> {
         let base = entry.slots.len() - body.locals().len();
         self.frames.push(Frame {
             body: body.clone(),
+            postdominators: control::postdominators(
+                &(0..body.blocks.len())
+                    .map(|block| control::normal_successors(&body, block))
+                    .collect::<Vec<_>>(),
+            ),
             inherited: entry.facts.clone(),
             base,
             context,
@@ -52,8 +57,18 @@ impl Analysis<'_, '_> {
                 if !self.block(block, &mut state) {
                     continue;
                 }
+                let variance = match &body.blocks[block].terminator.kind {
+                    TerminatorKind::SwitchInt { discr, .. } => {
+                        Some(self.operand(discr, &state).variance)
+                    }
+                    _ => None,
+                };
                 for (successor, facts) in self.successors(block, &state) {
                     let mut next = state.clone();
+                    if let Some(variance) = variance {
+                        next.controls
+                            .insert(self.contexts[context].offset + block, (successor, variance));
+                    }
                     for fact in facts {
                         if !next.facts.contains(&fact) {
                             next.facts.push(fact);
@@ -98,7 +113,14 @@ impl Analysis<'_, '_> {
                     TerminatorKind::SwitchInt { .. }
                 )
             {
-                self.successors[self.contexts[context].offset + block] = successors
+                let node = self.contexts[context].offset + block;
+                self.edges[node] = successors
+                    .iter()
+                    .map(|(successor, facts)| {
+                        (self.contexts[context].offset + successor, facts.clone())
+                    })
+                    .collect();
+                self.successors[node] = successors
                     .into_iter()
                     .filter(|(successor, _)| {
                         !matches!(
@@ -120,21 +142,10 @@ impl Analysis<'_, '_> {
                     && let TerminatorKind::SwitchInt { discr, targets } =
                         &body.blocks[block].terminator.kind
                 {
-                    let value = self.operand(discr, state);
+                    let mut value = self.operand(discr, state);
+                    value.exact_guards |=
+                        value.integer.is_some() && targets.branches().count() == 1;
                     let node = self.contexts[context].offset + block;
-                    self.comparisons[node] = value
-                        .guard(1)
-                        .and_then(|facts| facts.first())
-                        .map(|fact| fact.predicate.clone())
-                        .or_else(|| {
-                            let [(constant, _)] = targets.branches().collect::<Vec<_>>()[..] else {
-                                return None;
-                            };
-                            Some(Predicate::new(
-                                value.integer.clone()?.offset(-(constant as i128))?,
-                                Relation::Zero,
-                            ))
-                        });
                     self.branches[node] = Some(value);
                 }
             }
@@ -149,6 +160,15 @@ impl Analysis<'_, '_> {
     /// Executes the statements of `block` and the call ending it; `false` when the call never
     /// returns.
     pub fn block(&mut self, block: usize, state: &mut State) -> bool {
+        let frame = self.frame();
+        let offset = self.contexts[frame.context].offset;
+        state.controls.retain(|&branch, _| {
+            branch < offset
+                || branch >= offset + frame.body.blocks.len()
+                || (branch != offset + block
+                    && !(frame.postdominators.is_reachable(branch - offset)
+                        && frame.postdominators.dominates(block, branch - offset)))
+        });
         let body = self.frame().body.clone();
         self.frames.last_mut().unwrap().block = block;
         for (index, statement) in body.blocks[block].statements.iter().enumerate() {
@@ -208,7 +228,17 @@ impl Analysis<'_, '_> {
         let frame = self.frames.last_mut().unwrap();
         frame.block = saved_block;
         frame.statement = saved_statement;
-        let joined = State { slots, facts };
+        let controls = previous
+            .controls
+            .iter()
+            .filter(|(branch, edge)| next.controls.get(branch) == Some(edge))
+            .map(|(branch, edge)| (*branch, *edge))
+            .collect();
+        let joined = State {
+            slots,
+            facts,
+            controls,
+        };
         let changed = joined != *previous;
         *previous = joined;
         changed
@@ -225,6 +255,7 @@ impl Analysis<'_, '_> {
         if left == right {
             return left.clone();
         }
+        let variance = left.variance.max(right.variance);
         let (integer, requirement) = match (&left.integer, &right.integer) {
             (Some(a), Some(b)) if a == b => (
                 Some(a.clone()),
@@ -234,7 +265,7 @@ impl Analysis<'_, '_> {
                     .collect(),
             ),
             (Some(a), Some(b)) => (
-                Some(self.widen(a, b, path.clone(), sides)),
+                Some(self.widen(a, b, path.clone(), sides, variance)),
                 Requirement::new(),
             ),
             _ => (None, Requirement::new()),
@@ -312,6 +343,7 @@ impl Analysis<'_, '_> {
                     region: a.region.clone(),
                     index: None,
                     inner: a.inner && b.inner,
+                    path: vec![usize::MAX],
                 }))
             }
             _ => Some(Pointer::Unknown),
@@ -320,6 +352,7 @@ impl Analysis<'_, '_> {
             integer,
             requirement,
             guards,
+            exact_guards: false,
             domain: (left.domain == right.domain)
                 .then_some(left.domain)
                 .flatten(),
@@ -328,7 +361,7 @@ impl Analysis<'_, '_> {
                 .flatten(),
             fields,
             pointer,
-            variance: left.variance.max(right.variance),
+            variance,
         }
     }
 
@@ -340,6 +373,7 @@ impl Analysis<'_, '_> {
         right: &Polynomial,
         path: Vec<usize>,
         sides: (&State, &State),
+        variance: u8,
     ) -> Polynomial {
         let bounds = |direction| {
             (
@@ -365,6 +399,7 @@ impl Analysis<'_, '_> {
             lower,
             upper,
             requirement,
+            variance,
             "a value that differs between the paths reaching a loop or merge",
         )
     }

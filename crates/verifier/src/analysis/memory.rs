@@ -3,7 +3,7 @@ use gpurs_rustc::{BinOp, FxHashSet};
 use super::{Analysis, Region, control};
 use crate::{
     proof::{self, Comparison, Proofs},
-    symbolic::{Atom, Polynomial, Relation},
+    symbolic::{Atom, Fact, Polynomial, Predicate, Relation, Requirement},
 };
 
 impl Analysis<'_, '_> {
@@ -57,8 +57,8 @@ impl Analysis<'_, '_> {
                 .chain(
                     self.collectives
                         .iter()
-                        .filter(|(_, permitted, _)| *permitted == 1)
-                        .map(|(block, _, _)| *block),
+                        .filter(|(_, permitted, _, _)| *permitted == 1)
+                        .map(|(block, _, _, _)| *block),
                 )
                 .collect();
             for other in &self.accesses {
@@ -81,8 +81,7 @@ impl Analysis<'_, '_> {
                     continue;
                 }
                 let shared = matches!(access.origin.region, Region::Shared(..));
-                if matches!(access.origin.region, Region::Parameter(_))
-                    && access.origin.region == other.origin.region
+                if access.origin.region == other.origin.region
                     && !access.atomic
                     && !other.atomic
                     && let (Some(left), Some(right)) = (&access.origin.index, &other.origin.index)
@@ -131,17 +130,22 @@ impl Analysis<'_, '_> {
         }
         for index in 0..self.accesses.len() {
             let access = &self.accesses[index];
-            let Region::Shared(_, length) = access.origin.region else {
+            let Region::Shared(..) = access.origin.region else {
                 continue;
             };
             if access.write {
                 continue;
             }
-            let initialized = self
+            let writes: Vec<_> = self
                 .accesses
                 .iter()
-                .filter(|write| write.write && write.origin.region == access.origin.region)
-                .find_map(|write| {
+                .filter(|write| {
+                    write.write
+                        && write.origin.region == access.origin.region
+                        && access.origin.path.starts_with(&write.origin.path)
+                        && !write.origin.path.contains(&usize::MAX)
+                })
+                .filter_map(|write| {
                     if control::reachable(
                         &self.successors,
                         write.block,
@@ -155,44 +159,76 @@ impl Analysis<'_, '_> {
                     ) {
                         return None;
                     }
-                    let index = write.origin.index.as_ref()?;
-                    let write_comparisons = proof::comparisons(&write.facts);
+                    let mut guards = Vec::new();
+                    let mut preceding = FxHashSet::from_iter([write.block]);
                     for &(branch, successor) in &self.controls[write.block] {
-                        if self.controls[access.block].contains(&(branch, successor)) {
+                        preceding.insert(branch);
+                        if self.controls[access.block].contains(&(branch, successor))
+                            && self.branches[branch].as_ref()?.variance == 0
+                        {
                             continue;
                         }
-                        let predicate = self.comparisons[branch].as_ref()?;
-                        let Some(Atom::Quotient(value, divisor)) = index.variable() else {
-                            return None;
-                        };
-                        let divisor = divisor.value()?;
-                        let remainder =
-                            Polynomial::remainder((**value).clone(), Polynomial::constant(divisor));
-                        let compares = predicate.relation == Relation::Zero
-                            && predicate
-                                .polynomial
-                                .add(&remainder, -1)
-                                .is_some_and(|rest| rest.value().is_some());
-                        let pinned =
-                            write_comparisons
-                                .iter()
-                                .any(|Comparison(operation, left, right)| {
-                                    *operation == BinOp::Eq
-                                        && *left == remainder
-                                        && right
-                                            .value()
-                                            .is_some_and(|value| value >= 0 && value < divisor)
-                                });
-                        if !compares || !pinned {
+                        if !self.branches[branch].as_ref()?.exact_guards {
                             return None;
                         }
+                        let (_, facts) = self.edges[branch]
+                            .iter()
+                            .find(|(target, _)| *target == successor)?;
+                        if facts.is_empty() {
+                            return None;
+                        }
+                        guards.extend(facts.iter().cloned());
                     }
-                    Proofs {
-                        facts: &write_comparisons,
-                        variables: &self.variables,
+                    if control::reachable(&self.successors, 0, access.block, &preceding) {
+                        return None;
                     }
-                    .coverage(index, length)
-                });
+                    Some((write, guards))
+                })
+                .collect();
+            let coverage = |facts: &[Fact]| {
+                writes
+                    .iter()
+                    .filter_map(|(write, guards)| {
+                        Proofs {
+                            facts: &proof::comparisons(guards),
+                            variables: &self.variables,
+                        }
+                        .coverage(
+                            write.origin.index.as_ref()?,
+                            access.origin.index.as_ref()?,
+                            guards,
+                            &self.engine(facts),
+                        )
+                    })
+                    .min_by_key(Requirement::len)
+            };
+            let initialized = (|| {
+                let stride = writes
+                    .first()?
+                    .0
+                    .origin
+                    .index
+                    .as_ref()?
+                    .0
+                    .get(&vec![Atom::Thread(0)])?;
+                if *stride <= 1 || *stride > writes.len() as i128 {
+                    return None;
+                }
+                (0..*stride).try_fold(Requirement::new(), |mut clauses, residue| {
+                    let mut facts = access.facts.clone();
+                    facts.push(Fact::new(Predicate::new(
+                        Polynomial::remainder(
+                            access.origin.index.clone()?,
+                            Polynomial::constant(*stride),
+                        )
+                        .offset(-residue)?,
+                        Relation::Zero,
+                    )));
+                    clauses.extend(coverage(&facts)?);
+                    Some(clauses)
+                })
+            })()
+            .or_else(|| coverage(&access.facts));
             match initialized {
                 Some(clauses) => {
                     for clause in clauses {
@@ -201,11 +237,18 @@ impl Analysis<'_, '_> {
                         }
                     }
                 }
-                None => self.sess.error_help(
+                None => self.sess.error_notes(
                     access.span,
                     "shared memory may be read before it is initialized",
-                    "initialize every shared-memory element, then call gpu::sync_block() before \
-                     other threads read it",
+                    &[format!(
+                        "no preceding synchronized write covers read index `{}`; initialize the \
+                         elements this read can reach, or guard the read to the initialized range",
+                        access
+                            .origin
+                            .index
+                            .as_ref()
+                            .map_or_else(|| "unknown".to_owned(), |index| self.describe(index),),
+                    )],
                 ),
             }
         }

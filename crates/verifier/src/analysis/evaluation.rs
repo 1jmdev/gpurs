@@ -62,6 +62,7 @@ impl Analysis<'_, '_> {
                 Polynomial::default(),
                 Some(Polynomial::constant(maximum)),
                 engine::opaque(),
+                value.variance,
                 description,
             ));
         }
@@ -85,6 +86,7 @@ impl Analysis<'_, '_> {
                         region: Region::Parameter(parameter),
                         index: Some(index),
                         inner: false,
+                        ..
                     })) if index.value() == Some(0) => {
                         Value::integer(Polynomial::atom(Atom::Length(parameter)), 0)
                     }
@@ -108,6 +110,7 @@ impl Analysis<'_, '_> {
                         .map(|(key, facts)| (1 - key, facts.clone()))
                         .collect(),
                     domain: Some(2),
+                    exact_guards: value.exact_guards,
                     variance: value.variance,
                     ..Value::default()
                 }

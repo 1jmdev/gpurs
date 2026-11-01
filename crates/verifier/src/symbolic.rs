@@ -194,6 +194,21 @@ impl Polynomial {
             (Some(left), Some(right)) if left >= 0 && right > 0 => {
                 Polynomial::constant(left / right)
             }
+            (_, Some(divisor))
+                if divisor > 0
+                    && dividend
+                        .0
+                        .values()
+                        .all(|coefficient| coefficient % divisor == 0) =>
+            {
+                Polynomial(
+                    dividend
+                        .0
+                        .into_iter()
+                        .map(|(monomial, coefficient)| (monomial, coefficient / divisor))
+                        .collect(),
+                )
+            }
             _ => Polynomial::atom(Atom::Quotient(Box::new(dividend), Box::new(divisor))),
         }
     }
@@ -203,6 +218,15 @@ impl Polynomial {
             (_, Some(0 | 1)) | (Some(0), _) => Polynomial::default(),
             (Some(left), Some(right)) if left >= 0 && right > 0 => {
                 Polynomial::constant(left % right)
+            }
+            (_, Some(divisor))
+                if divisor > 0
+                    && dividend
+                        .0
+                        .values()
+                        .all(|coefficient| coefficient % divisor == 0) =>
+            {
+                Polynomial::default()
             }
             _ => Polynomial::atom(Atom::Remainder(Box::new(dividend), Box::new(divisor))),
         }

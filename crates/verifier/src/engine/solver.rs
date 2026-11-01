@@ -13,6 +13,7 @@ pub struct Variable {
     pub requirement: Requirement,
     pub description: String,
     pub updates: u8,
+    pub variance: u8,
 }
 
 pub struct Engine<'a> {
@@ -161,11 +162,17 @@ impl Engine<'_> {
             }
         }
         let mut divisions = BTreeSet::new();
-        goal.atoms(&mut |atom| {
-            if let Atom::Quotient(dividend, divisor) | Atom::Remainder(dividend, divisor) = atom {
-                divisions.insert(((**dividend).clone(), (**divisor).clone()));
-            }
-        });
+        for polynomial in [goal]
+            .into_iter()
+            .chain(self.facts.iter().map(|fact| &fact.predicate.polynomial))
+        {
+            polynomial.atoms(&mut |atom| {
+                if let Atom::Quotient(dividend, divisor) | Atom::Remainder(dividend, divisor) = atom
+                {
+                    divisions.insert(((**dividend).clone(), (**divisor).clone()));
+                }
+            });
+        }
         for (dividend, divisor) in divisions {
             let quotient = Polynomial::quotient(dividend.clone(), divisor.clone());
             let remainder = Polynomial::remainder(dividend.clone(), divisor.clone());

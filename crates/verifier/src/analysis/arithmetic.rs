@@ -163,6 +163,7 @@ impl Analysis<'_, '_> {
                         })
                         .collect(),
                     domain: Some(2),
+                    exact_guards: true,
                     variance,
                     ..Value::default()
                 },
@@ -232,6 +233,7 @@ impl Analysis<'_, '_> {
                         Polynomial::default(),
                         Some(Polynomial::constant(mask)),
                         Requirement::new(),
+                        variance,
                         "a masked value",
                     ));
                 }
