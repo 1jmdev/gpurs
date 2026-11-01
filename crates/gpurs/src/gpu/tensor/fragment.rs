@@ -182,6 +182,16 @@ impl<T: Shuffle> Accumulator<T> {
 macro_rules! operand_conversion {
     ($($element:ident),*) => {
         $(
+            impl Accumulator<$element> {
+                /// The values widened to f32.
+                pub fn to_f32(&self) -> Accumulator<f32> {
+                    let [a, b, c, d] = self.values;
+                    Accumulator {
+                        values: [a.to_f32(), b.to_f32(), c.to_f32(), d.to_f32()],
+                    }
+                }
+            }
+
             impl FragmentA<$element> {
                 /// Packs adjacent 16x8 accumulator blocks as one 16x16 A operand.
                 pub fn from_accumulators(
@@ -277,13 +287,6 @@ impl Accumulator<Half> {
             packed,
         ));
         self.values = [Half(w), Half(x), Half(y), Half(z)];
-    }
-
-    /// The values widened to f32.
-    pub fn to_f32(&self) -> Accumulator<f32> {
-        Accumulator {
-            values: self.values.map(Half::to_f32),
-        }
     }
 }
 

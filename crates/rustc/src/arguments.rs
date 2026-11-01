@@ -39,6 +39,7 @@ pub fn device_arguments(arguments: &[String], output: &str) -> Vec<String> {
     device.extend(TOOL_ARGUMENTS.map(str::to_owned));
     device.extend([
         "-Zmir-opt-level=2".to_owned(),
+        "-Zmir-enable-passes=-JumpThreading".to_owned(),
         "-Coverflow-checks=on".to_owned(),
         "-Zinline-mir=no".to_owned(),
         "-Copt-level=3".to_owned(),

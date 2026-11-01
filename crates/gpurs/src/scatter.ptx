@@ -1,0 +1,70 @@
+.version 7.0
+.target sm_50
+.address_size 64
+
+.visible .entry claim_indices(.param .align 8 .b8 arguments[40])
+{
+    .reg .pred p;
+    .reg .b32 r<5>;
+    .reg .b64 d<10>;
+    ld.param.u64 d0, [arguments];
+    ld.param.u64 d1, [arguments+8];
+    ld.param.u64 d2, [arguments+16];
+    ld.param.u64 d3, [arguments+24];
+    mov.u32 r0, %ctaid.x;
+    mov.u32 r1, %ntid.x;
+    mov.u32 r2, %tid.x;
+    mul.wide.u32 d4, r0, r1;
+    cvt.u64.u32 d5, r2;
+    add.u64 d4, d4, d5;
+    setp.ge.u64 p, d4, d2;
+    @p ret;
+    shl.b64 d5, d4, 3;
+    add.u64 d6, d0, d5;
+    ld.global.u64 d7, [d6];
+    setp.ge.u64 p, d7, d3;
+    @p ret;
+    shl.b64 d8, d7, 2;
+    add.u64 d9, d1, d8;
+    atom.global.or.b32 r3, [d9], 1;
+    setp.eq.u32 p, r3, 0;
+    @p ret;
+    atom.global.or.b32 r4, [d9], 2;
+    ret;
+}
+
+.visible .entry select_indices(.param .align 8 .b8 arguments[40])
+{
+    .reg .pred p;
+    .reg .b32 r<4>;
+    .reg .b64 d<11>;
+    ld.param.u64 d0, [arguments];
+    ld.param.u64 d1, [arguments+8];
+    ld.param.u64 d2, [arguments+16];
+    ld.param.u64 d3, [arguments+24];
+    ld.param.u64 d10, [arguments+32];
+    mov.u32 r0, %ctaid.x;
+    mov.u32 r1, %ntid.x;
+    mov.u32 r2, %tid.x;
+    mul.wide.u32 d4, r0, r1;
+    cvt.u64.u32 d5, r2;
+    add.u64 d4, d4, d5;
+    setp.ge.u64 p, d4, d2;
+    @p ret;
+    shl.b64 d5, d4, 3;
+    add.u64 d6, d0, d5;
+    ld.global.u64 d7, [d6];
+    setp.ge.u64 p, d7, d3;
+    @p bra invalid;
+    shl.b64 d8, d7, 2;
+    add.u64 d9, d1, d8;
+    ld.global.u32 r3, [d9];
+    setp.eq.u32 p, r3, 1;
+    @p bra store;
+invalid:
+    mov.u64 d7, d3;
+store:
+    add.u64 d6, d10, d5;
+    st.global.u64 [d6], d7;
+    ret;
+}

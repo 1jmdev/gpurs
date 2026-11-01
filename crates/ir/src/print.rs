@@ -163,7 +163,9 @@ impl Function {
                     .map(|value| Typed(value).to_string())
                     .collect();
                 write!(f, "({})", arguments.join(", "))?;
-                if matches!(callee, Callee::Assembly(_, _, true)) {
+                if matches!(callee, Callee::Assembly(_, _, true))
+                    || matches!(callee, Callee::Symbol(name) if name.starts_with("llvm.nvvm.barrier"))
+                {
                     write!(f, " convergent")?;
                 }
                 Ok(())

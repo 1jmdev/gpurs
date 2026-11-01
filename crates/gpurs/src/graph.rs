@@ -3,6 +3,7 @@ use std::{
     cell::RefCell,
     ffi::c_void,
     mem::{self, MaybeUninit},
+    ptr,
     rc::Rc,
 };
 
@@ -37,6 +38,54 @@ impl CapturedOperation {
         Self(Operation::Kernel(kernel))
     }
 
+    pub(crate) fn fill(access: Access, value: u8) -> Self {
+        Self(Operation::Fill { access, value })
+    }
+
+    pub(crate) fn copy(accesses: [Access; 2]) -> Self {
+        Self(Operation::Copy { accesses })
+    }
+
+    pub(crate) fn try_submit(&mut self, stream: &driver::Stream) -> driver::Result<()> {
+        // SAFETY: constructors retain storage and establish the operation's bounds and ABI.
+        // Callers order accesses before submission or record this operation in a graph.
+        unsafe {
+            match &mut self.0 {
+                Operation::Kernel(kernel) => {
+                    if let Some(status) = &kernel.status {
+                        driver::try_fill_async(status.pointer, 0, 4, stream)?;
+                    }
+                    kernel.function.try_launch(
+                        kernel.config.grid.map(|value| value as u32),
+                        kernel.config.block.map(|value| value as u32),
+                        kernel.config.shared_bytes as u32,
+                        stream,
+                        &mut kernel.arguments,
+                    )?;
+                }
+                Operation::Fill { access, value } => {
+                    driver::try_fill_async(
+                        access.allocation.pointer + access.range.start as u64,
+                        *value,
+                        access.range.len(),
+                        stream,
+                    )?;
+                }
+                Operation::Copy {
+                    accesses: [source, destination],
+                } => {
+                    driver::try_copy_device_async(
+                        destination.allocation.pointer + destination.range.start as u64,
+                        source.allocation.pointer + source.range.start as u64,
+                        source.range.len(),
+                        stream,
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn accesses(&self) -> &[Access] {
         match &self.0 {
             Operation::Kernel(kernel) => &kernel.accesses,
@@ -62,6 +111,7 @@ struct GraphInner {
     device: Rc<Device>,
     accesses: Vec<Access>,
     statuses: Vec<Rc<Status>>,
+    nodes: Vec<*mut c_void>,
     _resources: Box<dyn Any>,
     pending: RefCell<Option<Event>>,
 }
@@ -70,7 +120,10 @@ struct GraphInner {
 pub struct GraphExec {
     raw: driver::GraphExec,
     graph: Graph,
+    origin: Graph,
     pending: RefCell<Option<Event>>,
+    replacements: Vec<Option<Vec<Access>>>,
+    accesses: Vec<Access>,
 }
 
 impl Stream {
@@ -97,10 +150,11 @@ impl Stream {
             kernels: &kernels,
         })?;
         let mut kernels = kernels.into_inner();
-        let accesses = kernels
+        let mut accesses = kernels
             .iter()
             .flat_map(|operation| operation.accesses().iter().cloned())
             .collect();
+        tracking::deduplicate(&mut accesses);
         let statuses = kernels
             .iter()
             .filter_map(|operation| match &operation.0 {
@@ -109,40 +163,13 @@ impl Stream {
             })
             .collect();
         let stream = driver::Stream::try_new()?;
+        let mut nodes = Vec::new();
         let raw = unsafe {
             driver::Graph::try_capture(&stream, || {
                 for operation in &mut kernels {
-                    match &mut operation.0 {
-                        Operation::Kernel(kernel) => {
-                            if let Some(status) = &kernel.status {
-                                driver::try_fill_async(status.pointer, 0, 4, &stream)?;
-                            }
-                            kernel.function.try_launch(
-                                kernel.config.grid.map(|value| value as u32),
-                                kernel.config.block.map(|value| value as u32),
-                                kernel.config.shared_bytes as u32,
-                                &stream,
-                                &mut kernel.arguments,
-                            )?;
-                        }
-                        Operation::Fill { access, value } => {
-                            driver::try_fill_async(
-                                access.allocation.pointer + access.range.start as u64,
-                                *value,
-                                access.range.len(),
-                                &stream,
-                            )?;
-                        }
-                        Operation::Copy {
-                            accesses: [source, destination],
-                        } => {
-                            driver::try_copy_device_async(
-                                destination.allocation.pointer + destination.range.start as u64,
-                                source.allocation.pointer + source.range.start as u64,
-                                source.range.len(),
-                                &stream,
-                            )?;
-                        }
+                    operation.try_submit(&stream)?;
+                    if matches!(&operation.0, Operation::Kernel(_)) {
+                        nodes.push(driver::Graph::try_capture_dependencies(&stream)?[0]);
                     }
                 }
                 Ok(())
@@ -153,6 +180,7 @@ impl Stream {
             device: self.device.clone(),
             accesses,
             statuses,
+            nodes,
             _resources: Box::new(kernels),
             pending: RefCell::default(),
         })))
@@ -182,6 +210,7 @@ impl Stream {
             device: self.device.clone(),
             accesses,
             statuses: Vec::new(),
+            nodes: Vec::new(),
             _resources: Box::new(resources),
             pending: RefCell::default(),
         }))
@@ -206,6 +235,7 @@ impl Stream {
             device: self.device.clone(),
             accesses,
             statuses: Vec::new(),
+            nodes: Vec::new(),
             _resources: Box::new(resources),
             pending: RefCell::default(),
         }))
@@ -219,7 +249,7 @@ impl CaptureStream<'_> {
         self.stream.check_external(std::slice::from_ref(&access))?;
         self.kernels
             .borrow_mut()
-            .push(CapturedOperation(Operation::Fill { access, value }));
+            .push(CapturedOperation::fill(access, value));
         Ok(())
     }
 
@@ -250,7 +280,7 @@ impl CaptureStream<'_> {
         self.stream.check_external(&accesses)?;
         self.kernels
             .borrow_mut()
-            .push(CapturedOperation(Operation::Copy { accesses }));
+            .push(CapturedOperation::copy(accesses));
         Ok(())
     }
 
@@ -319,7 +349,10 @@ impl Graph {
         Ok(GraphExec {
             raw: self.0.raw.try_instantiate()?,
             graph: self.clone(),
+            origin: self.clone(),
             pending: RefCell::default(),
+            replacements: (0..self.0.nodes.len()).map(|_| None).collect(),
+            accesses: self.0.accesses.clone(),
         })
     }
 
@@ -386,7 +419,7 @@ impl GraphExec {
                 stream.raw.try_wait(&event.raw)?;
             }
         }
-        let mut statuses = tracking::try_order(&stream.raw, &self.graph.0.accesses)?;
+        let mut statuses = tracking::try_order(&stream.raw, &self.accesses)?;
         let snapshots = self
             .graph
             .0
@@ -404,7 +437,7 @@ impl GraphExec {
             }
         }
         statuses.extend(snapshots);
-        tracking::complete(&stream.raw, &self.graph.0.accesses, &statuses);
+        tracking::complete(&stream.raw, &self.accesses, &statuses);
         stream.retain_statuses(&statuses);
         let event = match stream.try_record_statuses(statuses.clone()) {
             Ok(event) => event,
@@ -434,8 +467,108 @@ impl GraphExec {
         let result = self.raw.try_update(&graph.0.raw)?;
         if result == 0 {
             self.graph = graph.clone();
+            self.replacements = (0..graph.0.nodes.len()).map(|_| None).collect();
+            self.accesses = graph.0.accesses.clone();
         }
         Ok(result)
+    }
+
+    /// Replaces one kernel's verified arguments and geometry without CUDA recapture or waiting.
+    /// `index` counts kernel calls in capture order. Record exactly one call to the same
+    /// kernel entry point; its ordinary launcher rechecks all verifier preconditions.
+    /// Queued replays keep their original arguments, and future replays track new storage.
+    pub fn try_update_kernel(
+        &mut self,
+        index: usize,
+        stream: &Stream,
+        record: impl FnOnce(&CaptureStream<'_>) -> Result<()>,
+    ) -> Result<()> {
+        if !Rc::ptr_eq(&self.graph.0.device, &stream.device) {
+            return Err(Error::InvalidOperation(
+                "graph and stream contexts differ".to_owned(),
+            ));
+        }
+        let operations = self
+            .graph
+            .0
+            ._resources
+            .downcast_ref::<Vec<CapturedOperation>>();
+        let original = operations
+            .and_then(|operations| {
+                self.origin.0.nodes.get(index)?;
+                operations
+                    .iter()
+                    .filter_map(|operation| match &operation.0 {
+                        Operation::Kernel(kernel) => Some(kernel),
+                        _ => None,
+                    })
+                    .nth(index)
+            })
+            .ok_or_else(|| Error::InvalidOperation("graph kernel index is invalid".to_owned()))?;
+        let kernels = RefCell::new(Vec::new());
+        record(&CaptureStream {
+            stream,
+            config: None,
+            kernels: &kernels,
+        })?;
+        let mut kernels = kernels.into_inner();
+        if kernels.len() != 1 {
+            return Err(Error::InvalidOperation(
+                "graph update requires exactly one kernel".to_owned(),
+            ));
+        }
+        let Operation::Kernel(mut kernel) = kernels.pop().expect("one operation was recorded").0
+        else {
+            return Err(Error::InvalidOperation(
+                "graph update requires a kernel call".to_owned(),
+            ));
+        };
+        if kernel.function.as_raw() != original.function.as_raw() {
+            return Err(Error::InvalidOperation(
+                "graph update must preserve the kernel entry point".to_owned(),
+            ));
+        }
+        if let Some(status) = &original.status {
+            kernel.arguments[..8]
+                .copy_from_slice(&status.pointer.to_ne_bytes().map(MaybeUninit::new));
+        }
+        let mut parameters = [kernel.arguments.as_mut_ptr().cast()];
+        let _context = stream.device.context.try_enter()?;
+        // SAFETY: the ordinary launcher verified this call, resources are retained below,
+        // and the original status pointer still belongs to the captured reset and snapshot.
+        unsafe {
+            self.raw.try_set_kernel(
+                self.origin.0.nodes[index],
+                &driver::KernelNodeParameters {
+                    function: kernel.function.as_raw(),
+                    grid: kernel.config.grid.map(|value| value as u32),
+                    block: kernel.config.block.map(|value| value as u32),
+                    shared_bytes: kernel.config.shared_bytes as u32,
+                    parameters: parameters.as_mut_ptr(),
+                    extra: ptr::null_mut(),
+                },
+            )?;
+        }
+        self.replacements[index] = Some(kernel.accesses);
+        let mut kernel_index = 0;
+        self.accesses = operations
+            .expect("verified graph retains its operations")
+            .iter()
+            .flat_map(|operation| {
+                if matches!(&operation.0, Operation::Kernel(_)) {
+                    let accesses = self.replacements[kernel_index]
+                        .as_deref()
+                        .unwrap_or_else(|| operation.accesses());
+                    kernel_index += 1;
+                    accesses
+                } else {
+                    operation.accesses()
+                }
+            })
+            .cloned()
+            .collect();
+        tracking::deduplicate(&mut self.accesses);
+        Ok(())
     }
 
     /// Updates future launches of a native kernel node without waiting for queued work.

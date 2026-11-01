@@ -310,38 +310,8 @@ impl Analysis<'_, '_> {
                     }
                 }
             }
-            for &(collective, permitted, span, instance) in &self.collectives {
-                let context = self
-                    .contexts
-                    .iter()
-                    .rposition(|context| context.offset <= collective)
-                    .unwrap();
-                let copies: FxHashSet<_> = self
-                    .collectives
-                    .iter()
-                    .filter(|(node, scope, source, operation)| {
-                        *scope == permitted
-                            && *source == span
-                            && *operation == instance
-                            && self
-                                .contexts
-                                .iter()
-                                .rposition(|context| context.offset <= *node)
-                                == Some(context)
-                    })
-                    .map(|(node, _, _, _)| *node)
-                    .collect();
-                let reconverged = copies.len() > 1
-                    && postdominators.is_reachable(block)
-                    && !(0..count).any(|exit| {
-                        self.successors[exit].is_empty()
-                            && reachable(&self.successors, block, exit, &copies)
-                    })
-                    && !self.successors[block]
-                        .iter()
-                        .any(|&successor| reachable(&self.successors, successor, block, &copies));
+            for &(collective, permitted, span, _) in &self.collectives {
                 if value.variance > permitted
-                    && !reconverged
                     && !postdominates(collective, block)
                     && self.successors[block].iter().any(|&successor| {
                         reachable(&self.successors, successor, collective, &reconvergence)

@@ -21,7 +21,7 @@ use crate::{
 /// Suballocations share dependency tracking, including overlapping byte ranges.
 #[derive(Clone)]
 pub struct DeviceAllocation {
-    allocation: Rc<Allocation>,
+    pub(crate) allocation: Rc<Allocation>,
 }
 
 /// Owned page-locked host storage. Transfers consume it and return it on completion.

@@ -113,7 +113,15 @@ impl Module {
             .declarations()
             .into_iter()
             .map(|(name, (result, parameters))| {
-                let text = format!("declare {result} @{name}({})\n", List(&parameters));
+                let attributes = if name.starts_with("llvm.nvvm.barrier") {
+                    " convergent"
+                } else {
+                    ""
+                };
+                let text = format!(
+                    "declare {result} @{name}({}){attributes}\n",
+                    List(&parameters)
+                );
                 (name, text)
             })
             .collect();

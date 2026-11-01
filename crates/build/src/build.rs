@@ -300,6 +300,7 @@ fn library_view(
             [
                 "-Zalways-encode-mir",
                 "-Zmir-opt-level=2",
+                "-Zmir-enable-passes=-JumpThreading",
                 "-Copt-level=3",
                 "-Cdebug-assertions=no",
                 "-Coverflow-checks=on",

@@ -78,7 +78,9 @@ impl Proofs<'_> {
     pub fn injective(&self, expression: &Polynomial, shared: bool) -> Option<Vec<Clause>> {
         let mut clauses = Vec::new();
         let mut expression = expression.clone();
-        expression.0.remove(&Vec::new());
+        expression
+            .0
+            .retain(|term, _| !term.iter().all(Atom::launch));
         let covered = self.decompose(&expression, &mut clauses, 0)?;
         for axis in 0..3 {
             for atom in [Atom::Thread(axis), Atom::Block(axis)] {

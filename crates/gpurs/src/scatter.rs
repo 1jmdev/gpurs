@@ -1,8 +1,14 @@
-use std::{collections::HashSet, rc::Rc, slice};
+use std::{alloc::Layout, collections::HashSet, mem::MaybeUninit, rc::Rc, slice};
+
+use gpurs_driver as driver;
 
 use crate::{
-    Buffer, DeviceAddress, DeviceSlice, DeviceSliceMut, Error, ExternalAccess, Gpu, PinnedBuffer,
-    Result, Stream, Transfer, gpu::Scatter, reference::sealed::Reference,
+    Buffer, DeviceAddress, DeviceSlice, DeviceSliceMut, Error, ExternalAccess, Gpu, Launch,
+    LaunchConfig, PinnedBuffer, Result, Stream, Transfer,
+    gpu::Scatter,
+    graph::{CapturedKernel, CapturedOperation},
+    reference::sealed::Reference,
+    tracking::{self, Access},
 };
 
 pub struct DeviceScatter<T> {
@@ -10,9 +16,65 @@ pub struct DeviceScatter<T> {
     dependencies: [ExternalAccess; 2],
     indices: Buffer<usize>,
     target_len: usize,
+    validation: Option<(Buffer<usize>, Buffer<u32>)>,
+    _upload: Option<Transfer<PinnedBuffer<Scatter<T>>>>,
 }
 
 impl Gpu {
+    /// Snapshots GPU indices asynchronously, suppressing out-of-bounds and duplicate entries.
+    /// Every occurrence of a duplicate destination is disabled. Subsequent source changes
+    /// do not affect this view; use `DeviceScatter::try_update_device` to refresh it.
+    pub fn try_scatter_device<T: Copy>(
+        &self,
+        stream: &Stream,
+        target: &mut impl DeviceSliceMut<T>,
+        indices: &impl DeviceSlice<usize>,
+    ) -> Result<DeviceScatter<T>> {
+        let span = target.span();
+        if span.len == 0
+            || indices.is_empty()
+            || !Rc::ptr_eq(&self.device, &span.allocation.device)
+            || !Rc::ptr_eq(&self.device, &stream.device)
+        {
+            return Err(Error::InvalidOperation(
+                "scatter views require nonempty ranges on the same GPU".to_owned(),
+            ));
+        }
+        let allocation =
+            self.try_allocate(Layout::array::<usize>(indices.len()).map_err(|_| {
+                Error::InvalidOperation(
+                    "scatter index allocation exceeds the size range".to_owned(),
+                )
+            })?)?;
+        let target_len = span.len;
+        let descriptor = Scatter {
+            // SAFETY: the target is retained by the descriptor's tracked dependency.
+            target: unsafe { DeviceAddress::from_raw(span.allocation.pointer + span.start as u64) },
+            // SAFETY: validation initializes the retained private index allocation.
+            indices: unsafe { DeviceAddress::from_raw(allocation.address()) },
+            len: indices.len(),
+            target_len: span.len,
+        };
+        let mut snapshot = DeviceScatter {
+            buffer: Buffer::new(
+                self.try_allocate(Layout::new::<Scatter<T>>())?.allocation,
+                1,
+            ),
+            dependencies: [
+                ExternalAccess::write(target),
+                ExternalAccess(Access::read(&allocation.allocation, 0..allocation.len())),
+            ],
+            indices: Buffer::new(allocation.allocation, indices.len()),
+            target_len,
+            validation: None,
+            _upload: None,
+        };
+        snapshot.try_update_device(stream, indices)?;
+        snapshot._upload =
+            Some(stream.try_copy_descriptor(&mut snapshot.buffer, slice::from_ref(&descriptor))?);
+        Ok(snapshot)
+    }
+
     pub fn try_scatter<T: Copy>(
         &self,
         target: &mut impl DeviceSliceMut<T>,
@@ -75,6 +137,8 @@ impl Gpu {
             ],
             indices,
             target_len,
+            validation: None,
+            _upload: None,
         })
     }
 
@@ -100,6 +164,116 @@ impl Gpu {
 }
 
 impl<T> DeviceScatter<T> {
+    /// Revalidates a same-length GPU index buffer without host readback or synchronization.
+    /// Duplicate destinations and out-of-bounds indices disable the corresponding entries.
+    /// Existing graph consumers automatically wait for the refreshed snapshot.
+    pub fn try_update_device(
+        &mut self,
+        queue: &impl Launch,
+        indices: &impl DeviceSlice<usize>,
+    ) -> Result<()> {
+        let stream = queue.stream();
+        if indices.len() != self.len() {
+            return Err(Error::InvalidOperation(
+                "scatter update lengths differ".to_owned(),
+            ));
+        }
+        let blocks = u32::try_from(self.len().div_ceil(256)).map_err(|_| {
+            Error::InvalidOperation("scatter validation grid exceeds CUDA range".to_owned())
+        })?;
+        let source = indices.span();
+        let device = &self.indices.allocation.device;
+        if !Rc::ptr_eq(device, &stream.device) || !Rc::ptr_eq(device, &source.allocation.device) {
+            return Err(Error::InvalidOperation(
+                "scatter update contexts differ".to_owned(),
+            ));
+        }
+        let _context = device.context.try_enter()?;
+        if device.scatter_validation.get().is_none() {
+            let _ = device
+                .scatter_validation
+                .set(driver::Module::try_load_ptx(include_str!("scatter.ptx"))?);
+        }
+        if self.validation.is_none() {
+            let gpu = Gpu {
+                device: device.clone(),
+            };
+            let snapshot =
+                gpu.try_allocate(Layout::array::<usize>(self.len()).map_err(|_| {
+                    Error::InvalidOperation(
+                        "scatter index allocation exceeds the size range".to_owned(),
+                    )
+                })?)?;
+            let allocation =
+                gpu.try_allocate(Layout::array::<u32>(self.target_len).map_err(|_| {
+                    Error::InvalidOperation(
+                        "scatter ownership allocation exceeds the size range".to_owned(),
+                    )
+                })?)?;
+            self.validation = Some((
+                Buffer::new(snapshot.allocation, self.len()),
+                Buffer::new(allocation.allocation, self.target_len),
+            ));
+        }
+        let (snapshot, owners) = self
+            .validation
+            .as_ref()
+            .expect("scatter validation storage was allocated");
+        let accesses = [
+            Access::read(source.allocation, source.bytes::<usize>()),
+            Access::recovering(
+                &self.indices.allocation,
+                self.indices.offset..self.indices.offset + self.len() * size_of::<usize>(),
+            ),
+            Access::recovering(&snapshot.allocation, 0..snapshot.allocation.bytes),
+            Access::recovering(&owners.allocation, 0..owners.allocation.bytes),
+        ];
+        let arguments = [
+            snapshot.allocation.pointer,
+            owners.allocation.pointer,
+            self.len() as u64,
+            self.target_len as u64,
+            self.indices.allocation.pointer + self.indices.offset as u64,
+        ]
+        .into_iter()
+        .flat_map(u64::to_ne_bytes)
+        .map(MaybeUninit::new)
+        .collect::<Vec<_>>();
+        let mut operations = vec![
+            CapturedOperation::copy([accesses[0].clone(), accesses[2].clone()]),
+            CapturedOperation::fill(accesses[3].clone(), 0),
+        ];
+        for name in ["claim_indices", "select_indices"] {
+            operations.push(CapturedOperation::kernel(CapturedKernel {
+                function: device
+                    .scatter_validation
+                    .get()
+                    .expect("validation module was loaded")
+                    .try_function(name)?,
+                config: LaunchConfig {
+                    grid: [blocks as usize, 1, 1],
+                    block: [256, 1, 1],
+                    shared_bytes: 0,
+                },
+                arguments: arguments.clone(),
+                accesses: accesses[1..].to_vec(),
+                status: None,
+            }));
+        }
+        if let Some(capture) = queue.capture() {
+            capture.borrow_mut().extend(operations);
+            return Ok(());
+        }
+        stream.maintain()?;
+        let statuses = tracking::try_order(&stream.raw, &accesses)?;
+        let result = operations
+            .iter_mut()
+            .try_for_each(|operation| operation.try_submit(&stream.raw));
+        tracking::complete(&stream.raw, &accesses, &statuses);
+        stream.retain_statuses(&statuses);
+        result.map_err(Error::from)
+    }
+
     pub fn len(&self) -> usize {
         self.indices.len()
     }

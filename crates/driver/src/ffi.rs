@@ -28,6 +28,14 @@ pub const CU_TENSOR_MAP_L2_PROMOTION_L2_256B: c_int = 3;
 unsafe extern "C" {
     pub fn cuStreamBeginCapture_v2(stream: CUstream, mode: c_int) -> CUresult;
     pub fn cuStreamEndCapture(stream: CUstream, graph: *mut *mut c_void) -> CUresult;
+    pub fn cuStreamGetCaptureInfo_v2(
+        stream: CUstream,
+        status: *mut c_int,
+        id: *mut u64,
+        graph: *mut *mut c_void,
+        dependencies: *mut *const *mut c_void,
+        count: *mut usize,
+    ) -> CUresult;
     pub fn cuGraphDestroy(graph: *mut c_void) -> CUresult;
     pub fn cuGraphInstantiateWithFlags(
         executable: *mut *mut c_void,

@@ -28,6 +28,33 @@ pub struct KernelNodeParameters {
 }
 
 impl Graph {
+    /// Returns the current capture frontier, in CUDA's dependency order.
+    pub fn try_capture_dependencies(stream: &Stream) -> Result<Vec<*mut c_void>> {
+        let mut status = 0;
+        let mut dependencies = ptr::null();
+        let mut count = 0;
+        // SAFETY: CUDA owns the dependency array until the next capture operation.
+        ffi::result(
+            unsafe {
+                ffi::cuStreamGetCaptureInfo_v2(
+                    stream.raw,
+                    &mut status,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    &mut dependencies,
+                    &mut count,
+                )
+            },
+            "cuStreamGetCaptureInfo",
+        )?;
+        Ok(if count == 0 {
+            Vec::new()
+        } else {
+            // SAFETY: the active capture retains these `count` node handles.
+            unsafe { std::slice::from_raw_parts(dependencies, count) }.to_vec()
+        })
+    }
+
     /// Captures raw CUDA operations on `stream` in thread-local capture mode.
     ///
     /// # Safety

@@ -1,4 +1,7 @@
-use std::{collections::HashMap, mem};
+use std::{
+    collections::{HashMap, hash_map::Entry},
+    mem,
+};
 
 /// One PTX module holding the entry points, functions, and variables of `modules`, which
 /// libNVVM compiled for the same target. Equal definitions are kept once; a name that two
@@ -34,8 +37,8 @@ pub fn link_ptx(modules: &[String]) -> String {
             }
         };
         for (key, text) in renamed {
-            if !defined.contains_key(&key) {
-                defined.insert(key, items.len());
+            if let Entry::Vacant(entry) = defined.entry(key) {
+                entry.insert(items.len());
                 items.push(text);
             }
         }

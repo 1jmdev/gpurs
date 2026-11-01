@@ -8,6 +8,7 @@
 use std::{
     any::Any,
     cell::{Cell, RefCell},
+    collections::HashSet,
     mem::{self, MaybeUninit},
     ops::Range,
     rc::{Rc, Weak},
@@ -120,6 +121,22 @@ impl Access {
             recovers: true,
         }
     }
+}
+
+pub(crate) fn deduplicate(accesses: &mut Vec<Access>) {
+    if accesses.len() < 2 {
+        return;
+    }
+    let mut seen = HashSet::new();
+    accesses.retain(|access| {
+        seen.insert((
+            Rc::as_ptr(&access.allocation),
+            access.range.start,
+            access.range.end,
+            access.write,
+            access.recovers,
+        ))
+    });
 }
 
 impl Drop for Status {

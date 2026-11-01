@@ -29,6 +29,7 @@ pub struct Gpu {
 }
 
 pub(crate) struct Device {
+    pub scatter_validation: OnceCell<Module>,
     pub transfer: Rc<driver::Stream>,
     pub download: Rc<driver::Stream>,
     pub release: Rc<driver::Stream>,
@@ -108,6 +109,7 @@ impl Gpu {
             })?;
         let release = Rc::new(driver::Stream::try_with_context(&context, 0)?);
         let device = Device {
+            scatter_validation: OnceCell::new(),
             transfer: Rc::new(driver::Stream::try_with_context(&context, 0)?),
             download: Rc::new(driver::Stream::try_with_context(&context, 0)?),
             release: release.clone(),
