@@ -1,4 +1,5 @@
 use gpurs_artifact::{self as artifact, Access, Extent, Parameter, Value};
+use gpurs_rustc::{CrateDef, Instance, Mutability, RigidTy, Session, TyKind, session};
 
 use super::{
     Certificate,
@@ -7,10 +8,8 @@ use super::{
     symbolic::{self, Clause},
 };
 use crate::{
-    kernel::{KernelParameter, KernelPlan},
+    kernel::{self, KernelParameter, KernelPlan},
     policy::{self, Strictness},
-    stable,
-    stable::{CrateDef, Instance, Mutability, RigidTy, Session, TyKind},
     transfer,
 };
 
@@ -21,7 +20,7 @@ pub fn kernel(
     key: String,
 ) -> Option<(KernelPlan, String, Vec<diagnostic::Warning>)> {
     let effects = support::check(sess, instance);
-    let signature = sess.signature(instance);
+    let signature = kernel::signature(sess, instance);
     let mut parameters = Vec::new();
     for (_, shape) in &signature.arguments {
         let metadata = match shape.ty.kind() {
@@ -31,7 +30,7 @@ pub fn kernel(
                 } else {
                     Access::Read
                 };
-                let referent = match stable::rigid(pointee) {
+                let referent = match session::rigid(pointee) {
                     RigidTy::Slice(element) => element,
                     _ => pointee,
                 };
@@ -45,7 +44,7 @@ pub fn kernel(
                     sess.error(instance.def.def_id().span(), message);
                     return None;
                 }
-                if matches!(stable::rigid(pointee), RigidTy::Slice(_)) {
+                if matches!(session::rigid(pointee), RigidTy::Slice(_)) {
                     Parameter::Slice { access }
                 } else {
                     Parameter::Reference { access }
@@ -72,11 +71,13 @@ pub fn kernel(
         sess.error(instance.def.def_id().span(), message);
         return None;
     }
-    let result = (!matches!(stable::rigid(result.ty), RigidTy::Tuple(fields) if fields.is_empty()))
-        .then(|| Value {
-            size: result.size().bytes() as u64,
-            align: result.align(),
-        });
+    let result =
+        (!matches!(session::rigid(result.ty), RigidTy::Tuple(fields) if fields.is_empty())).then(
+            || Value {
+                size: result.size().bytes() as u64,
+                align: result.align(),
+            },
+        );
 
     let mut analysis = Analysis::new(sess, instance, &parameters);
     analysis.run();

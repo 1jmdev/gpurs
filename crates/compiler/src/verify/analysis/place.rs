@@ -1,11 +1,8 @@
 use gpurs_artifact::{Access, Parameter};
+use gpurs_rustc::{Operand, Place, ProjectionElem, RigidTy, Ty, session};
 
 use super::{Analysis, Origin, Pointer, Region, State, Value, state};
-use crate::{
-    stable,
-    stable::{Operand, Place, ProjectionElem, RigidTy, Ty},
-    verify::symbolic::{Atom, Polynomial},
-};
+use crate::verify::symbolic::{Atom, Polynomial};
 
 /// Where a place lives.
 pub(super) enum Location {
@@ -159,7 +156,7 @@ impl Analysis<'_, '_> {
                     _ => 2,
                 });
                 if matches!(
-                    stable::rigid(self.place_type(place)),
+                    session::rigid(self.place_type(place)),
                     RigidTy::Ref(..) | RigidTy::RawPtr(..)
                 ) {
                     value.pointer = Some(Pointer::Unknown);

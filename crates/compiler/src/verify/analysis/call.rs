@@ -1,11 +1,11 @@
 use gpurs_artifact::{Convergence, Memory, Primitive, Proof};
+use gpurs_rustc::{CrateDef, Instance, Operand, Place, RigidTy, Ty, TyKind};
 
 use super::{
     Access, Analysis, Kind, Obligation, Origin, Pointer, Region, State, Value, arithmetic, state,
 };
 use crate::{
-    attributes, call_graph,
-    stable::{CrateDef, Instance, Operand, Place, RigidTy, Ty, TyKind},
+    attributes, call_graph, policy,
     verify::symbolic::{self, Atom, Polynomial, Predicate, Relation, Requirement},
 };
 
@@ -52,7 +52,7 @@ impl Analysis<'_, '_> {
             })
             .map(|name| Value {
                 integer: Some(Polynomial::constant(
-                    crate::policy::intrinsic_check(self.sess, &name) as i128,
+                    policy::intrinsic_check(self.sess, &name) as i128,
                 )),
                 domain: Some(2),
                 ..Value::default()

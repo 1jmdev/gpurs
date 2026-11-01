@@ -4,18 +4,10 @@
 //! its body per iteration, as nvcc does for small constant loops. Arrays indexed by the loop
 //! variable, such as tensor-core fragments, then have constant indices and stay in registers.
 
-use rustc_data_structures::{
-    fx::{FxHashMap, FxHashSet},
-    graph::dominators::Dominators,
-};
-
-use crate::{
-    graph::Graph,
-    stable::{
-        AggregateKind, Body, ConstOperand, ConstantKind, Instance, Local, Location, MirVisitor,
-        Operand, Place, PlaceContext, RigidTy, Rvalue, StatementKind, TerminatorKind, TyKind,
-        statement_location, terminator_location,
-    },
+use gpurs_rustc::{
+    AggregateKind, Body, ConstOperand, ConstantKind, Dominators, FxHashMap, FxHashSet, Graph,
+    Instance, Local, Location, MirVisitor, Operand, Place, PlaceContext, RigidTy, Rvalue,
+    StatementKind, TerminatorKind, TyKind, statement_location, terminator_location,
 };
 
 /// The most iterations a loop is unrolled for.

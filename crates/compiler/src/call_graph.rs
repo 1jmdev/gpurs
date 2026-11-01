@@ -1,14 +1,11 @@
 use std::rc::Rc;
 
-use rustc_data_structures::fx::FxHashMap;
-
-use crate::{
-    attributes,
-    stable::{
-        Body, CrateDef, DefId, Instance, InstanceKind, QUERIES, RigidTy, Session, TerminatorKind,
-        TyKind,
-    },
+use gpurs_rustc::{
+    Body, CrateDef, DefId, FxHashMap, Instance, InstanceKind, RigidTy, Session, TerminatorKind,
+    TyKind,
 };
+
+use crate::{attributes, queries::QUERIES};
 
 pub struct Function {
     pub body: Option<Rc<Body>>,

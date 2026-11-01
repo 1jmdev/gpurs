@@ -1,16 +1,14 @@
+use gpurs_rustc::{
+    AllocId, Allocation, ConstOperand, ConstantKind, GlobalAlloc, Scalar, TyConstKind, ValueRepr,
+    session,
+};
+
 use super::{
     function::FunctionBuilder,
     ir::{self, Type},
     layout::{self, Shape},
     module::ModuleBuilder,
     place::{Operand, Place, Value},
-};
-use crate::{
-    stable,
-    stable::{
-        AllocId, Allocation, ConstOperand, ConstantKind, GlobalAlloc, Scalar, TyConstKind,
-        ValueRepr,
-    },
 };
 
 impl<'sess> FunctionBuilder<'_, 'sess> {
@@ -58,7 +56,7 @@ impl ModuleBuilder<'_> {
     fn scalar(&mut self, allocation: &Allocation, offset: usize, scalar: Scalar) -> ir::Value {
         let ty = layout::immediate_type(scalar);
         let width = (ty.bits() as usize).div_ceil(8);
-        let value = stable::allocation_bytes(allocation)
+        let value = session::allocation_bytes(allocation)
             .get(offset..offset + width)
             .map(|slice| {
                 let mut buffer = [0u8; 16];
@@ -99,7 +97,7 @@ impl ModuleBuilder<'_> {
     /// A constant global holding `allocation`, with its pointers relocated to their own
     /// globals.
     pub fn allocation(&mut self, allocation: &Allocation) -> ir::Value {
-        let bytes = stable::allocation_bytes(allocation);
+        let bytes = session::allocation_bytes(allocation);
         let mut fields = Vec::new();
         let mut position = 0;
         for &(offset, provenance) in &allocation.provenance.ptrs {

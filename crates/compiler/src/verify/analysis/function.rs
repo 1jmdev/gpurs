@@ -1,12 +1,11 @@
 use std::collections::VecDeque;
 
+use gpurs_rustc::{Instance, TerminatorKind};
+
 use super::{Analysis, Frame, Pointer, State, Value};
-use crate::{
-    stable::{Instance, TerminatorKind},
-    verify::{
-        engine::{Bound, Direction},
-        symbolic::{Fact, Polynomial, Predicate, Relation, Requirement},
-    },
+use crate::verify::{
+    engine::{Bound, Direction},
+    symbolic::{Fact, Polynomial, Predicate, Relation, Requirement},
 };
 
 const ROUNDS: usize = 8;
@@ -65,9 +64,9 @@ impl Analysis<'_, '_> {
                     }
                 }
             }
-            let stable = !self.changed;
+            let rustc = !self.changed;
             self.changed |= changed;
-            if stable || self.failure.is_some() {
+            if rustc || self.failure.is_some() {
                 break;
             }
             if round + 1 == ROUNDS {

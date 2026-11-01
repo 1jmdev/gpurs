@@ -1,11 +1,10 @@
 use gpurs_artifact::{Compatibility, Lowering};
-use rustc_data_structures::fx::FxHashSet;
-
-use crate::{
-    attributes, call_graph,
-    graph::Graph,
-    stable::{CrateDef, Instance, InstanceKind, RigidTy, Session, Span, TerminatorKind, TyKind},
+use gpurs_rustc::{
+    CrateDef, FxHashSet, Graph, Instance, InstanceKind, RigidTy, Session, Span, TerminatorKind,
+    TyKind,
 };
+
+use crate::{attributes, call_graph};
 
 #[derive(Default)]
 pub struct Effects {

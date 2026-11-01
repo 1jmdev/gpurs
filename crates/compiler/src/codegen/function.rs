@@ -1,7 +1,11 @@
 use std::{collections::BTreeSet, rc::Rc};
 
 use gpurs_artifact::Failure;
-use rustc_data_structures::fx::{FxHashMap, FxHashSet};
+use gpurs_rustc::{
+    AssertMessage, BinOp, Body, CrateDef, FxHashMap, FxHashSet, Graph, Instance, Mutability,
+    NonDivergingIntrinsic, Operand as MirOperand, Place as MirPlace, ProjectionElem, RETURN_LOCAL,
+    RigidTy, Rvalue, Session, Span, StatementKind, TerminatorKind, Ty, ValueRepr, session,
+};
 
 use super::{
     ir::{self, Type},
@@ -11,17 +15,7 @@ use super::{
     shared_memory::CallPath,
     unroll::{self, Loop},
 };
-use crate::{
-    attributes,
-    graph::Graph,
-    stable,
-    stable::{
-        AssertMessage, BinOp, Body, CrateDef, Instance, Mutability, NonDivergingIntrinsic,
-        Operand as MirOperand, Place as MirPlace, ProjectionElem, RETURN_LOCAL, RigidTy, Rvalue,
-        Session, Span, StatementKind, TerminatorKind, Ty, ValueRepr,
-    },
-    verify::Certificate,
-};
+use crate::{attributes, policy, verify::Certificate};
 
 /// Lowers the MIR body of one monomorphic instance to an NVVM IR function.
 pub struct FunctionBuilder<'m, 'sess> {
@@ -106,7 +100,7 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
 
     /// The element layout of an array, slice, reference, or single-field aggregate.
     pub fn element_shape(&self, place: &Place) -> Shape {
-        match stable::rigid(place.shape.ty) {
+        match session::rigid(place.shape.ty) {
             RigidTy::Array(element, _)
             | RigidTy::Slice(element)
             | RigidTy::Ref(_, element, _)
@@ -433,7 +427,7 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
                 target,
                 ..
             } => {
-                if crate::policy::unchecked_overflow(msg) || self.discharged() {
+                if policy::unchecked_overflow(msg) || self.discharged() {
                     return self.branch(*target);
                 }
                 let record = self
@@ -558,7 +552,7 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
                 let next = match &block.terminator.kind {
                     TerminatorKind::Goto { target } => *target,
                     TerminatorKind::Assert { msg, target, .. }
-                        if crate::policy::unchecked_overflow(msg) =>
+                        if policy::unchecked_overflow(msg) =>
                     {
                         *target
                     }
@@ -653,7 +647,7 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
             }
             MirOperand::Constant(constant) => self.constant(constant),
             MirOperand::RuntimeChecks(checks) => {
-                let value = crate::policy::runtime_check(self.sess, checks);
+                let value = policy::runtime_check(self.sess, checks);
                 Operand::immediate(ir::Value::bool(value), self.shape_of(Ty::bool_ty()))
             }
         }

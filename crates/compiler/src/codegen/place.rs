@@ -1,14 +1,12 @@
+use gpurs_rustc::{
+    AdtKind, FieldsShape, FloatTy, MachineSize, ProjectionElem, RigidTy, Scalar, Ty, TyKind,
+    ValueRepr, VariantIdx, session,
+};
+
 use super::{
     function::FunctionBuilder,
     ir::{self, Access, Binary, Conversion, Flags, Transfer, Type},
     layout::{self, Shape},
-};
-use crate::{
-    stable,
-    stable::{
-        AdtKind, FieldsShape, FloatTy, MachineSize, ProjectionElem, RigidTy, Scalar, Ty, TyKind,
-        ValueRepr, VariantIdx,
-    },
 };
 
 /// A value in registers or, for aggregates, behind a pointer to read-only memory.
@@ -84,7 +82,7 @@ impl Place {
 }
 
 impl<'sess> FunctionBuilder<'_, 'sess> {
-    pub fn place(&mut self, place: &crate::stable::Place) -> Place {
+    pub fn place(&mut self, place: &gpurs_rustc::Place) -> Place {
         let mut current = self.locals[place.local].clone();
         for element in &place.projection {
             current = self.project(current, element.clone());
@@ -150,7 +148,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                         shape: place.shape,
                     }
                 } else {
-                    let RigidTy::Array(element_ty, _) = stable::rigid(place.shape.ty) else {
+                    let RigidTy::Array(element_ty, _) = session::rigid(place.shape.ty) else {
                         unreachable!("array subslice of `{:?}`", place.shape.ty.kind())
                     };
                     let ty = Ty::try_new_array(element_ty, to - from)
@@ -282,7 +280,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
             }
             (Value::Memory(source, align), _) => {
                 let mut shape = operand.shape.clone();
-                while let RigidTy::Adt(definition, _) = stable::rigid(shape.ty)
+                while let RigidTy::Adt(definition, _) = session::rigid(shape.ty)
                     && definition.kind() == AdtKind::Struct
                     && shape.count() == 1
                     && shape.offset(0).bytes() == 0
@@ -290,8 +288,8 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                 {
                     shape = shape.field(self.sess, 0);
                 }
-                let typed = matches!(stable::rigid(shape.ty), RigidTy::Array(element, _)
-                    if matches!(stable::rigid(element), RigidTy::Float(FloatTy::F32 | FloatTy::F64) | RigidTy::Int(_) | RigidTy::Uint(_)));
+                let typed = matches!(session::rigid(shape.ty), RigidTy::Array(element, _)
+                    if matches!(session::rigid(element), RigidTy::Float(FloatTy::F32 | FloatTy::F64) | RigidTy::Int(_) | RigidTy::Uint(_)));
                 self.copy(
                     place.pointer.clone(),
                     source.clone(),
@@ -313,7 +311,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
     /// leaf by leaf with its own types, so that LLVM splits it into registers.
     fn leaves(&self, shape: &Shape) -> Option<Vec<(u64, Scalar)>> {
         fn plain(builder: &FunctionBuilder<'_, '_>, shape: &Shape) -> bool {
-            match stable::rigid(shape.ty) {
+            match session::rigid(shape.ty) {
                 RigidTy::Adt(definition, _) if definition.kind() == AdtKind::Struct => (0..shape
                     .count())
                     .all(|field| plain(builder, &shape.field(builder.sess, field))),

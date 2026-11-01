@@ -1,8 +1,7 @@
+use gpurs_rustc::{BinOp, CastKind, IntTy, Operand, RigidTy, Ty, TyKind, UintTy};
+
 use super::{Analysis, Origin, Pointer, State, Value};
-use crate::{
-    stable::{BinOp, CastKind, IntTy, Operand, RigidTy, Ty, TyKind, UintTy},
-    verify::symbolic::{Atom, Fact, Polynomial, Predicate, Relation, Requirement},
-};
+use crate::verify::symbolic::{Atom, Fact, Polynomial, Predicate, Relation, Requirement};
 
 /// `(signed, bits)` of an integer type.
 pub fn integer_kind(ty: Ty) -> Option<(bool, u32)> {

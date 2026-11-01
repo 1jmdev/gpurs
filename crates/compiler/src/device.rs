@@ -1,16 +1,12 @@
 use std::{env, fs, path::PathBuf};
 
 use gpurs_artifact::Artifact;
-use rustc_driver::{Callbacks, Compilation};
-use rustc_interface::{interface::Compiler, util};
-
-use crate::{
-    cache::Cache,
-    discovery::HostView,
-    stable::{
-        self, CrateDef, GenericArgKind, GenericArgs, Instance, RigidTy, Session, Ty, TyCtxt, TyKind,
-    },
+use gpurs_rustc::{
+    CrateDef, CrateItem, GenericArgKind, GenericArgs, Instance, RigidTy, Session, Ty, TyKind,
+    driver,
 };
+
+use crate::{cache::Cache, discovery::HostView, queries::QUERIES};
 
 pub struct DeviceView;
 
@@ -39,7 +35,8 @@ impl DeviceView {
         host.analyze(sess);
         let directory = PathBuf::from(env::var_os("GPURS_ARTIFACTS").unwrap());
         let output = PathBuf::from(env::var_os("GPURS_TARGET_ARTIFACT").unwrap());
-        let definitions: Vec<_> = rustc_public::all_local_items()
+        let definitions: Vec<_> = sess
+            .local_items()
             .into_iter()
             .filter_map(|item| {
                 sess.tool_attr(item.def_id(), "device")
@@ -62,7 +59,7 @@ impl DeviceView {
                 .map(|(definition, _)| *definition)
                 .or_else(|| {
                     sess.external_device(&launch.module, &launch.tail)
-                        .map(rustc_public::CrateItem)
+                        .map(CrateItem)
                 })
             else {
                 sess.err(format!(
@@ -117,11 +114,7 @@ impl DeviceView {
         }
         sess.abort_if_errors();
         let artifact = Artifact {
-            compiler: format!(
-                "gpurs-{} {}",
-                env!("CARGO_PKG_VERSION"),
-                util::rustc_version_str().unwrap_or("unknown rustc")
-            ),
+            compiler: format!("gpurs-{} {}", env!("CARGO_PKG_VERSION"), driver::version()),
             architecture: architecture.to_owned(),
             alternatives: Vec::new(),
             types: host.types,
@@ -133,18 +126,13 @@ impl DeviceView {
     }
 }
 
-impl Callbacks for DeviceView {
-    fn config(&mut self, config: &mut rustc_interface::interface::Config) {
-        config.file_loader = Some(Box::new(crate::source::Source));
+pub fn analyze(session: Session<'_>) {
+    if let Err(message) = DeviceView.compile(session) {
+        session.err(message);
     }
-    fn after_analysis(&mut self, _: &Compiler, tcx: TyCtxt<'_>) -> Compilation {
-        stable::run(tcx, || {
-            let session = Session::new(tcx);
-            if let Err(message) = self.compile(session) {
-                session.err(message);
-            }
-            session.abort_if_errors();
-        });
-        Compilation::Stop
-    }
+    QUERIES.with(|queries| {
+        queries.functions.take();
+        queries.primitives.take();
+        queries.signatures.take();
+    });
 }

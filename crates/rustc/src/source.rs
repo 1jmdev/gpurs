@@ -4,10 +4,12 @@ use std::{
     sync::Arc,
 };
 
-use rustc_lexer::{DocStyle, FrontmatterAllowed, TokenKind};
+use rustc_lexer::{self, DocStyle, FrontmatterAllowed, TokenKind};
 use rustc_span::source_map::FileLoader;
 
-pub struct Source;
+pub(crate) struct Source {
+    pub transform: fn(&str, &str) -> String,
+}
 
 impl FileLoader for Source {
     fn file_exists(&self, path: &Path) -> bool {
@@ -23,9 +25,7 @@ impl FileLoader for Source {
             return Ok(source);
         }
         let (attributes, items) = source.split_at(inner_attributes(&source));
-        Ok(format!(
-            "{attributes}\n::gpurs::__private::compilation! {{ {items}\n }}"
-        ))
+        Ok((self.transform)(attributes, items))
     }
 
     fn read_binary_file(&self, path: &Path) -> io::Result<Arc<[u8]>> {

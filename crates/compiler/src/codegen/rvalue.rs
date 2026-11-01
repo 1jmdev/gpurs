@@ -1,15 +1,13 @@
+use gpurs_rustc::{
+    AggregateKind, BinOp, CastKind, PointerCoercion, RigidTy, Rvalue, Scalar, TagEncoding, Ty,
+    TyKind, UnOp, ValueRepr, VariantIdx, VariantsShape, session,
+};
+
 use super::{
     function::FunctionBuilder,
     ir::{self, Binary, Conversion, Flags, Predicate, Type},
     layout::{self, Shape},
     place::{Operand, Place, Value},
-};
-use crate::{
-    stable,
-    stable::{
-        AggregateKind, BinOp, CastKind, PointerCoercion, RigidTy, Rvalue, Scalar, TagEncoding, Ty,
-        TyKind, UnOp, ValueRepr, VariantIdx, VariantsShape,
-    },
 };
 
 impl<'sess> FunctionBuilder<'_, 'sess> {
@@ -588,7 +586,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
 
 /// The discriminant value rustc assigns to `variant`, if the `Adt` encoding says otherwise.
 pub fn discriminant_value(shape: &Shape, variant: VariantIdx) -> Option<u128> {
-    let RigidTy::Adt(definition, _) = stable::rigid(shape.ty) else {
+    let RigidTy::Adt(definition, _) = session::rigid(shape.ty) else {
         return None;
     };
     Some(definition.discriminant_for_variant(variant).val)

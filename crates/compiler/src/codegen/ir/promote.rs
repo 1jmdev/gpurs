@@ -7,14 +7,13 @@
 
 use std::collections::hash_map::Entry;
 
-use rustc_data_structures::fx::{FxHashMap, FxHashSet};
+use gpurs_rustc::{FxHashMap, FxHashSet, Graph};
 
 use super::{
     Access, Block, Conversion, Function, Type, Value,
     instruction::{Callee, Instruction, Terminator},
     value::Kind,
 };
-use crate::graph::Graph;
 
 impl Function {
     pub(super) fn promote(&mut self) {

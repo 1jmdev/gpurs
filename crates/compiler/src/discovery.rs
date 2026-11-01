@@ -1,20 +1,15 @@
 //! Host view: discovers kernel launches and transfer types from monomorphized host code.
 
+use std::ops::ControlFlow;
+
 use gpurs_artifact::TransferType;
-use rustc_data_structures::fx::FxHashSet;
-use rustc_public::{
-    mir::visit::MirVisitor,
-    ty::ClosureKind,
-    visitor::{Visitable, Visitor},
+use gpurs_rustc::{
+    Body, ClosureKind, ConstOperand, CrateDef, FxHashSet, Instance, InstanceKind, Location,
+    MirVisitor, Operand, ProjectionElem, RigidTy, Rvalue, Session, StatementKind, TerminatorKind,
+    Ty, TyKind, Visitable, Visitor,
 };
 
-use crate::{
-    stable::{
-        Body, ConstOperand, CrateDef, Instance, InstanceKind, Operand, ProjectionElem, RigidTy,
-        Rvalue, Session, StatementKind, TerminatorKind, Ty, TyKind,
-    },
-    transfer,
-};
+use crate::transfer;
 
 /// One launcher instantiation found in host code.
 pub struct Launch {
@@ -38,13 +33,13 @@ pub struct HostView {
 impl Visitor for HostView {
     type Break = ();
 
-    fn visit_ty(&mut self, ty: &Ty) -> std::ops::ControlFlow<()> {
+    fn visit_ty(&mut self, ty: &Ty) -> ControlFlow<()> {
         if !self.visited_types.insert(*ty) {
-            return std::ops::ControlFlow::Continue(());
+            return ControlFlow::Continue(());
         }
         let instance = match ty.kind() {
             TyKind::RigidTy(RigidTy::FnPtr(..) | RigidTy::Dynamic(..)) => {
-                return std::ops::ControlFlow::Continue(());
+                return ControlFlow::Continue(());
             }
             TyKind::RigidTy(RigidTy::FnDef(definition, arguments)) => {
                 Instance::resolve(definition, &arguments).ok()
@@ -64,7 +59,7 @@ impl Visitor for HostView {
 }
 
 impl MirVisitor for HostView {
-    fn visit_ty(&mut self, ty: &Ty, _: rustc_public::mir::visit::Location) {
+    fn visit_ty(&mut self, ty: &Ty, _: Location) {
         let _ = Visitor::visit_ty(self, ty);
     }
 }

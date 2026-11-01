@@ -1,5 +1,5 @@
-use crate::stable::{
-    FieldsShape, LayoutShape, MachineSize, Scalar, Session, Ty, ValueRepr, VariantIdx,
+use crate::{
+    FieldsShape, FloatLength, LayoutShape, MachineSize, Scalar, Session, Ty, ValueRepr, VariantIdx,
     VariantsShape,
 };
 
@@ -137,5 +137,17 @@ pub fn pass_mode(shape: &Shape) -> PassMode {
         ValueRepr::Scalar(scalar) => PassMode::Direct(*scalar),
         ValueRepr::ScalarPair { a, b, .. } => PassMode::Pair(*a, *b),
         _ => PassMode::Indirect,
+    }
+}
+
+pub fn is_bfloat(length: FloatLength) -> bool {
+    #[cfg(gpurs_api_float_extended)]
+    {
+        matches!(length, FloatLength::F16B)
+    }
+    #[cfg(not(gpurs_api_float_extended))]
+    {
+        let _ = length;
+        false
     }
 }

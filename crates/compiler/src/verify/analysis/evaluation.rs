@@ -1,12 +1,15 @@
+use gpurs_rustc::{
+    AdtKind, AggregateKind, Allocation, ConstantKind, NonDivergingIntrinsic, Operand, RigidTy,
+    Rvalue, Shape, StatementKind, Ty, TyConstKind, TyKind, UnOp, VariantIdx, session,
+};
+
 use super::{Analysis, Origin, Pointer, Region, State, Value, arithmetic, place::Location, state};
 use crate::{
-    layout::Shape,
-    policy, stable,
-    stable::{
-        AdtKind, AggregateKind, Allocation, ConstantKind, NonDivergingIntrinsic, Operand, RigidTy,
-        Rvalue, StatementKind, Ty, TyConstKind, TyKind, UnOp, VariantIdx,
+    policy,
+    verify::{
+        engine,
+        symbolic::{Atom, Polynomial},
     },
-    verify::symbolic::{Atom, Polynomial},
 };
 
 impl Analysis<'_, '_> {
@@ -61,7 +64,7 @@ impl Analysis<'_, '_> {
                 path,
                 Polynomial::default(),
                 Some(Polynomial::constant(maximum)),
-                crate::verify::engine::opaque(),
+                engine::opaque(),
                 description,
             ));
         }
@@ -151,7 +154,7 @@ impl Analysis<'_, '_> {
             Rvalue::Repeat(operand, _) => Value::varying(self.operand(operand, state).variance),
             Rvalue::Discriminant(place) => {
                 let value = self.read(place, state);
-                let domain = match stable::rigid(self.place_type(place)) {
+                let domain = match session::rigid(self.place_type(place)) {
                     RigidTy::Adt(definition, _) => Some(definition.num_variants()),
                     _ => None,
                 };
@@ -223,7 +226,7 @@ impl Analysis<'_, '_> {
             return Value::default();
         }
         let shape = Shape::of(self.sess, ty);
-        let bytes = stable::allocation_bytes(allocation);
+        let bytes = session::allocation_bytes(allocation);
         let fields = self
             .sess
             .field_types(ty)
@@ -264,7 +267,7 @@ impl Analysis<'_, '_> {
 
 /// The discriminant value of `variant` of the enum `ty`.
 pub fn discriminant(ty: Ty, variant: VariantIdx) -> Option<i128> {
-    match stable::rigid(ty) {
+    match session::rigid(ty) {
         RigidTy::Adt(definition, _) if definition.kind() == AdtKind::Enum => {
             Some(definition.discriminant_for_variant(variant).val as i128)
         }

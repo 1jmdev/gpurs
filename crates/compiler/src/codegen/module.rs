@@ -1,7 +1,7 @@
 use std::rc::Rc;
 
 use gpurs_artifact::SharedMemory;
-use rustc_data_structures::fx::FxHashMap;
+use gpurs_rustc::{AllocId, FxHashMap, Instance, PassMode, Session};
 
 use super::{
     function::FunctionBuilder,
@@ -10,9 +10,7 @@ use super::{
     shared_memory::{CallPath, SharedAllocations},
 };
 use crate::{
-    kernel::Signature,
-    layout::PassMode,
-    stable::{AllocId, Instance, Session},
+    kernel::{self, Signature},
     verify::Certificate,
 };
 
@@ -84,7 +82,7 @@ impl<'sess> ModuleBuilder<'sess> {
     }
 
     pub fn signature(&self, instance: Instance) -> Rc<Signature> {
-        self.sess.signature(instance)
+        kernel::signature(self.sess, instance)
     }
 
     /// Lowers every queued function and renders the module, with the dynamic block-shared

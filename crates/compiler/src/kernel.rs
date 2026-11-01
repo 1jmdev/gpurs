@@ -1,10 +1,9 @@
-use gpurs_artifact::{Clause, Extent, Parameter, Value};
+use std::rc::Rc;
 
-use crate::{
-    layout::{self, PassMode, Shape},
-    stable::{Instance, Session},
-    verify::Certificate,
-};
+use gpurs_artifact::{Clause, Extent, Parameter, Value};
+use gpurs_rustc::{Instance, PassMode, Session, Shape, layout};
+
+use crate::{queries::QUERIES, verify::Certificate};
 
 #[derive(Clone)]
 pub struct KernelParameter {
@@ -55,4 +54,15 @@ impl Signature {
             result: shape(body.ret_local().ty),
         }
     }
+}
+
+pub fn signature(sess: Session<'_>, instance: Instance) -> Rc<Signature> {
+    QUERIES.with(|queries| {
+        queries
+            .signatures
+            .borrow_mut()
+            .entry(instance)
+            .or_insert_with(|| Rc::new(Signature::of(sess, instance)))
+            .clone()
+    })
 }

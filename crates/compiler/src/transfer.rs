@@ -3,8 +3,7 @@
 use std::rc::Rc;
 
 use gpurs_artifact::TransferType;
-
-use crate::stable::{AdtKind, CrateDef, RigidTy, Session, Ty, TyKind};
+use gpurs_rustc::{AdtKind, CrateDef, RigidTy, Session, Ty, TyKind};
 
 pub fn opaque_descriptor(sess: Session<'_>, ty: Ty) -> bool {
     matches!(

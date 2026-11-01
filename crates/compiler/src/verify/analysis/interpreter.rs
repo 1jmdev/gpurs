@@ -1,18 +1,18 @@
 use std::collections::BTreeMap;
 
 use gpurs_artifact::Parameter;
-use rustc_data_structures::fx::{FxHashMap, FxHashSet};
+use gpurs_rustc::{
+    FxHashMap, FxHashSet, Instance, RigidTy, Session, Span, TerminatorKind, session,
+};
 
 use super::{
     Access, Context, Frame, Obligation, Origin, Pointer, Region, State, Value, arithmetic, control,
 };
 use crate::{
     kernel::KernelParameter,
-    stable,
-    stable::{Instance, RigidTy, Session, Span, TerminatorKind},
     verify::{
         engine::{Engine, Variable},
-        render::Names,
+        render::{self, Names},
         symbolic::{Atom, Clause, Fact, Polynomial, Predicate, Requirement},
     },
 };
@@ -64,7 +64,7 @@ impl<'a, 'sess> Analysis<'a, 'sess> {
             parameters,
             scalars: parameters
                 .iter()
-                .map(|parameter| match stable::rigid(parameter.layout.ty) {
+                .map(|parameter| match session::rigid(parameter.layout.ty) {
                     RigidTy::Uint(kind) => arithmetic::bits(kind),
                     _ => 64,
                 })
@@ -122,18 +122,18 @@ impl<'a, 'sess> Analysis<'a, 'sess> {
                     ..Value::default()
                 },
                 Parameter::Value(_)
-                    if matches!(stable::rigid(parameter.layout.ty), RigidTy::Uint(_)) =>
+                    if matches!(session::rigid(parameter.layout.ty), RigidTy::Uint(_)) =>
                 {
                     Value::integer(Polynomial::atom(Atom::Scalar(index)), 0)
                 }
                 Parameter::Value(_)
-                    if matches!(stable::rigid(parameter.layout.ty), RigidTy::Array(..)) =>
+                    if matches!(session::rigid(parameter.layout.ty), RigidTy::Array(..)) =>
                 {
                     Value {
                         fields: (0..parameter.layout.count())
                             .map(|field| {
                                 let shape = parameter.layout.field(self.sess, field);
-                                if matches!(stable::rigid(shape.ty), RigidTy::Uint(_))
+                                if matches!(session::rigid(shape.ty), RigidTy::Uint(_))
                                     && shape.size().bytes() <= 8
                                 {
                                     Value::integer(
@@ -171,7 +171,7 @@ impl<'a, 'sess> Analysis<'a, 'sess> {
         result
     }
 
-    /// The context of `instance` called from `parent`, stable across passes.
+    /// The context of `instance` called from `parent`, rustc across passes.
     pub fn context(&mut self, parent: Option<(usize, usize)>, instance: Instance) -> usize {
         if let Some((context, block)) = parent
             && let Some(child) = self.contexts[context].calls.get(&block)
@@ -296,6 +296,6 @@ impl<'a, 'sess> Analysis<'a, 'sess> {
     }
 
     pub fn describe(&self, polynomial: &Polynomial) -> String {
-        crate::verify::render::polynomial(polynomial, &self.names)
+        render::polynomial(polynomial, &self.names)
     }
 }

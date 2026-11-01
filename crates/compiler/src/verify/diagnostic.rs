@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 
+use gpurs_rustc::{CrateDef, Instance, Session};
 use serde::{Deserialize, Serialize};
 
 use super::{
@@ -7,10 +8,7 @@ use super::{
     render,
     symbolic::Clause,
 };
-use crate::{
-    policy::{self, Strictness},
-    stable::{CrateDef, Instance, Session},
-};
+use crate::policy::{self, Strictness};
 
 #[derive(Serialize, Deserialize)]
 pub struct Warning {

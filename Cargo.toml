@@ -15,6 +15,7 @@ gpurs-artifact = { path = "crates/artifact" }
 gpurs-build = { path = "crates/build" }
 gpurs-driver = { path = "crates/driver" }
 gpurs-macros = { path = "crates/macros" }
+gpurs-rustc = { path = "crates/rustc" }
 libloading = "0.9.0"
 object = { version = "0.40.0", default-features = false, features = ["write", "elf"] }
 postcard = { version = "1.1.3", default-features = false, features = ["alloc"] }

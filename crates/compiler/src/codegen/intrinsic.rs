@@ -1,6 +1,10 @@
 use gpurs_artifact::{
     Compatibility, Convergence, Failure, Lowering, Memory, Operand as CallOperand, Primitive,
 };
+use gpurs_rustc::{
+    BinOp, CrateDef, GenericArgKind, Instance, RigidTy, Scalar, Ty, TyConst, TyConstKind, TyKind,
+    ValueRepr, session,
+};
 
 use super::{
     function::FunctionBuilder,
@@ -10,13 +14,7 @@ use super::{
     layout::{self, Shape},
     place::{Operand, Place, Value},
 };
-use crate::{
-    attributes, call_graph, stable,
-    stable::{
-        BinOp, CrateDef, GenericArgKind, Instance, RigidTy, Scalar, Ty, TyConst, TyConstKind,
-        TyKind, ValueRepr,
-    },
-};
+use crate::{attributes, call_graph, policy};
 
 impl<'sess> FunctionBuilder<'_, 'sess> {
     pub fn intrinsic(
@@ -59,9 +57,9 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                 }
                 return true;
             }
-            "ub_checks" | "contract_checks" | "overflow_checks" => Value::Scalar(ir::Value::bool(
-                crate::policy::intrinsic_check(self.sess, name),
-            )),
+            "ub_checks" | "contract_checks" | "overflow_checks" => {
+                Value::Scalar(ir::Value::bool(policy::intrinsic_check(self.sess, name)))
+            }
             "black_box" | "likely" | "unlikely" => arguments[0].value.clone(),
             "read_via_copy" => {
                 let source = Place::new(arguments[0].scalar(), destination.shape.clone());
@@ -526,7 +524,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
             }
             _ => (0..shape.count())
                 .flat_map(|field| {
-                    let inner = match stable::rigid(shape.ty) {
+                    let inner = match session::rigid(shape.ty) {
                         RigidTy::Array(element, _) => self.shape_of(element),
                         _ => shape.field(self.sess, field),
                     };

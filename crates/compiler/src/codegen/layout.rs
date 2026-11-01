@@ -1,6 +1,7 @@
+use gpurs_rustc::{FloatLength, IntegerLength, Primitive, Scalar, layout};
+pub use gpurs_rustc::{PassMode, Shape};
+
 use super::ir::Type;
-pub use crate::layout::{PassMode, Shape};
-use crate::stable::{FloatLength, IntegerLength, Primitive, Scalar};
 
 pub fn primitive(scalar: Scalar) -> Primitive {
     match scalar {
@@ -33,10 +34,7 @@ pub fn memory_type(primitive: Primitive) -> Type {
         Primitive::Float {
             length: FloatLength::F16,
         } => Type::Half,
-        #[cfg(gpurs_api_float_extended)]
-        Primitive::Float {
-            length: FloatLength::F16B,
-        } => Type::Integer(16),
+        Primitive::Float { length } if layout::is_bfloat(length) => Type::Integer(16),
         Primitive::Float {
             length: FloatLength::F32,
         } => Type::Float,

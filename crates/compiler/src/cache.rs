@@ -5,14 +5,13 @@ use std::{
 };
 
 use gpurs_artifact::{Kernel, Module};
-use rustc_data_structures::fx::{FxHashMap, FxHashSet};
+use gpurs_rustc::{FxHashMap, FxHashSet, Instance, Session};
 use serde::{Deserialize, Serialize};
 
 use crate::{
     call_graph,
     codegen::ModuleBuilder,
     nvvm,
-    stable::{Instance, Session},
     verify::{self, Warning},
 };
 

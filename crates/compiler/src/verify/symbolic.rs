@@ -7,8 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use gpurs_artifact as artifact;
-
-use crate::stable::BinOp;
+use gpurs_rustc::BinOp;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Atom {

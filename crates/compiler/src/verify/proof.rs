@@ -2,11 +2,12 @@
 
 use std::collections::BTreeSet;
 
+use gpurs_rustc::BinOp;
+
 use super::{
     engine::Variable,
     symbolic::{Atom, Clause, Fact, Polynomial, Predicate, Relation},
 };
-use crate::stable::BinOp;
 
 /// A path fact as an ordered comparison between a per-thread side and a launch side.
 #[derive(Clone, Debug, PartialEq, Eq)]

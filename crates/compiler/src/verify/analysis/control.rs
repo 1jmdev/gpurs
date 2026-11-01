@@ -1,10 +1,8 @@
-use rustc_data_structures::fx::FxHashSet;
+use gpurs_rustc::{AssertMessage, BinOp, Body, FxHashSet, Graph, TerminatorKind};
 
 use super::{Analysis, Kind, Obligation, Region, State, Value, arithmetic};
 use crate::{
-    graph::Graph,
     policy,
-    stable::{AssertMessage, BinOp, Body, TerminatorKind},
     verify::symbolic::{Atom, Fact, Polynomial, Predicate, Relation, Requirement},
 };
 

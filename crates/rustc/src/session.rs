@@ -7,6 +7,7 @@
 use std::{cell::RefCell, env, ops::ControlFlow, rc::Rc};
 
 use gpurs_artifact::Target;
+use rustc_abi::{self, FieldIdx};
 #[cfg(gpurs_api_value_repr)]
 use rustc_ast::attr::AttributeExt;
 use rustc_const_eval::util;
@@ -15,57 +16,33 @@ use rustc_data_structures::{
     fx::{FxHashMap, FxHashSet},
     stable_hash::{StableHash, StableHasher},
 };
-pub use rustc_middle::ty::TyCtxt;
+use rustc_hir::def_id;
 use rustc_middle::{
-    mir::interpret::GlobalAlloc as InternalGlobalAlloc,
+    mir::interpret,
     mono::{CollectionMode, MonoItem},
-    ty::{self as rustc_ty, TypingEnv},
-};
-#[cfg(not(gpurs_api_value_repr))]
-pub use rustc_public::abi::ValueAbi as ValueRepr;
-#[cfg(gpurs_api_value_repr)]
-pub use rustc_public::abi::ValueRepr;
-pub use rustc_public::{
-    CrateDef, DefId,
-    abi::{
-        FieldsShape, FloatLength, IntegerLength, LayoutShape, Primitive, Scalar, TagEncoding,
-        VariantsShape,
-    },
-    mir::{
-        AggregateKind, AssertMessage, BinOp, Body, CastKind, ConstOperand, Local, Mutability,
-        NonDivergingIntrinsic, Operand, Place, PointerCoercion, ProjectionElem, RETURN_LOCAL,
-        RuntimeChecks, Rvalue, StatementKind, TerminatorKind, UnOp,
-        alloc::{AllocId, GlobalAlloc},
-        mono::{Instance, InstanceKind},
-        visit::{Location, MirVisitor, PlaceContext, statement_location, terminator_location},
-    },
-    target::MachineSize,
-    ty::{
-        AdtKind, Allocation, ConstantKind, FloatTy, GenericArgKind, GenericArgs, IntTy, RigidTy,
-        Span, Ty, TyConst, TyConstKind, TyKind, UintTy, VariantIdx,
-    },
+    ty::{self, TyCtxt, TypingEnv, layout::ValidityRequirement},
 };
 use rustc_public::{
-    rustc_internal,
+    self, rustc_internal,
     ty::MirConst,
     visitor::{Visitable, Visitor},
 };
-use rustc_span::Symbol;
+use rustc_span::{self, Symbol};
 
-use crate::{call_graph::Function, kernel::Signature};
+use crate::{
+    Allocation, Body, ConstOperand, ConstantKind, CrateDef, CrateItem, DefId, GlobalAlloc,
+    Instance, Location, MirVisitor, RigidTy, Span, Ty, TyKind, VariantIdx,
+};
 
 /// Per-session caches of derived queries, keyed by stable-interface identities.
 #[derive(Default)]
-pub struct Queries {
-    pub functions: RefCell<FxHashMap<Instance, Rc<Function>>>,
-    pub primitives: RefCell<FxHashMap<DefId, Option<Rc<gpurs_artifact::Primitive>>>>,
+struct Queries {
     bodies: RefCell<FxHashMap<Instance, Rc<Body>>>,
-    signatures: RefCell<FxHashMap<Instance, Rc<Signature>>>,
     paths: RefCell<FxHashMap<DefId, Rc<str>>>,
 }
 
 thread_local! {
-    pub static QUERIES: Queries = Queries::default();
+    static QUERIES: Queries = Queries::default();
 }
 
 #[derive(Default)]
@@ -121,7 +98,7 @@ pub struct Session<'tcx> {
 }
 
 impl<'tcx> Session<'tcx> {
-    pub fn new(tcx: TyCtxt<'tcx>) -> Self {
+    pub(crate) fn new(tcx: TyCtxt<'tcx>) -> Self {
         Session {
             tcx,
             target: env::var("GPURS_ARCHITECTURE")
@@ -145,21 +122,14 @@ impl<'tcx> Session<'tcx> {
         })
     }
 
-    pub fn signature(&self, instance: Instance) -> Rc<Signature> {
-        QUERIES.with(|queries| {
-            queries
-                .signatures
-                .borrow_mut()
-                .entry(instance)
-                .or_insert_with(|| Rc::new(Signature::of(*self, instance)))
-                .clone()
-        })
+    pub fn local_items(&self) -> Vec<CrateItem> {
+        rustc_public::all_local_items()
     }
 
     pub fn entry(&self) -> Option<Instance> {
-        self.tcx.entry_fn(()).map(|(definition, _)| {
-            rustc_internal::stable(rustc_ty::Instance::mono(self.tcx, definition))
-        })
+        self.tcx
+            .entry_fn(())
+            .map(|(definition, _)| rustc_internal::stable(ty::Instance::mono(self.tcx, definition)))
     }
 
     pub fn fingerprint(&self, instance: Instance, body: Option<&Body>) -> String {
@@ -189,7 +159,7 @@ impl<'tcx> Session<'tcx> {
                 while let Some(ty) = inputs.types.pop() {
                     let internal = self.internal_ty(ty);
                     internal.stable_hash(context, &mut hasher);
-                    if let rustc_ty::Adt(definition, _) = internal.kind() {
+                    if let ty::TyKind::Adt(definition, _) = internal.kind() {
                         definition.stable_hash(context, &mut hasher);
                         if definition.is_enum() {
                             for (_, discriminant) in definition.discriminants(self.tcx) {
@@ -242,15 +212,15 @@ impl<'tcx> Session<'tcx> {
                 continue;
             }
             let memory = match self.tcx.global_alloc(allocation) {
-                InternalGlobalAlloc::Function { instance } => {
+                interpret::GlobalAlloc::Function { instance } => {
                     functions.push(rustc_internal::stable(instance));
                     None
                 }
-                InternalGlobalAlloc::Static(definition) => {
+                interpret::GlobalAlloc::Static(definition) => {
                     self.tcx.eval_static_initializer(definition).ok()
                 }
-                InternalGlobalAlloc::Memory(memory) => Some(memory),
-                InternalGlobalAlloc::VTable(ty, predicates) => {
+                interpret::GlobalAlloc::Memory(memory) => Some(memory),
+                interpret::GlobalAlloc::VTable(ty, predicates) => {
                     allocations.push(self.tcx.vtable_allocation((
                         ty,
                         predicates.principal().map(|principal| {
@@ -259,7 +229,7 @@ impl<'tcx> Session<'tcx> {
                     )));
                     None
                 }
-                InternalGlobalAlloc::TypeId { .. } => None,
+                interpret::GlobalAlloc::TypeId { .. } => None,
             };
             if let Some(memory) = memory {
                 allocations.extend(
@@ -384,10 +354,7 @@ impl<'tcx> Session<'tcx> {
         attributes
             .iter()
             .find(|attribute| {
-                attribute.path_matches(&[
-                    rustc_span::Symbol::intern("gpurs_tool"),
-                    rustc_span::Symbol::intern(name),
-                ])
+                attribute.path_matches(&[Symbol::intern("gpurs_tool"), Symbol::intern(name)])
             })
             .map(|attribute| {
                 attribute
@@ -429,7 +396,7 @@ impl<'tcx> Session<'tcx> {
     /// The instantiated field types of an `Adt`, or none for other types.
     pub fn field_types(&self, ty: Ty) -> Vec<Ty> {
         let internal = self.internal_ty(ty);
-        let rustc_ty::TyKind::Adt(def, args) = internal.kind() else {
+        let ty::TyKind::Adt(def, args) = internal.kind() else {
             return Vec::new();
         };
         let environment = TypingEnv::fully_monomorphized();
@@ -448,7 +415,7 @@ impl<'tcx> Session<'tcx> {
     /// The variant indices of an `Adt` type, in declaration order.
     pub fn variant_indices(&self, ty: Ty) -> Vec<VariantIdx> {
         let internal = self.internal_ty(ty);
-        let rustc_ty::TyKind::Adt(def, _) = internal.kind() else {
+        let ty::TyKind::Adt(def, _) = internal.kind() else {
             return Vec::new();
         };
         (0..def.variants().len())
@@ -460,9 +427,9 @@ impl<'tcx> Session<'tcx> {
     pub fn field_type(&self, ty: Ty, variant: usize, field: usize) -> Ty {
         let internal = self.internal_ty(ty);
         match internal.kind() {
-            rustc_ty::TyKind::Adt(def, args) => {
+            ty::TyKind::Adt(def, args) => {
                 let variant = def.variant(rustc_abi::VariantIdx::from_usize(variant));
-                let Some(field) = variant.fields.get(rustc_abi::FieldIdx::from_usize(field)) else {
+                let Some(field) = variant.fields.get(FieldIdx::from_usize(field)) else {
                     return ty;
                 };
                 let environment = TypingEnv::fully_monomorphized();
@@ -471,8 +438,8 @@ impl<'tcx> Session<'tcx> {
                     .normalize_erasing_regions(environment, field.ty(self.tcx, args));
                 rustc_internal::stable(ty)
             }
-            rustc_ty::TyKind::Tuple(elements) => rustc_internal::stable(elements[field]),
-            rustc_ty::TyKind::Array(element, _) | rustc_ty::TyKind::Slice(element) => {
+            ty::TyKind::Tuple(elements) => rustc_internal::stable(elements[field]),
+            ty::TyKind::Array(element, _) | ty::TyKind::Slice(element) => {
                 rustc_internal::stable(*element)
             }
             _ => ty,
@@ -482,12 +449,8 @@ impl<'tcx> Session<'tcx> {
     /// Whether every zero bit pattern is a valid value of `ty`.
     pub fn zeroable(&self, ty: Ty) -> bool {
         let input = TypingEnv::fully_monomorphized().as_query_input(self.internal_ty(ty));
-        util::check_validity_requirement(
-            self.tcx,
-            rustc_ty::layout::ValidityRequirement::Zero,
-            input,
-        )
-        .unwrap_or(false)
+        util::check_validity_requirement(self.tcx, ValidityRequirement::Zero, input)
+            .unwrap_or(false)
     }
 
     /// A `&str` launcher argument, resolved through the allocation it points at.
@@ -553,11 +516,11 @@ impl<'tcx> Session<'tcx> {
         self.tcx.dcx().abort_if_errors();
     }
 
-    fn internal_def(&self, def: DefId) -> rustc_hir::def_id::DefId {
+    fn internal_def(&self, def: DefId) -> def_id::DefId {
         rustc_internal::internal(self.tcx, def)
     }
 
-    fn internal_ty(&self, ty: Ty) -> rustc_middle::ty::Ty<'tcx> {
+    fn internal_ty(&self, ty: Ty) -> ty::Ty<'tcx> {
         rustc_internal::internal(self.tcx, ty)
     }
 
@@ -567,13 +530,10 @@ impl<'tcx> Session<'tcx> {
 }
 
 /// Runs `f` inside the stable interface for `tcx`, discarding the session's caches after it.
-pub fn run<T>(tcx: TyCtxt<'_>, f: impl FnOnce() -> T) -> T {
+pub(crate) fn enter<T>(tcx: TyCtxt<'_>, f: impl FnOnce() -> T) -> T {
     let result = rustc_internal::run(tcx, f).expect("stable compiler interface");
     QUERIES.with(|queries| {
-        queries.functions.take();
-        queries.primitives.take();
         queries.bodies.take();
-        queries.signatures.take();
         queries.paths.take();
     });
     result

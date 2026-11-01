@@ -2,10 +2,12 @@
 //! algorithms.
 
 use rustc_data_structures::graph::{
-    self, DirectedGraph, Predecessors, StartNode, Successors, dominators::Dominators,
+    DirectedGraph, Predecessors, StartNode, Successors,
+    dominators::{self, Dominators},
+    iterate,
 };
 
-use crate::stable::Body;
+use crate::Body;
 
 /// A control-flow graph over block indices.
 pub struct Graph {
@@ -47,12 +49,12 @@ impl Graph {
     }
 
     pub fn dominators(&self) -> Dominators<usize> {
-        graph::dominators::dominators(self)
+        dominators::dominators(self)
     }
 
     /// The blocks reachable from the start, in reverse postorder.
     pub fn reverse_postorder(&self) -> Vec<usize> {
-        graph::iterate::reverse_post_order(self, self.start)
+        iterate::reverse_post_order(self, self.start)
     }
 
     /// Whether each block is reachable from the start.

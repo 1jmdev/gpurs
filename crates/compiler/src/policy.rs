@@ -7,7 +7,7 @@
 
 use std::{env, sync::LazyLock};
 
-use crate::stable::{AssertMessage, RuntimeChecks, Session};
+use gpurs_rustc::{AssertMessage, RuntimeChecks, Session};
 
 /// Whether unchecked arithmetic is instrumented. `GPURS_OVERFLOW_CHECKS` overrides the profile.
 pub fn overflow_checks() -> bool {

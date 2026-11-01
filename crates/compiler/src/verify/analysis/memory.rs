@@ -1,12 +1,9 @@
-use rustc_data_structures::fx::FxHashSet;
+use gpurs_rustc::{BinOp, FxHashSet};
 
 use super::{Analysis, Region, control};
-use crate::{
-    stable::BinOp,
-    verify::{
-        proof::{self, Comparison, Proofs},
-        symbolic::{Atom, Polynomial, Relation},
-    },
+use crate::verify::{
+    proof::{self, Comparison, Proofs},
+    symbolic::{Atom, Polynomial, Relation},
 };
 
 impl Analysis<'_, '_> {

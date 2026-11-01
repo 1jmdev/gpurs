@@ -15,7 +15,7 @@ rustc_private = true
 [dependencies]
 bitflags.workspace = true
 gpurs-artifact.workspace = true
+gpurs-rustc.workspace = true
 libloading.workspace = true
 postcard.workspace = true
 serde.workspace = true
-syn.workspace = true

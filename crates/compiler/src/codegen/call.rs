@@ -1,18 +1,18 @@
 use gpurs_artifact::Failure;
+use gpurs_rustc::{Instance, InstanceKind, RigidTy, TyKind};
 
 use super::{
     function::FunctionBuilder,
     layout::PassMode,
     place::{Operand, Place, Value},
 };
-use crate::stable::{Instance, InstanceKind, RigidTy, TyKind};
 
 impl<'sess> FunctionBuilder<'_, 'sess> {
     pub fn call(
         &mut self,
-        function: &crate::stable::Operand,
-        arguments: &[crate::stable::Operand],
-        destination: &crate::stable::Place,
+        function: &gpurs_rustc::Operand,
+        arguments: &[gpurs_rustc::Operand],
+        destination: &gpurs_rustc::Place,
         target: Option<usize>,
     ) {
         let Some(target) = target else {

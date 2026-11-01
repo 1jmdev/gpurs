@@ -114,10 +114,10 @@ version = "0.1.0"
 dependencies = [
  "bitflags",
  "gpurs-artifact",
+ "gpurs-rustc",
  "libloading",
  "postcard",
  "serde",
- "syn",
 ]
 
 [[package]]
@@ -140,6 +140,14 @@ dependencies = [
  "proc-macro2",
  "quote",
  "serde_json",
+ "syn",
+]
+
+[[package]]
+name = "gpurs-rustc"
+version = "0.1.0"
+dependencies = [
+ "gpurs-artifact",
  "syn",
 ]
 

@@ -1,8 +1,7 @@
 use gpurs_artifact::SharedMemory;
-use rustc_data_structures::fx::FxHashMap;
+use gpurs_rustc::{FxHashMap, Instance};
 
 use super::ir::{Module, Type, Value};
-use crate::stable::Instance;
 
 const STATIC_LIMIT: u64 = 48 * 1024;
 
