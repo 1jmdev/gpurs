@@ -126,6 +126,7 @@ version = "0.1.0"
 dependencies = [
  "gpurs-artifact",
  "gpurs-codegen",
+ "gpurs-frontend",
  "gpurs-nvvm",
  "gpurs-rustc",
  "gpurs-verifier",
@@ -136,6 +137,15 @@ dependencies = [
 [[package]]
 name = "gpurs-driver"
 version = "0.1.0"
+
+[[package]]
+name = "gpurs-frontend"
+version = "0.1.0"
+dependencies = [
+ "gpurs-artifact",
+ "gpurs-rustc",
+ "gpurs-verifier",
+]
 
 [[package]]
 name = "gpurs-hopper-examples"

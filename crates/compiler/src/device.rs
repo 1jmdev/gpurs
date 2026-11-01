@@ -1,12 +1,9 @@
 use std::{env, fs, path::PathBuf};
 
 use gpurs_artifact::Artifact;
-use gpurs_rustc::{
-    CrateDef, CrateItem, GenericArgKind, GenericArgs, Instance, RigidTy, Session, Ty, TyKind,
-    driver,
-};
+use gpurs_rustc::{Session, driver};
 
-use crate::{cache::Cache, discovery::HostView};
+use crate::cache::Cache;
 
 pub struct DeviceView;
 
@@ -31,84 +28,20 @@ impl DeviceView {
         architecture: &str,
     ) -> Result<Artifact, String> {
         sess.target = architecture.parse().expect("validated GPU architecture");
-        let mut host = HostView::default();
-        host.analyze(sess);
+        let program = gpurs_frontend::analyze(sess);
         let directory = PathBuf::from(env::var_os("GPURS_ARTIFACTS").unwrap());
         let output = PathBuf::from(env::var_os("GPURS_TARGET_ARTIFACT").unwrap());
-        let definitions: Vec<_> = sess
-            .local_items()
-            .into_iter()
-            .filter_map(|item| {
-                sess.tool_attr(item.def_id(), "device")
-                    .map(|tail| (item, tail))
-            })
-            .collect();
         let mut cache = Cache::new(&directory)?;
         let mut modules = Vec::new();
         let mut report = String::new();
-        for launch in &host.launches {
-            let Some(definition) = definitions
-                .iter()
-                .find(|(definition, tail)| {
-                    *tail == launch.tail
-                        && sess
-                            .module_path(definition.def_id())
-                            .strip_suffix("::__gpurs_device")
-                            == Some(launch.module.as_str())
-                })
-                .map(|(definition, _)| *definition)
-                .or_else(|| {
-                    sess.external_device(&launch.module, &launch.tail)
-                        .map(CrateItem)
-                })
-            else {
-                sess.err(format!(
-                    "GPU definition for `{}` was not found in the device view",
-                    launch.key
-                ));
-                continue;
-            };
-            let function = definition.ty();
-            let kind = function.kind();
-            let Some((function, signature)) = kind.fn_def() else {
-                sess.err(format!("`{}` is not a function", launch.key));
-                continue;
-            };
-            let mut arguments = launch.generics.iter().copied();
-            let concrete = GenericArgs(
-                signature
-                    .0
-                    .iter()
-                    .map(|argument| match argument {
-                        GenericArgKind::Type(_) => {
-                            GenericArgKind::Type(arguments.next().unwrap_or_else(|| {
-                                sess.err(format!("not enough type arguments for `{}`", launch.key));
-                                Ty::bool_ty()
-                            }))
-                        }
-                        GenericArgKind::Const(_) => {
-                            if let Some(ty) = arguments.next()
-                                && let TyKind::RigidTy(RigidTy::Array(_, length)) = ty.kind()
-                            {
-                                GenericArgKind::Const(length)
-                            } else {
-                                sess.err(format!("missing const argument for `{}`", launch.key));
-                                argument.clone()
-                            }
-                        }
-                        argument => argument.clone(),
-                    })
-                    .collect(),
-            );
-            let instance = match Instance::resolve(function, &concrete) {
-                Ok(instance) => instance,
-                Err(error) => {
-                    sess.err(format!("cannot instantiate `{}`: {error:?}", launch.key));
-                    continue;
-                }
-            };
-            let (module, summary) =
-                cache.kernel(sess, instance, launch.configured, &launch.key, architecture)?;
+        for kernel in program.kernels {
+            let (module, summary) = cache.kernel(
+                sess,
+                kernel.instance,
+                kernel.configured,
+                &kernel.key,
+                architecture,
+            )?;
             report.push_str(&summary);
             modules.push(module);
         }
@@ -117,7 +50,7 @@ impl DeviceView {
             compiler: format!("gpurs-{} {}", env!("CARGO_PKG_VERSION"), driver::version()),
             architecture: architecture.to_owned(),
             alternatives: Vec::new(),
-            types: host.types,
+            types: program.types,
             modules,
         };
         fs::write(output.with_extension("preconditions"), report)

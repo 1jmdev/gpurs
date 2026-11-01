@@ -11,7 +11,7 @@ use gpurs_rustc::{
 use gpurs_verifier::transfer;
 
 /// One launcher instantiation found in host code.
-pub struct Launch {
+pub(crate) struct Launch {
     /// Runtime lookup key: `module::tail` followed by the generic tuple type name, if any.
     pub key: String,
     pub module: String,
@@ -22,7 +22,7 @@ pub struct Launch {
 }
 
 #[derive(Default)]
-pub struct HostView {
+pub(crate) struct HostView {
     pub launches: Vec<Launch>,
     pub types: Vec<TransferType>,
     pending: Vec<Instance>,
@@ -64,7 +64,7 @@ impl MirVisitor for HostView {
 }
 
 impl HostView {
-    pub fn analyze(&mut self, sess: Session<'_>) {
+    pub(crate) fn analyze(&mut self, sess: Session<'_>) {
         self.pending.extend(sess.entry());
         let mut visited = FxHashSet::default();
         while let Some(instance) = self.pending.pop() {

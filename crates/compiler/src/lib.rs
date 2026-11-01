@@ -7,5 +7,4 @@
 
 mod cache;
 mod device;
-mod discovery;
 mod wrapper;

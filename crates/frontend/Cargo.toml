@@ -1,0 +1,15 @@
+[package]
+name = "gpurs-frontend"
+description = "Host launch discovery and device instantiation for gpurs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[package.metadata.rust-analyzer]
+rustc_private = true
+
+[dependencies]
+gpurs-artifact.workspace = true
+gpurs-rustc.workspace = true
+gpurs-verifier.workspace = true

@@ -15,6 +15,7 @@ rustc_private = true
 [dependencies]
 gpurs-artifact.workspace = true
 gpurs-codegen.workspace = true
+gpurs-frontend.workspace = true
 gpurs-nvvm.workspace = true
 gpurs-rustc.workspace = true
 gpurs-verifier.workspace = true

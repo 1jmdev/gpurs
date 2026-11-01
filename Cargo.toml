@@ -15,6 +15,7 @@ gpurs-artifact = { path = "crates/artifact" }
 gpurs-build = { path = "crates/build" }
 gpurs-codegen = { path = "crates/codegen" }
 gpurs-driver = { path = "crates/driver" }
+gpurs-frontend = { path = "crates/frontend" }
 gpurs-macros = { path = "crates/macros" }
 gpurs-nvvm = { path = "crates/nvvm" }
 gpurs-rustc = { path = "crates/rustc" }

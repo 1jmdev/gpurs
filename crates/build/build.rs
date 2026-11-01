@@ -25,7 +25,7 @@ fn main() {
         library.display()
     );
     for dependency in [
-        "compiler", "codegen", "verifier", "rustc", "artifact", "nvvm",
+        "compiler", "frontend", "codegen", "verifier", "rustc", "artifact", "nvvm",
     ] {
         println!(
             "cargo::rerun-if-changed={}",
