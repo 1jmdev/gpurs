@@ -1,6 +1,6 @@
 use std::{env, fs, path::PathBuf};
 
-use gpurs_artifact::Artifact;
+use gpurs_artifact::LoweredCrate;
 use gpurs_rustc::{Session, driver};
 
 use crate::cache::Cache;
@@ -9,33 +9,29 @@ pub struct DeviceView;
 
 impl DeviceView {
     fn compile(&self, sess: Session<'_>) -> Result<(), String> {
-        let architectures = env::var("GPURS_ARCHITECTURE").unwrap();
-        let mut artifacts = architectures
+        let lowered = env::var("GPURS_ARCHITECTURE")
+            .unwrap()
             .split(',')
-            .map(|architecture| self.compile_target(sess, architecture));
-        let mut artifact = artifacts.next().expect("at least one architecture")?;
-        artifact.alternatives = artifacts.collect::<Result<_, _>>()?;
+            .map(|architecture| self.compile_target(sess, architecture))
+            .collect::<Result<Vec<_>, _>>()?;
         let output = PathBuf::from(env::var_os("GPURS_TARGET_ARTIFACT").unwrap());
-        let bytes = artifact.encode();
-        let mut embedded = (bytes.len() as u64).to_le_bytes().to_vec();
-        embedded.extend_from_slice(&bytes);
-        fs::write(output, embedded).map_err(|error| error.to_string())
+        let bytes = postcard::to_allocvec(&lowered).map_err(|error| error.to_string())?;
+        fs::write(output, bytes).map_err(|error| error.to_string())
     }
 
     fn compile_target(
         &self,
         mut sess: Session<'_>,
         architecture: &str,
-    ) -> Result<Artifact, String> {
+    ) -> Result<LoweredCrate, String> {
         sess.target = architecture.parse().expect("validated GPU architecture");
         let program = gpurs_frontend::analyze(sess);
-        let directory = PathBuf::from(env::var_os("GPURS_ARTIFACTS").unwrap());
         let output = PathBuf::from(env::var_os("GPURS_TARGET_ARTIFACT").unwrap());
-        let mut cache = Cache::new(&directory)?;
-        let mut modules = Vec::new();
+        let mut cache = Cache::new(PathBuf::from(env::var_os("GPURS_CACHE").unwrap()))?;
+        let mut kernels = Vec::new();
         let mut report = String::new();
         for kernel in program.kernels {
-            let (module, summary) = cache.kernel(
+            let (kernel, fragment, summary) = cache.kernel(
                 sess,
                 kernel.instance,
                 kernel.configured,
@@ -43,19 +39,18 @@ impl DeviceView {
                 architecture,
             )?;
             report.push_str(&summary);
-            modules.push(module);
+            kernels.push((kernel, fragment));
         }
         sess.abort_if_errors();
-        let artifact = Artifact {
+        let lowered = LoweredCrate {
             compiler: format!("gpurs-{} {}", env!("CARGO_PKG_VERSION"), driver::version()),
             architecture: architecture.to_owned(),
-            alternatives: Vec::new(),
+            kernels,
             types: program.types,
-            modules,
         };
         fs::write(output.with_extension("preconditions"), report)
             .map_err(|error| error.to_string())?;
-        Ok(artifact)
+        Ok(lowered)
     }
 }
 

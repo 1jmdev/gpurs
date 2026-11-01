@@ -7,6 +7,7 @@ use std::{
 };
 
 use libloading::{Library, Symbol};
+use serde_json::Value;
 
 use crate::build;
 
@@ -39,14 +40,16 @@ pub(crate) fn run_wrapper() -> i32 {
             .unwrap_or(1);
     }
     if env::var_os("GPURS_PRECOMPILE").is_some() {
-        use std::hash::{DefaultHasher, Hash, Hasher};
-
-        let mut hash = DefaultHasher::new();
-        original.hash(&mut hash);
-        let output = Path::new(&env::var_os("GPURS_ARTIFACTS").unwrap())
-            .join(format!("{:016x}.bin", hash.finish()));
-        let mut command = Command::new(&original[0]);
-        let status = command
+        let source = arguments
+            .iter()
+            .find(|argument| argument.to_string_lossy().ends_with(".rs"))
+            .expect("rustc compiles a crate root");
+        let test = arguments.iter().any(|argument| argument == "--test");
+        let output = Path::new(&env::var_os("GPURS_ARTIFACTS").unwrap()).join(format!(
+            "{}-{test}.bin",
+            build::source_identity(&env::current_dir().unwrap().join(source))
+        ));
+        let status = Command::new(&original[0])
             .args(&original[1..])
             .env_remove("GPURS_PRECOMPILE")
             .env("GPURS_TARGET_ARTIFACT", output)
@@ -62,169 +65,29 @@ pub(crate) fn run_wrapper() -> i32 {
             .code()
             .unwrap_or(1);
     }
+    // The build script checked the device view of the runtime and the package's libraries.
+    let libraries: Value = serde_json::from_str(&env::var("GPURS_LIBRARIES").unwrap()).unwrap();
+    for index in 1..arguments.len() {
+        let replacement = arguments[index].to_str().and_then(|value| {
+            let (name, _) = value.split_once('=')?;
+            Some(format!("{name}={}", libraries["externs"][name].as_str()?))
+        });
+        if arguments[index - 1] == "--extern"
+            && let Some(replacement) = replacement
+        {
+            arguments[index] = replacement.into();
+        }
+    }
+    if !arguments
+        .iter()
+        .any(|argument| argument.to_string_lossy().starts_with("gpurs="))
     {
-        let directory = Path::new(COMPILER_LIBRARY)
-            .parent()
-            .expect("the compiler library has a parent directory")
-            .join("metadata");
-        let mut command = cargo();
-        let mut metadata = cargo();
-        let manifest = Path::new(&env::var_os("CARGO_MANIFEST_DIR").unwrap()).join("Cargo.toml");
-        let output = metadata
-            .args([
-                "metadata",
-                "--all-features",
-                "--format-version=1",
-                "--manifest-path",
-            ])
-            .arg(&manifest)
-            .output()
-            .expect("cargo metadata runs");
-        if !output.status.success() {
-            build::fail(&String::from_utf8_lossy(&output.stderr));
-        }
-        let metadata: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-        let package = metadata["packages"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|package| package["manifest_path"].as_str() == manifest.to_str())
-            .expect("the launch package is in cargo metadata");
-        let runtime = metadata["packages"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|package| package["name"] == "gpurs")
-            .expect("the kernel runtime is in cargo metadata");
-        let dependencies = metadata["resolve"]["nodes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|node| node["id"] == package["id"])
-            .unwrap()["deps"]
-            .as_array()
-            .unwrap();
-        let dependencies: Vec<_> = dependencies
-            .iter()
-            .filter(|dependency| {
-                arguments.iter().any(|argument| {
-                    argument
-                        .to_string_lossy()
-                        .starts_with(&format!("{}=", dependency["name"].as_str().unwrap()))
-                })
-            })
-            .collect();
-        command.arg("check");
-        command.args(["--package", runtime["id"].as_str().unwrap()]);
-        command.args([
-            "--package",
-            package["id"].as_str().unwrap(),
-            "--no-default-features",
-        ]);
-        for argument in &arguments {
-            if let Some(feature) = argument.to_str().and_then(|argument| {
-                argument
-                    .strip_prefix("feature=\"")
-                    .and_then(|feature| feature.strip_suffix('"'))
-            }) {
-                command.args([
-                    "--features",
-                    &format!("{}/{feature}", package["name"].as_str().unwrap()),
-                ]);
-            }
-        }
-        for dependency in &dependencies {
-            command.args(["--package", dependency["pkg"].as_str().unwrap()]);
-        }
-        let output = command
-            .args([
-                "--quiet",
-                "--lib",
-                "--message-format=json",
-                "--manifest-path",
-            ])
-            .arg(&manifest)
-            .arg("--target-dir")
-            .arg(&directory)
-            .env("RUSTC", &arguments[1])
-            .env("RUSTC_WRAPPER", env::current_exe().unwrap())
-            .env("GPURS_WRAPPER", "1")
-            .env("GPURS_LIBRARY_VIEW", "1")
-            .env("GLIBC_TUNABLES", "glibc.rtld.optional_static_tls=65536")
-            .env("RUSTC_BOOTSTRAP", "1")
-            .env(
-                "CARGO_ENCODED_RUSTFLAGS",
-                [
-                    "-Zalways-encode-mir",
-                    "-Zmir-opt-level=2",
-                    "-Copt-level=3",
-                    "-Cdebug-assertions=no",
-                    "-Coverflow-checks=on",
-                    "--cfg=gpurs_device",
-                    "-Zcrate-attr=feature(register_tool)",
-                    "-Zcrate-attr=register_tool(gpurs_tool)",
-                ]
-                .join("\u{1f}"),
-            )
-            .output()
-            .unwrap_or_else(|error| build::fail(&error.to_string()));
-        if !output.status.success() {
-            for line in output.stdout.split(|byte| *byte == b'\n') {
-                if let Ok(message) = serde_json::from_slice::<serde_json::Value>(line)
-                    && let Some(rendered) = message["message"]["rendered"].as_str()
-                {
-                    eprint!("{rendered}");
-                }
-            }
-            build::fail(&String::from_utf8_lossy(&output.stderr));
-        }
-        let mut libraries = Vec::new();
-        for line in output.stdout.split(|byte| *byte == b'\n') {
-            let Ok(message) = serde_json::from_slice::<serde_json::Value>(line) else {
-                continue;
-            };
-            if message["reason"] == "compiler-artifact" {
-                for file in message["filenames"].as_array().unwrap() {
-                    let file = file.as_str().unwrap();
-                    if file.ends_with(".rmeta") || file.ends_with(".so") {
-                        for dependency in &dependencies {
-                            if message["package_id"] == dependency["pkg"] {
-                                libraries.push((
-                                    dependency["name"].as_str().unwrap().to_owned(),
-                                    file.to_owned(),
-                                ));
-                            }
-                        }
-                        if message["package_id"] == package["id"] {
-                            libraries.push((
-                                message["target"]["name"].as_str().unwrap().to_owned(),
-                                file.to_owned(),
-                            ));
-                        }
-                        if message["package_id"] == runtime["id"]
-                            && !dependencies
-                                .iter()
-                                .any(|dependency| dependency["pkg"] == runtime["id"])
-                        {
-                            arguments.extend(["--extern".into(), format!("gpurs={file}").into()]);
-                        }
-                    }
-                    arguments.extend([
-                        "-L".into(),
-                        format!("dependency={}", Path::new(file).parent().unwrap().display(),)
-                            .into(),
-                    ]);
-                }
-            }
-        }
-        for argument in &mut arguments {
-            if let Some((name, file)) = libraries
-                .iter()
-                .find(|(name, _)| argument.to_string_lossy().starts_with(&format!("{name}=")))
-            {
-                *argument = format!("{name}={file}").into();
-            }
-        }
+        let runtime = libraries["externs"]["gpurs"].as_str().unwrap();
+        arguments.extend(["--extern".into(), format!("gpurs={runtime}").into()]);
+    }
+    for directory in libraries["directories"].as_array().unwrap() {
+        let directory = directory.as_str().unwrap();
+        arguments.extend(["-L".into(), format!("dependency={directory}").into()]);
     }
     compiler_entry(b"gpurs_compiler_main", &arguments)
 }

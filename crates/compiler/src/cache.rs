@@ -1,12 +1,11 @@
 use std::{
     env, fs,
     hash::{DefaultHasher, Hash, Hasher},
-    path::{Path, PathBuf},
+    path::PathBuf,
 };
 
-use gpurs_artifact::{Kernel, Module};
+use gpurs_artifact::{Fragment, Kernel};
 use gpurs_codegen::{self as codegen, GeneratedKernel};
-use gpurs_nvvm::Toolkit;
 use gpurs_rustc::{FxHashMap, FxHashSet, Instance, Session, call_graph};
 use gpurs_verifier::{self as verifier, Verification, Warning};
 use serde::{Deserialize, Serialize};
@@ -14,7 +13,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Serialize, Deserialize)]
 struct Lowered {
     kernel: Kernel,
-    ir: String,
+    fragment: Fragment,
     summary: String,
     warnings: Vec<Warning>,
 }
@@ -26,8 +25,7 @@ pub struct Cache {
 }
 
 impl Cache {
-    pub fn new(directory: &Path) -> Result<Self, String> {
-        let directory = directory.join("cache");
+    pub fn new(directory: PathBuf) -> Result<Self, String> {
         fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
         let identity = [
             "GPURS_COMPILER_ID",
@@ -52,7 +50,7 @@ impl Cache {
         configured: bool,
         key: &str,
         architecture: &str,
-    ) -> Result<(Module, String), String> {
+    ) -> Result<(Kernel, Fragment, String), String> {
         let mut functions = Vec::new();
         let mut pending = vec![root];
         let mut visited = FxHashSet::default();
@@ -103,42 +101,19 @@ impl Cache {
                 warning.emit(sess, &functions);
             }
             sess.abort_if_errors();
-            let GeneratedKernel { kernel, ir, .. } = codegen::generate(sess, plan);
+            let GeneratedKernel {
+                kernel, fragment, ..
+            } = codegen::generate(sess, plan);
             let lowered = Lowered {
                 kernel,
-                ir,
+                fragment,
                 summary,
                 warnings,
             };
             entry.write(&postcard::to_allocvec(&lowered).map_err(|error| error.to_string())?)?;
             lowered
         };
-        let toolkit = Toolkit::discover().map_err(|error| error.to_string())?;
-        let mut input = format!(
-            "{}\n{architecture}\n{}",
-            self.identity,
-            toolkit.fingerprint().map_err(|error| error.to_string())?,
-        );
-        input.push_str(&lowered.ir);
-        let entry = self.entry(input.as_bytes(), "module");
-        let module = if let Some(module) = entry
-            .read()
-            .and_then(|bytes| postcard::from_bytes::<Module>(&bytes).ok())
-        {
-            module
-        } else {
-            let compiled = toolkit
-                .compile(&lowered.ir, architecture, &entry.path)
-                .map_err(|error| error.to_string())?;
-            let module = Module {
-                cubin: compiled.cubin,
-                ptx: compiled.ptx,
-                kernels: vec![lowered.kernel],
-            };
-            entry.write(&postcard::to_allocvec(&module).map_err(|error| error.to_string())?)?;
-            module
-        };
-        Ok((module, lowered.summary))
+        Ok((lowered.kernel, lowered.fragment, lowered.summary))
     }
 
     fn entry(&self, input: &[u8], extension: &str) -> Entry {

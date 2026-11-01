@@ -1,16 +1,12 @@
-//! NVVM IR text, produced only from a finished [`Module`].
+//! NVVM IR text of functions, produced only once they are finished.
 
 use std::fmt::{self, Debug, Display, Formatter};
 
 use crate::{
-    Access, Block, Flags, Function, Module, Ordering, Predicate, Transfer, Type, Value,
+    Access, Block, Flags, Function, Ordering, Predicate, Transfer, Type, Value,
     instruction::{Callee, Instruction, Terminator},
     value::Kind,
 };
-
-const DATA_LAYOUT: &str = "e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-i128:128:\
-                           128-f32:32:32-f64:64:64-v16:16:16-v32:32:32-v64:64:64-v128:128:128-n16:\
-                           32:64";
 
 const FLAGS: [(Flags, &str); 4] = [
     (Flags::NUW, "nuw "),
@@ -18,76 +14,6 @@ const FLAGS: [(Flags, &str); 4] = [
     (Flags::EXACT, "exact "),
     (Flags::FAST, "reassoc nsz arcp contract afn "),
 ];
-
-impl Display for Module {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        writeln!(f, "target datalayout = \"{DATA_LAYOUT}\"")?;
-        writeln!(f, "target triple = \"nvptx64-nvidia-cuda\"\n")?;
-        for global in &self.globals {
-            let space = match global.space {
-                0 => String::new(),
-                space => format!("addrspace({space}) "),
-            };
-            let kind = if global.constant {
-                "constant"
-            } else {
-                "global"
-            };
-            if global.external {
-                writeln!(
-                    f,
-                    "@{} = external {space}{kind} {}, align {}",
-                    global.name, global.initializer.ty, global.align
-                )?;
-            } else {
-                writeln!(
-                    f,
-                    "@{} = internal {space}{kind} {}, align {}",
-                    global.name,
-                    Typed(&global.initializer),
-                    global.align
-                )?;
-            }
-        }
-        for (name, (result, parameters)) in self.declarations() {
-            writeln!(f, "declare {result} @{name}({})", List(&parameters))?;
-        }
-        for function in &self.functions {
-            write!(f, "\n{function}")?;
-        }
-        let annotations: Vec<_> = self
-            .functions
-            .iter()
-            .flat_map(|function| {
-                let parameters: Vec<_> = function
-                    .parameters
-                    .iter()
-                    .map(|(parameter, _)| parameter.ty.clone())
-                    .collect();
-                let symbol = format!(
-                    "{} ({})* @{}",
-                    function.result,
-                    List(&parameters),
-                    function.name
-                );
-                function
-                    .annotations
-                    .iter()
-                    .map(move |(key, value)| format!("{symbol}, !\"{key}\", i32 {value}"))
-            })
-            .collect();
-        let references: Vec<_> = (0..annotations.len())
-            .map(|index| format!("!{index}"))
-            .collect();
-        writeln!(f, "\n!nvvm.annotations = !{{{}}}", references.join(", "))?;
-        for (index, annotation) in annotations.iter().enumerate() {
-            writeln!(f, "!{index} = !{{{annotation}}}")?;
-        }
-        let version = annotations.len();
-        writeln!(f, "!nvvmir.version = !{{!{version}}}")?;
-        writeln!(f, "!{version} = !{{i32 2, i32 0, i32 3, i32 1}}")
-    }
-}
 
 impl Display for Function {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
@@ -417,7 +343,7 @@ impl Display for Ordering {
 }
 
 /// An operand preceded by its type, as instructions spell operands.
-struct Typed<'a>(&'a Value);
+pub(crate) struct Typed<'a>(pub &'a Value);
 
 impl Display for Typed<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
@@ -426,7 +352,7 @@ impl Display for Typed<'_> {
 }
 
 /// A comma-separated type list.
-struct List<'a>(&'a [Type]);
+pub(crate) struct List<'a>(pub &'a [Type]);
 
 impl Display for List<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {

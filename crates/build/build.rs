@@ -4,8 +4,22 @@
 use std::{env, path::PathBuf, process::Command};
 
 fn main() {
+    // Kernel discovery and library views run build scripts only to list launches, so they
+    // never load the compiler.
+    println!("cargo::rerun-if-env-changed=GPURS_PRECOMPILE");
+    println!("cargo::rerun-if-env-changed=GPURS_LIBRARY_VIEW");
+    if env::var_os("GPURS_PRECOMPILE").is_some() || env::var_os("GPURS_LIBRARY_VIEW").is_some() {
+        println!("cargo::rustc-env=GPURS_COMPILER_LIBRARY=");
+        return;
+    }
     let crates = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap()).join("..");
-    let target = PathBuf::from(env::var("OUT_DIR").unwrap()).join("compiler");
+    // Every profile of the target directory shares one compiler build.
+    let output = PathBuf::from(env::var("OUT_DIR").unwrap());
+    let build = output
+        .ancestors()
+        .find(|path| path.ends_with("build"))
+        .unwrap();
+    let target = build.ancestors().nth(2).unwrap().join("gpurs-compiler");
     let status = cargo(&env::var("CARGO").unwrap())
         .args(["build", "--release", "--manifest-path"])
         .arg(crates.join("compiler/Cargo.toml"))
@@ -25,7 +39,7 @@ fn main() {
         library.display()
     );
     for dependency in [
-        "compiler", "frontend", "codegen", "verifier", "rustc", "artifact", "nvvm",
+        "compiler", "frontend", "codegen", "verifier", "rustc", "artifact", "nvvm", "ir",
     ] {
         println!(
             "cargo::rerun-if-changed={}",

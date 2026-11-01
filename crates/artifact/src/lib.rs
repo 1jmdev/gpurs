@@ -4,9 +4,11 @@
 //! the result buffer; the kernel parameters follow in declaration order. An entry point without
 //! residual device checks receives the block from the result word on.
 
+mod fragment;
 mod primitive;
 mod target;
 
+pub use fragment::{Fragment, link};
 pub use primitive::{Convergence, Lowering, Memory, Operand, Primitive, Proof};
 use serde::{Deserialize, Serialize};
 pub use target::{Compatibility, ParseTargetError, Target};
@@ -25,6 +27,16 @@ pub struct Artifact {
     pub modules: Vec<Module>,
     pub types: Vec<TransferType>,
     pub alternatives: Vec<Artifact>,
+}
+
+/// The kernels of one crate lowered for one architecture; `gpurs-build` links those of every
+/// crate of a package into one module.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct LoweredCrate {
+    pub compiler: String,
+    pub architecture: String,
+    pub kernels: Vec<(Kernel, Fragment)>,
+    pub types: Vec<TransferType>,
 }
 
 /// Kernel entry points compiled into one CUBIN image.

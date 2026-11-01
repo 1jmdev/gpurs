@@ -1,8 +1,4 @@
-use std::{
-    env, fs, io,
-    path::{Path, PathBuf},
-    process,
-};
+use std::{env, fs, io, path::PathBuf};
 
 /// Environment overrides in toolkit discovery order.
 pub const TOOLKIT_ENVIRONMENT: [&str; 2] = ["CUDA_PATH", "CUDA_HOME"];
@@ -14,12 +10,6 @@ pub(crate) const PTXAS: &str = "bin/ptxas";
 pub struct Toolkit {
     /// Installation directory containing CUDA's compiler, libraries, and tools.
     pub root: PathBuf,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Compilation {
-    pub cubin: Vec<u8>,
-    pub ptx: String,
 }
 
 impl Toolkit {
@@ -60,20 +50,5 @@ impl Toolkit {
             ));
         }
         Ok(identity)
-    }
-
-    /// Compiles IR to PTX and CUBIN, using temporary files beside `output`.
-    ///
-    /// # Errors
-    /// Returns an error on compilation, assembly, or temporary file operations.
-    pub fn compile(&self, ir: &str, architecture: &str, output: &Path) -> io::Result<Compilation> {
-        let scratch = output.with_added_extension(format!("{}.nvvm", process::id()));
-        fs::create_dir_all(&scratch)?;
-        let result = self.ptx(ir, architecture).and_then(|ptx| {
-            self.assemble(&ptx, architecture, &scratch)
-                .map(|cubin| Compilation { cubin, ptx })
-        });
-        fs::remove_dir_all(scratch)?;
-        result
     }
 }

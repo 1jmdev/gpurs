@@ -1,5 +1,8 @@
+use std::hash::{DefaultHasher, Hash, Hasher};
+
 use gpurs_artifact::{
-    self as artifact, Entry, Kernel, PARAMETERS_OFFSET, RESULT_OFFSET, STATUS_OFFSET, SharedMemory,
+    self as artifact, Entry, Fragment, Kernel, PARAMETERS_OFFSET, RESULT_OFFSET, STATUS_OFFSET,
+    SharedMemory,
 };
 use gpurs_ir::{Access, Binary, Conversion, Flags, Type, Value as IRValue};
 use gpurs_rustc::Session;
@@ -12,38 +15,41 @@ use super::{function::FunctionBuilder, intrinsic::GEOMETRY, module::ModuleBuilde
 #[non_exhaustive]
 pub struct GeneratedKernel {
     pub kernel: Kernel,
-    pub ir: String,
+    pub fragment: Fragment,
 }
 
 /// Lowers a verified kernel and its callees, aborting the session on code generation errors.
 pub fn generate(sess: Session<'_>, plan: KernelPlan) -> GeneratedKernel {
     let mut module = ModuleBuilder::new(sess);
     let mut kernel = module.kernel(plan);
-    let (ir, shared) = module.finish();
+    let (fragment, shared) = module.finish();
     kernel.shared = shared;
     sess.abort_if_errors();
-    GeneratedKernel { kernel, ir }
+    GeneratedKernel { kernel, fragment }
 }
 
 impl<'sess> ModuleBuilder<'sess> {
     pub fn kernel(&mut self, plan: KernelPlan) -> Kernel {
+        let mut hasher = DefaultHasher::new();
+        plan.key.hash(&mut hasher);
+        let symbol = format!("{SYMBOL}_{:016x}", hasher.finish());
         let certified = plan.certificate.clone().map(|certificate| {
             let root = self.function(plan.instance, Some(certificate.clone()), false);
-            self.entry(&plan, SYMBOL, root, false, plan.status);
+            self.entry(&plan, &symbol, root, false, plan.status);
             let linear = plan.uses_index.then(|| {
-                let symbol = format!("{SYMBOL}_linear");
+                let symbol = format!("{symbol}_linear");
                 let root = self.function(plan.instance, Some(certificate), true);
                 self.entry(&plan, &symbol, root, true, plan.status);
                 symbol
             });
             Entry {
-                symbol: SYMBOL.to_owned(),
+                symbol: symbol.clone(),
                 linear,
                 status: plan.status,
             }
         });
         let instrumented = plan.instrumented.then(|| {
-            let symbol = format!("{SYMBOL}_instrumented");
+            let symbol = format!("{symbol}_instrumented");
             let root = self.function(plan.instance, None, false);
             self.entry(&plan, &symbol, root, false, true);
             Entry {
@@ -162,5 +168,5 @@ impl<'sess> ModuleBuilder<'sess> {
     }
 }
 
-/// The entry point of the certified copy; the other copies extend it with a suffix.
+/// Prefix of the entry points; a hash of the kernel key keeps them unique in a linked module.
 const SYMBOL: &str = "gpurs_kernel";

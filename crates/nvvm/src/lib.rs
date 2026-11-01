@@ -1,7 +1,10 @@
-//! CUDA toolkit discovery, libNVVM compilation, libdevice linking, and ptxas assembly.
+//! CUDA toolkit discovery, libNVVM compilation, libdevice linking, PTX linking, and ptxas
+//! assembly.
 
 mod libnvvm;
+mod link;
 mod ptxas;
 mod toolkit;
 
-pub use toolkit::{Compilation, TOOLKIT_ENVIRONMENT, Toolkit};
+pub use link::link_ptx;
+pub use toolkit::{TOOLKIT_ENVIRONMENT, Toolkit};

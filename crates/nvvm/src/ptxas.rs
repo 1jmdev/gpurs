@@ -14,6 +14,7 @@ impl Toolkit {
         let result = Command::new(self.root.join(PTXAS))
             .arg(format!("-arch={architecture}"))
             .arg("-O3")
+            .arg("--split-compile=0")
             .arg(&source)
             .arg("-o")
             .arg(&output)

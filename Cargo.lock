@@ -107,6 +107,7 @@ dependencies = [
  "gpurs-nvvm",
  "libloading",
  "object",
+ "postcard",
  "serde_json",
 ]
 
@@ -127,7 +128,6 @@ dependencies = [
  "gpurs-artifact",
  "gpurs-codegen",
  "gpurs-frontend",
- "gpurs-nvvm",
  "gpurs-rustc",
  "gpurs-verifier",
  "postcard",
@@ -160,6 +160,7 @@ name = "gpurs-ir"
 version = "0.1.0"
 dependencies = [
  "bitflags",
+ "gpurs-artifact",
  "gpurs-rustc",
 ]
 

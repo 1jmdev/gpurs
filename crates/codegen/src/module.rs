@@ -1,8 +1,10 @@
 use std::rc::Rc;
 
-use gpurs_artifact::SharedMemory;
+use gpurs_artifact::{Fragment, Lowering, SharedMemory};
 use gpurs_ir::{Access, Ordering, Type, Value as IRValue};
-use gpurs_rustc::{AllocId, FxHashMap, Instance, Session, Signature, layout};
+use gpurs_rustc::{
+    AllocId, CrateDef, FxHashMap, Instance, Session, Signature, attributes, call_graph, layout,
+};
 use gpurs_verifier::Certificate;
 
 use super::{
@@ -22,6 +24,8 @@ pub(crate) struct ModuleBuilder<'sess> {
     pub status: IRValue,
     functions: FxHashMap<Copy, String>,
     queue: Vec<Copy>,
+    /// Whether a function reaches a block-shared allocation, whose slot depends on the path.
+    allocating: FxHashMap<Instance, bool>,
     pub(super) allocations: FxHashMap<AllocId, IRValue>,
     pub shared: SharedAllocations,
 }
@@ -38,6 +42,7 @@ impl<'sess> ModuleBuilder<'sess> {
             status,
             functions: FxHashMap::default(),
             queue: Vec::new(),
+            allocating: FxHashMap::default(),
             allocations: FxHashMap::default(),
             shared: SharedAllocations::default(),
         }
@@ -71,13 +76,29 @@ impl<'sess> ModuleBuilder<'sess> {
         name
     }
 
+    /// Whether `instance` reaches a block-shared allocation, so that each call path of it needs
+    /// its own copy; GPU call graphs are acyclic.
+    pub fn allocates(&mut self, instance: Instance) -> bool {
+        if let Some(&allocates) = self.allocating.get(&instance) {
+            return allocates;
+        }
+        let allocates = attributes::primitive(self.sess, instance.def.def_id())
+            .is_some_and(|primitive| primitive.lowering == Lowering::SharedArray)
+            || call_graph::function(self.sess, instance)
+                .calls
+                .values()
+                .any(|&callee| self.allocates(callee));
+        self.allocating.insert(instance, allocates);
+        allocates
+    }
+
     pub fn signature(&self, instance: Instance) -> Rc<Signature> {
         layout::signature(self.sess, instance)
     }
 
     /// Lowers every queued function and renders the module, with the dynamic block-shared
     /// bytes a launch provides.
-    pub fn finish(mut self) -> (String, SharedMemory) {
+    pub fn finish(mut self) -> (Fragment, SharedMemory) {
         while let Some(copy) = self.queue.pop() {
             let name = self.functions[&copy].clone();
             let (instance, certificate, linear, path) = copy;
@@ -97,7 +118,7 @@ impl<'sess> ModuleBuilder<'sess> {
             offset.ret(Some(IRValue::i64(self.shared.required.dynamic_bytes)));
             self.ir.define(offset);
         }
-        (self.ir.to_string(), self.shared.required)
+        (self.ir.fragment(), self.shared.required)
     }
 
     /// `gpurs.fail(code)` records the first failure of the launch and stops the thread;
