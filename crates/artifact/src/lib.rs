@@ -34,6 +34,8 @@ pub struct LoweredCrate {
     pub architecture: String,
     pub kernels: Vec<(Kernel, Fragment)>,
     pub types: Vec<TransferType>,
+    /// Host statements per device function, keyed by its source file and line.
+    pub references: Vec<(String, u32, String)>,
 }
 
 /// Kernel entry points compiled into one CUBIN image.

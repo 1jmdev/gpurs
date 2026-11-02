@@ -47,6 +47,7 @@ impl DeviceView {
             architecture: architecture.to_owned(),
             kernels,
             types: program.types,
+            references: sess.host_references(),
         };
         fs::write(output.with_extension("preconditions"), report)
             .map_err(|error| error.to_string())?;

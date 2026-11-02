@@ -107,6 +107,17 @@ pub fn compile_architectures(architectures: &[&str]) {
             fs::remove_file(&path).unwrap();
         }
     }
+    let references: String = crates
+        .iter()
+        .flat_map(|lowered| &lowered[0].references)
+        .map(|(file, line, statement)| format!("{file}\t{line}\t{statement}\n"))
+        .collect();
+    let references_path = directory.join("gpurs_references.tsv");
+    fs::write(&references_path, references).unwrap_or_else(|error| fail(&error.to_string()));
+    println!(
+        "cargo::rustc-env=GPURS_REFERENCES={}",
+        references_path.display()
+    );
     let mut compiled = thread::scope(|scope| {
         let threads: Vec<_> = architectures
             .iter()
