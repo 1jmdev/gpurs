@@ -138,8 +138,8 @@ pub fn compile_architectures(architectures: &[&str]) {
     }
 }
 
-/// Lowers the kernels of every changed target of the package, returning the identities of
-/// the package's crate roots.
+/// Lowers the package library, or binaries or examples when no library exists, returning
+/// the selected crate roots' identities.
 fn precompile(compiler: &Path, configuration: &[(&str, String)]) -> HashSet<String> {
     let output = wrapper::cargo()
         .args(["metadata", "--format-version=1"])
@@ -162,7 +162,26 @@ fn precompile(compiler: &Path, configuration: &[(&str, String)]) -> HashSet<Stri
         .iter()
         .find(|package| package["name"] == name)
         .unwrap();
-    // The package with its normal and development dependencies, and their normal ones.
+    let targets = package["targets"].as_array().unwrap();
+    let kind = targets
+        .iter()
+        .map(|target| target["kind"][0].as_str().unwrap())
+        .min_by_key(|kind| match *kind {
+            "lib" | "rlib" | "dylib" | "cdylib" | "staticlib" => 0,
+            "bin" => 1,
+            "example" => 2,
+            _ => 3,
+        })
+        .unwrap();
+    let selection = match kind {
+        "bin" => "--bins",
+        "example" => "--examples",
+        _ => "--lib",
+    };
+    let targets: Vec<_> = targets
+        .iter()
+        .filter(|target| target["kind"][0] == kind)
+        .collect();
     let mut local = vec![package];
     let mut index = 0;
     while index < local.len() {
@@ -178,7 +197,10 @@ fn precompile(compiler: &Path, configuration: &[(&str, String)]) -> HashSet<Stri
                     .as_array()
                     .unwrap()
                     .iter()
-                    .any(|kind| kind["kind"].is_null() || index == 0 && kind["kind"] == "dev")
+                    .any(|dependency_kind| {
+                        dependency_kind["kind"].is_null()
+                            || index == 0 && kind == "example" && dependency_kind["kind"] == "dev"
+                    })
             {
                 local.push(dependency_package);
             }
@@ -189,7 +211,13 @@ fn precompile(compiler: &Path, configuration: &[(&str, String)]) -> HashSet<Stri
     for package in &local {
         watched.insert(PathBuf::from(package["manifest_path"].as_str().unwrap()));
         for target in package["targets"].as_array().unwrap() {
-            if target["kind"][0] != "custom-build" {
+            if (package["name"] == name && targets.contains(&target))
+                || (package["name"] != name
+                    && !matches!(
+                        target["kind"][0].as_str(),
+                        Some("bin" | "example" | "test" | "bench" | "custom-build")
+                    ))
+            {
                 let source = Path::new(target["src_path"].as_str().unwrap());
                 watched.insert(source.parent().unwrap().to_owned());
             }
@@ -228,12 +256,15 @@ fn precompile(compiler: &Path, configuration: &[(&str, String)]) -> HashSet<Stri
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|kind| kind["kind"] != "build")
+                .any(|dependency_kind| {
+                    dependency_kind["kind"].is_null()
+                        || kind == "example" && dependency_kind["kind"] == "dev"
+                })
         })
         .collect();
     let libraries = library_view(package, runtime, &dependencies, &features, compiler);
     let output = wrapper::cargo()
-        .args(["check", "--quiet", "--all-targets", "--package", &name])
+        .args(["check", "--quiet", selection, "--package", &name])
         .args(["--no-default-features", "--features"])
         .arg(features.join(","))
         .arg("--target-dir")
@@ -251,9 +282,7 @@ fn precompile(compiler: &Path, configuration: &[(&str, String)]) -> HashSet<Stri
     if !output.status.success() {
         fail(&String::from_utf8_lossy(&output.stderr));
     }
-    package["targets"]
-        .as_array()
-        .unwrap()
+    targets
         .iter()
         .map(|target| source_identity(Path::new(target["src_path"].as_str().unwrap())))
         .collect()
