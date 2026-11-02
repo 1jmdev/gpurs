@@ -1,4 +1,4 @@
-use std::slice;
+use std::{rc::Rc, slice};
 
 use gpurs_artifact::{Convergence, Memory, Primitive, Proof};
 use gpurs_rustc::{
@@ -142,27 +142,34 @@ impl Analysis<'_, '_> {
             facts: state.facts.clone(),
             controls: state.controls.clone(),
         };
-        entry
-            .slots
-            .resize_with(base + body.locals().len(), Value::default);
+        Rc::make_mut(&mut entry.slots).resize_with(base + body.locals().len(), Value::default);
         for (index, argument) in arguments.into_iter().enumerate().take(count) {
-            entry.slots[base + 1 + index] = argument;
+            Rc::make_mut(&mut entry.slots)[base + 1 + index] = argument;
         }
         let saved = self.span;
-        let key = (!self.collect).then(|| (context, entry.clone()));
-        let exit = match key.as_ref().and_then(|key| self.memo.get(key)) {
+        let key = (context, entry);
+        let cached = if self.collect {
+            None
+        } else {
+            self.memo.get(&key)
+        };
+        let exit = match cached {
             Some(exit) => exit.clone(),
             None => {
-                let exit = self.function(instance, context, entry);
-                if let Some(key) = key {
+                let exit = self
+                    .function(instance, context, &key.1)
+                    .map(|(mut exit, value)| {
+                        Rc::make_mut(&mut exit.slots).truncate(base);
+                        (exit, value)
+                    });
+                if !self.collect {
                     self.memo.insert(key, exit.clone());
                 }
                 exit
             }
         };
         self.span = saved;
-        let (mut exit, value) = exit?;
-        exit.slots.truncate(base);
+        let (exit, value) = exit?;
         *state = exit;
         Some(value)
     }
@@ -171,7 +178,7 @@ impl Analysis<'_, '_> {
     fn forget(&mut self, arguments: &[Value], state: &mut State) {
         for argument in arguments {
             for slot in state::pointed_slots(argument) {
-                if let Some(value) = state.slots.get_mut(slot) {
+                if let Some(value) = Rc::make_mut(&mut state.slots).get_mut(slot) {
                     *value = Value::varying(2);
                 }
             }

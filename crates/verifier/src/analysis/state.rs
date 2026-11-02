@@ -47,9 +47,9 @@ pub struct Value {
     pub variance: u8,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct State {
-    pub slots: Vec<Value>,
+    pub slots: Rc<Vec<Value>>,
     pub facts: Vec<Fact>,
     pub controls: BTreeMap<usize, (usize, u8)>,
 }

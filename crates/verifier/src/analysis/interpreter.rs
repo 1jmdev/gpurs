@@ -157,18 +157,14 @@ impl<'a, 'sess> Analysis<'a, 'sess> {
             };
         }
         let state = State {
-            slots,
+            slots: slots.into(),
             facts: Vec::new(),
             controls: BTreeMap::new(),
         };
         let context = self.context(None, self.kernel);
-        self.function(self.kernel, context, state.clone());
-        if self.failure.is_some() {
-            return None;
-        }
         self.collect = true;
         let result = self
-            .function(self.kernel, context, state)
+            .function(self.kernel, context, &state)
             .map(|(state, _)| state);
         if self.failure.is_none() {
             self.collective_control();

@@ -1,3 +1,5 @@
+use std::rc::Rc;
+
 use gpurs_rustc::{
     AdtKind, AggregateKind, Allocation, ConstantKind, NonDivergingIntrinsic, Operand, RigidTy,
     Rvalue, Shape, StatementKind, Ty, TyConstKind, TyKind, UnOp, VariantIdx, session,
@@ -33,12 +35,12 @@ impl Analysis<'_, '_> {
                     let mut value = state::get(&state.slots[slot], &path);
                     value.variant = variant;
                     value.guards.clear();
-                    state::set(&mut state.slots[slot], &path, value);
+                    state::set(&mut Rc::make_mut(&mut state.slots)[slot], &path, value);
                 }
             }
             StatementKind::StorageLive(local) | StatementKind::StorageDead(local) => {
                 let slot = self.frame().base + local;
-                state.slots[slot] = Value::default();
+                Rc::make_mut(&mut state.slots)[slot] = Value::default();
             }
             StatementKind::Intrinsic(NonDivergingIntrinsic::CopyNonOverlapping(_))
                 if self.collect && self.quiet == 0 =>

@@ -1,3 +1,5 @@
+use std::rc::Rc;
+
 use gpurs_artifact::{Access, Parameter};
 use gpurs_rustc::{Operand, Place, ProjectionElem, RigidTy, Ty, session};
 
@@ -208,7 +210,9 @@ impl Analysis<'_, '_> {
             .max()
             .unwrap_or(0);
         match self.locate(place, state) {
-            Location::Slot(slot, path) => state::set(&mut state.slots[slot], &path, value),
+            Location::Slot(slot, path) => {
+                state::set(&mut Rc::make_mut(&mut state.slots)[slot], &path, value)
+            }
             Location::Memory(origin) => self.access(&origin, true, false, state),
             Location::Unknown => {
                 // A write through an unknown pointer may change any local whose address is
@@ -216,7 +220,7 @@ impl Analysis<'_, '_> {
                 let addressed: Vec<usize> =
                     state.slots.iter().flat_map(state::pointed_slots).collect();
                 for slot in addressed {
-                    if let Some(value) = state.slots.get_mut(slot) {
+                    if let Some(value) = Rc::make_mut(&mut state.slots).get_mut(slot) {
                         *value = Value::varying(2);
                     }
                 }

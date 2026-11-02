@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::{collections::VecDeque, mem};
 
 use gpurs_rustc::{Instance, TerminatorKind};
 
@@ -18,7 +18,7 @@ impl Analysis<'_, '_> {
         &mut self,
         instance: Instance,
         context: usize,
-        entry: State,
+        entry: &State,
     ) -> Option<(State, Value)> {
         let body = self.sess.body(instance);
         let base = entry.slots.len() - body.locals().len();
@@ -36,15 +36,18 @@ impl Analysis<'_, '_> {
             statement: 0,
         });
         let count = body.blocks.len();
-        let collect = std::mem::replace(&mut self.collect, false);
+        let collect = mem::replace(&mut self.collect, false);
         let mut states = Vec::new();
         for round in 0..ROUNDS {
-            let changed = std::mem::replace(&mut self.changed, false);
+            let changed = mem::replace(&mut self.changed, false);
             states = vec![None; count];
             states[0] = Some(entry.clone());
             let mut visits = vec![0; count];
             let mut pending = VecDeque::from([0]);
+            let mut queued = vec![false; count];
+            queued[0] = true;
             while let Some(block) = pending.pop_front() {
+                queued[block] = false;
                 visits[block] += 1;
                 if visits[block] > VISITS {
                     self.failure = Some(format!(
@@ -63,8 +66,14 @@ impl Analysis<'_, '_> {
                     }
                     _ => None,
                 };
-                for (successor, facts) in self.successors(block, &state) {
-                    let mut next = state.clone();
+                let successors = self.successors(block, &state);
+                let successor_count = successors.len();
+                for (position, (successor, facts)) in successors.into_iter().enumerate() {
+                    let mut next = if position + 1 == successor_count {
+                        mem::take(&mut state)
+                    } else {
+                        state.clone()
+                    };
                     if let Some(variance) = variance {
                         next.controls
                             .insert(self.contexts[context].offset + block, (successor, variance));
@@ -74,7 +83,8 @@ impl Analysis<'_, '_> {
                             next.facts.push(fact);
                         }
                     }
-                    if self.merge(&mut states[successor], next, successor) {
+                    if self.merge(&mut states[successor], next, successor) && !queued[successor] {
+                        queued[successor] = true;
                         pending.push_back(successor);
                     }
                 }
@@ -98,8 +108,13 @@ impl Analysis<'_, '_> {
         }
         let mut exit = None;
         let mut exits = vec![None; count];
-        for block in 0..count {
-            let Some(mut state) = states[block].clone() else {
+        for (block, state) in states.into_iter().enumerate() {
+            if !self.collect
+                && !matches!(body.blocks[block].terminator.kind, TerminatorKind::Return)
+            {
+                continue;
+            }
+            let Some(mut state) = state else {
                 continue;
             };
             if !self.block(block, &mut state) {
@@ -132,9 +147,10 @@ impl Analysis<'_, '_> {
                     .collect();
             }
             if matches!(body.blocks[block].terminator.kind, TerminatorKind::Return) {
-                self.merge(&mut exit, state.clone(), count);
+                self.merge(&mut exit, state, count);
+            } else if self.collect && self.quiet == 0 {
+                exits[block] = Some(state);
             }
-            exits[block] = Some(state);
         }
         if self.collect && self.quiet == 0 {
             for (block, state) in exits.iter().enumerate() {
@@ -224,7 +240,8 @@ impl Analysis<'_, '_> {
                     &facts,
                 )
             })
-            .collect();
+            .collect::<Vec<_>>()
+            .into();
         let frame = self.frames.last_mut().unwrap();
         frame.block = saved_block;
         frame.statement = saved_statement;
