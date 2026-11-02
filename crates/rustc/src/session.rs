@@ -130,10 +130,31 @@ impl<'tcx> Session<'tcx> {
         rustc_public::all_local_items()
     }
 
-    pub fn entry(&self) -> Option<Instance> {
+    pub fn entries(&self) -> Vec<Instance> {
+        if let Some((definition, _)) = self.tcx.entry_fn(()) {
+            return vec![rustc_internal::stable(ty::Instance::mono(
+                self.tcx, definition,
+            ))];
+        }
         self.tcx
-            .entry_fn(())
-            .map(|(definition, _)| rustc_internal::stable(ty::Instance::mono(self.tcx, definition)))
+            .mir_keys(())
+            .iter()
+            .filter(|definition| {
+                self.tcx.def_kind(**definition).is_fn_like()
+                    && self.tcx.visibility(**definition).is_public()
+                    && !self
+                        .tcx
+                        .generics_of(**definition)
+                        .requires_monomorphization(self.tcx)
+                    && !self
+                        .tcx
+                        .def_path_str(**definition)
+                        .contains("::__gpurs_device::")
+            })
+            .map(|definition| {
+                rustc_internal::stable(ty::Instance::mono(self.tcx, definition.to_def_id()))
+            })
+            .collect()
     }
 
     pub fn fingerprint(&self, instance: Instance, body: Option<&Body>) -> String {

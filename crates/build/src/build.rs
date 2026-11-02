@@ -10,10 +10,7 @@ use gpurs_artifact::{self as artifact, Artifact, Kernel, LoweredCrate, Module, T
 use gpurs_nvvm::{TOOLKIT_ENVIRONMENT, Toolkit};
 use serde_json::{Map, Value, json};
 
-use crate::{
-    object,
-    wrapper::{self, COMPILER_LIBRARY},
-};
+use crate::wrapper::{self, COMPILER_LIBRARY};
 
 /// Configures compilation of the selected target's GPU kernels for `architecture`.
 pub fn compile(architecture: &str) {
@@ -128,9 +125,9 @@ pub fn compile_architectures(architectures: &[&str]) {
     });
     let mut artifact = compiled.next().unwrap();
     artifact.alternatives = compiled.collect();
-    let object = directory.join("gpurs_artifact.o");
-    object::write_object(&artifact.encode(), &object);
-    println!("cargo::rustc-link-arg={}", object.display());
+    let image = directory.join("gpurs_artifact.bin");
+    fs::write(&image, artifact.encode()).unwrap_or_else(|error| fail(&error.to_string()));
+    println!("cargo::rustc-env=GPURS_ARTIFACT={}", image.display());
     println!("cargo::rerun-if-changed={COMPILER_LIBRARY}");
     for name in TOOLKIT_ENVIRONMENT.into_iter().chain([
         "GPURS_STRICTNESS",

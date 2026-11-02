@@ -25,6 +25,7 @@ pub(crate) fn expand_function(function: ItemFn) -> Tokens {
     let tail = function.sig.ident.to_string();
     let type_parameters = launcher::type_parameters(&function.sig.generics);
     let visibility = &function.vis;
+    let root = launcher::root(&function.sig, &type_parameters, None, &tail);
     let mut references = References::default();
     references.visit_item_fn(&function);
     let values = references.values.values().filter(|path| {
@@ -45,6 +46,7 @@ pub(crate) fn expand_function(function: ItemFn) -> Tokens {
     quote! {
         #[allow(clippy::too_many_arguments)]
         #visibility #launcher
+        #root
 
         #(
             #[allow(dead_code)]
@@ -61,6 +63,7 @@ pub(crate) fn expand_implementation(mut implementation: ItemImpl, host_only: boo
     };
     let impl_parameters = launcher::type_parameters(&implementation.generics);
     let mut launchers = Vec::new();
+    let mut roots = Vec::new();
     for item in &mut implementation.items {
         let ImplItem::Fn(method) = item else { continue };
         let mut error = None;
@@ -90,6 +93,12 @@ pub(crate) fn expand_implementation(mut implementation: ItemImpl, host_only: boo
             parameters.extend(launcher::type_parameters(&method.sig.generics));
             let signature = launcher::replace_self(method.sig.to_token_stream(), self_type);
             let signature: Signature = syn::parse2(signature).expect("signature stays valid");
+            roots.push(launcher::root(
+                &signature,
+                &parameters,
+                Some(self_type),
+                &tail,
+            ));
             let name = &method.sig.ident;
             let arguments =
                 method
@@ -137,6 +146,7 @@ pub(crate) fn expand_implementation(mut implementation: ItemImpl, host_only: boo
     let implementation = (!host_only).then_some(&implementation);
     quote! {
         #implementation
+        #(#roots)*
 
         #[allow(non_camel_case_types, clippy::too_many_arguments)]
         trait #name<#(#trait_parameters),*> {

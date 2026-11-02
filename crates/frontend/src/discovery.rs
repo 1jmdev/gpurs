@@ -65,7 +65,7 @@ impl MirVisitor for HostView {
 
 impl HostView {
     pub(crate) fn analyze(&mut self, sess: Session<'_>) {
-        self.pending.extend(sess.entry());
+        self.pending.extend(sess.entries());
         let mut visited = FxHashSet::default();
         while let Some(instance) = self.pending.pop() {
             if visited.insert(instance) {

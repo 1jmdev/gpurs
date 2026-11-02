@@ -13,9 +13,6 @@ pub use primitive::{Convergence, Lowering, Memory, Operand, Primitive, Proof};
 use serde::{Deserialize, Serialize};
 pub use target::{Compatibility, ParseTargetError, Target};
 
-/// Symbol under which `gpurs-build` links the serialized artifact into each binary.
-pub const ARTIFACT_SYMBOL: &str = "__gpurs_artifact";
-
 pub const STATUS_OFFSET: u64 = 0;
 pub const RESULT_OFFSET: u64 = 8;
 pub const PARAMETERS_OFFSET: u64 = 16;

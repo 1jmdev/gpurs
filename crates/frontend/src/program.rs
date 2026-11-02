@@ -2,6 +2,7 @@ use gpurs_artifact::TransferType;
 use gpurs_rustc::{
     CrateDef, CrateItem, GenericArgKind, GenericArgs, Instance, RigidTy, Session, Ty, TyKind,
 };
+use gpurs_verifier::transfer;
 
 use crate::discovery::HostView;
 
@@ -91,6 +92,29 @@ pub fn analyze(sess: Session<'_>) -> Program {
                 continue;
             }
         };
+        let body = sess.body(instance);
+        for ty in body
+            .arg_locals()
+            .iter()
+            .map(|local| local.ty)
+            .chain([body.ret_local().ty])
+        {
+            let ty = match ty.kind() {
+                TyKind::RigidTy(RigidTy::Ref(_, ty, _)) => match ty.kind() {
+                    TyKind::RigidTy(RigidTy::Slice(element)) => element,
+                    _ => ty,
+                },
+                _ => ty,
+            };
+            if transfer::opaque_descriptor(sess, ty) {
+                continue;
+            }
+            match transfer::descriptor(sess, ty) {
+                Ok(descriptor) if !host.types.contains(&descriptor) => host.types.push(descriptor),
+                Ok(_) => {}
+                Err(message) => sess.err(message),
+            }
+        }
         kernels.push(Kernel {
             key: launch.key,
             instance,

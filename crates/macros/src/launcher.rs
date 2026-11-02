@@ -1,6 +1,8 @@
+use std::env;
+
 use proc_macro2::{Delimiter, Group, TokenStream as Tokens, TokenTree};
 use quote::{ToTokens, format_ident, quote};
-use syn::{FnArg, GenericParam, Generics, ReturnType, Signature, Type};
+use syn::{FnArg, GenericParam, Generics, ReceiverKind, ReturnType, Signature, Type};
 
 pub(crate) fn type_parameters(generics: &Generics) -> Vec<Tokens> {
     generics
@@ -18,6 +20,61 @@ pub(crate) fn type_parameters(generics: &Generics) -> Vec<Tokens> {
             GenericParam::Lifetime(_) => None,
         })
         .collect()
+}
+
+pub(crate) fn root(
+    signature: &Signature,
+    generics: &[Tokens],
+    receiver: Option<&Type>,
+    tail: &str,
+) -> Tokens {
+    if !generics.is_empty() || env::var_os("GPURS_DEVICE_BUILD").is_none() {
+        return Tokens::new();
+    }
+    let name = &signature.ident;
+    let root = format_ident!(
+        "__gpurs_compile_{}",
+        tail.replace(|character: char| !character.is_alphanumeric(), "_")
+    );
+    let mut inputs = Vec::new();
+    let mut arguments = Vec::new();
+    for (index, input) in signature.inputs.iter().enumerate() {
+        let argument = format_ident!("__argument_{index}");
+        let ty = match input {
+            FnArg::Receiver(reference) => {
+                let mutable = matches!(reference.kind, ReceiverKind::Reference(_, _, Some(_)))
+                    .then(|| quote!(mut));
+                quote!(&#mutable ::gpurs::DeviceValue<#receiver>)
+            }
+            FnArg::Typed(input) => match &*input.ty {
+                Type::Reference(reference) => {
+                    let mutable = &reference.mutability;
+                    match &*reference.elem {
+                        Type::Slice(slice) => {
+                            let element = &slice.elem;
+                            quote!(&#mutable ::gpurs::Buffer<#element>)
+                        }
+                        element => quote!(&#mutable ::gpurs::DeviceValue<#element>),
+                    }
+                }
+                value => quote!(#value),
+            },
+        };
+        inputs.push(quote!(#argument: #ty));
+        arguments.push(argument);
+    }
+    let call = if receiver.is_some() {
+        let receiver = arguments.remove(0);
+        quote!(#receiver.#name(stream, #(#arguments),*))
+    } else {
+        quote!(#name(stream, #(#arguments),*))
+    };
+    quote! {
+        #[doc(hidden)]
+        pub fn #root(stream: &::gpurs::ConfiguredStream<'_>, #(#inputs),*) {
+            let _ = #call;
+        }
+    }
 }
 
 /// Builds the host launcher `fn` for a GPU signature; `receiver` is `Some(mutable)` for methods.
@@ -99,10 +156,23 @@ pub(crate) fn launcher(
         }
         _ => quote!(<__S as ::gpurs::Launch>::unit(__result)),
     };
+    let artifact = if env::var_os("GPURS_DEVICE_BUILD").is_none()
+        && env::var_os("GPURS_LIBRARY_VIEW").is_none()
+    {
+        quote! {
+            #[used]
+            #[unsafe(link_section = "gpurs_artifacts")]
+            static __ARTIFACT: &[u8] = include_bytes!(env!("GPURS_ARTIFACT"));
+            ::core::hint::black_box(__ARTIFACT);
+        }
+    } else {
+        Tokens::new()
+    };
     let generic_parameters = signature.generics.params.iter();
     let where_clause = &signature.generics.where_clause;
     quote! {
         fn #name<#(#generic_parameters,)* __S: ::gpurs::Launch>(#(#inputs),*) #output #where_clause {
+            #artifact
             #reference
             ::std::thread_local! {
                 static __KERNEL: ::gpurs::__private::KernelCache = const {

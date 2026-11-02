@@ -20,7 +20,7 @@ gpurs = { git = "https://github.com/1jmdev/gpurs" }
 gpurs-build = { git = "https://github.com/1jmdev/gpurs" }
 ```
 
-Add `build.rs` and choose the compute architecture for your GPU:
+Add `build.rs` only to crates defining GPU kernels, and choose the compute architecture:
 
 ```rust
 fn main() {
@@ -30,7 +30,7 @@ fn main() {
 
 The executable contains kernels compiled for the selected architecture. Choose one compatible with the GPU that will run it.
 
-Kernels can live in library crates and be re-exported from `lib.rs` like ordinary functions. Executables import and call their launchers directly; the build integration discovers and embeds them automatically, without an embedding macro. Kernel libraries do not need their own build script.
+Kernels can live in library crates and be re-exported from `lib.rs` like ordinary functions. Executables import and call their launchers directly; the build integration discovers and embeds them automatically, without an embedding macro. Kernel libraries embed their own artifacts; crates that only call them need neither a build script nor `gpurs-build`. Generic kernel specializations must be reachable from concrete functions in a crate with build integration.
 
 ## A GPU pipeline
 

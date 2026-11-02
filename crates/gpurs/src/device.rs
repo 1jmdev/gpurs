@@ -88,25 +88,7 @@ impl Gpu {
     pub fn try_from_context(context: Context) -> Result<Self> {
         let _context = context.try_enter()?;
         context.try_set_pool_release_threshold(u64::MAX)?;
-        let mut artifact = embedded_artifact()?;
-        let capability = context.try_compute_capability()?;
-        let mut candidates = mem::take(&mut artifact.alternatives);
-        candidates.push(artifact);
-        let artifact = candidates
-            .into_iter()
-            .filter_map(|artifact| {
-                let target: Target = artifact.architecture.parse().ok()?;
-                let native = target.supports(capability);
-                (native || target.supports_ptx(capability))
-                    .then_some(((native, target.capability()), artifact))
-            })
-            .max_by_key(|(priority, _)| *priority)
-            .map(|(_, artifact)| artifact)
-            .ok_or_else(|| {
-                Error::InvalidOperation(
-                    "no embedded GPU image or PTX target is compatible with this device".to_owned(),
-                )
-            })?;
+        let artifact = embedded_artifact(context.try_compute_capability()?)?;
         let release = Rc::new(driver::Stream::try_with_context(&context, 0)?);
         let device = Device {
             scatter_validation: OnceCell::new(),
@@ -323,12 +305,7 @@ impl Device {
             )));
         };
         if self.modules[index].get().is_none() {
-            let target: Target = self
-                .artifact
-                .architecture
-                .parse()
-                .expect("valid artifact target");
-            let module = if target.supports(self.context.try_compute_capability()?) {
+            let module = if !self.artifact.modules[index].cubin.is_empty() {
                 Module::try_load(&self.artifact.modules[index].cubin)?
             } else {
                 Module::try_load_ptx(&self.artifact.modules[index].ptx)?
@@ -466,18 +443,64 @@ impl Drop for Device {
     }
 }
 
-fn embedded_artifact() -> Result<Artifact> {
+#[used]
+#[unsafe(link_section = "gpurs_artifacts")]
+static EMPTY_ARTIFACT: &[u8] = &[];
+
+fn embedded_artifact(capability: u32) -> Result<Artifact> {
     unsafe extern "C" {
-        #[link_name = "__gpurs_artifact"]
-        static ARTIFACT: *const u64;
+        static __start_gpurs_artifacts: u8;
+        static __stop_gpurs_artifacts: u8;
     }
-    // SAFETY: `gpurs-build` links the artifact into every binary that depends on gpurs.
-    let header = std::ptr::addr_of!(ARTIFACT).cast::<u64>();
-    // SAFETY: `gpurs-build` emits the artifact as a little-endian length followed by its bytes.
-    let bytes = unsafe {
-        let length = header.read_unaligned() as usize;
-        slice::from_raw_parts(header.add(1).cast::<u8>(), length)
+    let start = &raw const __start_gpurs_artifacts;
+    let end = &raw const __stop_gpurs_artifacts;
+    // SAFETY: the linker section contains aligned static byte slices emitted by the GPU macro.
+    let images = unsafe {
+        slice::from_raw_parts(
+            start.cast::<&[u8]>(),
+            (end as usize - start as usize) / mem::size_of::<&[u8]>(),
+        )
     };
-    Artifact::decode(bytes)
-        .map_err(|error| Error::InvalidOperation(format!("invalid embedded GPU artifact: {error}")))
+    let mut merged = Artifact::default();
+    let mut visited = Vec::new();
+    for bytes in images.iter().filter(|bytes| !bytes.is_empty()) {
+        if visited.contains(&bytes.as_ptr()) {
+            continue;
+        }
+        visited.push(bytes.as_ptr());
+        let mut artifact = Artifact::decode(bytes).map_err(|error| {
+            Error::InvalidOperation(format!("invalid embedded GPU artifact: {error}"))
+        })?;
+        let mut candidates = mem::take(&mut artifact.alternatives);
+        candidates.push(artifact);
+        let artifact = candidates
+            .into_iter()
+            .filter_map(|mut artifact| {
+                let target: Target = artifact.architecture.parse().ok()?;
+                let native = target.supports(capability);
+                if !native {
+                    for module in &mut artifact.modules {
+                        module.cubin.clear();
+                    }
+                }
+                (native || target.supports_ptx(capability))
+                    .then_some(((native, target.capability()), artifact))
+            })
+            .max_by_key(|(priority, _)| *priority)
+            .map(|(_, artifact)| artifact)
+            .ok_or_else(|| {
+                Error::InvalidOperation(
+                    "no embedded GPU image or PTX target is compatible with this device".to_owned(),
+                )
+            })?;
+        merged.architecture = artifact.architecture;
+        merged.compiler = artifact.compiler;
+        merged.modules.extend(artifact.modules);
+        for descriptor in artifact.types {
+            if !merged.types.contains(&descriptor) {
+                merged.types.push(descriptor);
+            }
+        }
+    }
+    Ok(merged)
 }

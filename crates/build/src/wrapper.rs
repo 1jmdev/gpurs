@@ -21,10 +21,6 @@ pub(crate) fn run_wrapper() -> i32 {
         return run_library(&arguments);
     }
     let target = env::var("CARGO_PKG_NAME").ok() == env::var("GPURS_PACKAGE").ok()
-        && (arguments
-            .windows(2)
-            .any(|pair| pair[0] == "--crate-type" && pair[1] == "bin")
-            || arguments.iter().any(|argument| argument == "--test"))
         && !arguments
             .iter()
             .any(|argument| argument == "build_script_build")
