@@ -39,8 +39,6 @@ pub struct FunctionBuilder<'m, 'sess> {
     /// The IR blocks of further copies, and the copies awaiting lowering.
     copies: FxHashMap<(usize, Vec<u64>), gpurs_ir::Block>,
     pending: Vec<(usize, Vec<u64>)>,
-    /// The block an unrolled loop continues to after its last iteration, which is unreachable.
-    exhausted: Option<gpurs_ir::Block>,
     /// The checks this certified copy omits or records; `None` for the instrumented copy.
     pub certificate: Option<Certificate>,
     /// Blocks whose divisions follow a recorded zero-divisor check and use a safe divisor.
@@ -71,7 +69,6 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
             copy: Vec::new(),
             copies: FxHashMap::default(),
             pending: Vec::new(),
-            exhausted: None,
             certificate: None,
             guarded: FxHashSet::default(),
             linear: false,
@@ -160,16 +157,13 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
         let from = self.enclosing(self.block);
         let mut copy = Vec::new();
         for unrolled in self.enclosing(block) {
-            let Loop { header, count, .. } = self.unrolled[unrolled];
             let index = match from.iter().position(|&enclosing| enclosing == unrolled) {
-                Some(position) if block == header => self.copy[position] + 1,
+                Some(position) if block == self.unrolled[unrolled].header => {
+                    self.copy[position] + 1
+                }
                 Some(position) => self.copy[position],
                 None => 0,
             };
-            // Copy `count` only finds the range exhausted; its body is never entered.
-            if index > count {
-                return self.exhausted();
-            }
             copy.push(index);
         }
         self.instance(block, copy)
@@ -198,17 +192,39 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
         target
     }
 
-    fn exhausted(&mut self) -> gpurs_ir::Block {
-        if let Some(block) = self.exhausted {
-            return block;
+    /// Ends the header of an unrolled loop in its current copy: stores the item `Range::next`
+    /// returns there, lowers the block switching on it, and branches to the arm it selects.
+    /// Copy `count` finds the range exhausted and leaves the loop.
+    fn advance(&mut self, unrolled: usize) {
+        let Loop {
+            start,
+            count,
+            item,
+            next,
+            body,
+            exit,
+            ..
+        } = self.unrolled[unrolled];
+        let position = self
+            .enclosing(self.block)
+            .iter()
+            .position(|&enclosing| enclosing == unrolled)
+            .expect("the header of an unrolled loop is inside it");
+        let index = self.copy[position];
+        let place = self.locals[item].clone();
+        let variant = place.shape.variants[usize::from(index < count)];
+        if index < count {
+            let some = self.downcast(&place, variant);
+            let value = self.field(&some, 0, Ty::usize_ty());
+            self.assign(&value, Value::Scalar(IRValue::i64(start + index)));
         }
-        let current = self.ir.current();
-        let block = self.ir.fresh_block("exhausted");
-        self.ir.position(block);
-        self.ir.unreachable();
-        self.ir.position(current);
-        self.exhausted = Some(block);
-        block
+        self.set_discriminant(&place, variant);
+        let statements = self.body.clone();
+        for statement in &statements.blocks[next].statements {
+            self.span = statement.source_info.span;
+            self.statement(&statement.kind);
+        }
+        self.branch(if index < count { body } else { exit });
     }
 
     /// Lowers the body as the function `name` and adds it to the module.
@@ -313,7 +329,11 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
             }
             let terminator = &body.blocks[block].terminator;
             self.span = terminator.source_info.span;
-            self.terminator(&terminator.kind, &signature.result);
+            match (0..self.unrolled.len()).find(|&unrolled| self.unrolled[unrolled].header == block)
+            {
+                Some(unrolled) => self.advance(unrolled),
+                None => self.terminator(&terminator.kind, &signature.result),
+            }
         }
         self.module.ir.define(self.ir);
     }

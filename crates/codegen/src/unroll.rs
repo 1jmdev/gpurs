@@ -1,8 +1,10 @@
 //! Full unrolling of loops over constant ranges.
 //!
 //! A `for` loop over a range with constant bounds and few iterations is lowered as one copy of
-//! its body per iteration, as nvcc does for small constant loops. Arrays indexed by the loop
-//! variable, such as tensor-core fragments, then have constant indices and stay in registers.
+//! its body per iteration, as nvcc does for small constant loops. Each copy stores the item its
+//! `Range::next` call would return and branches to the body or the exit directly, so neither the
+//! call nor the switch on its result reaches libNVVM. Arrays indexed by the loop variable, such
+//! as tensor-core fragments, then have constant indices and stay in registers.
 
 use gpurs_rustc::{
     AggregateKind, Body, ConstOperand, ConstantKind, Dominators, FxHashMap, FxHashSet, Graph,
@@ -14,126 +16,231 @@ use gpurs_rustc::{
 const ITERATIONS: u64 = 16;
 /// The most MIR statements the copies of one loop may add.
 const STATEMENTS: usize = 4096;
+/// The most moves and `into_iter` calls followed from a loop's iterator back to its range.
+const DEPTH: usize = 4;
 
 /// A loop lowered as `count` copies of its body.
 pub struct Loop {
+    /// The loop header, which calls `Range::next` once per iteration.
     pub header: usize,
     pub blocks: FxHashSet<usize>,
+    pub start: u64,
     pub count: u64,
+    /// The `Option<usize>` local receiving the item of each iteration.
+    pub item: Local,
+    /// The block switching on the item, and its targets for an item and for the exhausted range.
+    pub next: usize,
+    pub body: usize,
+    pub exit: usize,
+}
+
+/// The single definitions and the uses of every local of a body.
+struct Definitions<'body> {
+    body: &'body Body,
+    /// The right side of each local's only assignment.
+    assignments: FxHashMap<Local, &'body Rvalue>,
+    /// The block whose call defines each local.
+    calls: FxHashMap<Local, usize>,
+    /// How often each local is mentioned outside storage markers.
+    mentions: FxHashMap<Local, usize>,
 }
 
 /// The loops of `body` to unroll, outermost first.
 pub fn loops(body: &Body) -> Vec<Loop> {
-    let mentions = mentions(body);
+    let definitions = Definitions::of(body);
     let graph = Graph::of(body);
     let dominators = graph.dominators();
     let mut loops: Vec<Loop> = (0..body.blocks.len())
-        .filter_map(|advance| {
-            let count = iterations(body, &mentions, advance)?;
-            let (header, blocks) = innermost_loop(&graph, &dominators, advance)?;
+        .filter_map(|header| {
+            let (item, start, count) = definitions.iteration(header)?;
+            let blocks = natural_loop(&graph, &dominators, header)?;
             let statements: usize = blocks
                 .iter()
                 .map(|&block| body.blocks[block].statements.len() + 1)
                 .sum();
-            (count <= ITERATIONS && statements * count as usize <= STATEMENTS).then_some(Loop {
-                header,
-                blocks,
-                count,
-            })
+            if count > ITERATIONS || statements * count as usize > STATEMENTS {
+                return None;
+            }
+            let TerminatorKind::Call {
+                target: Some(next), ..
+            } = body.blocks[header].terminator.kind
+            else {
+                return None;
+            };
+            let (entry, exit) = definitions.arms(next, item)?;
+            (blocks.contains(&next) && blocks.contains(&entry) && !blocks.contains(&exit))
+                .then_some(Loop {
+                    header,
+                    blocks,
+                    start,
+                    count,
+                    item,
+                    next,
+                    body: entry,
+                    exit,
+                })
         })
         .collect();
     loops.sort_by_key(|unrolled| std::cmp::Reverse(unrolled.blocks.len()));
     loops
 }
 
-/// The iterations of the loop advanced by block `advance`, when it calls `Range::next` on a range
-/// with constant bounds that nothing else touches.
-fn iterations(body: &Body, mentions: &FxHashMap<Local, usize>, advance: usize) -> Option<u64> {
-    let TerminatorKind::Call {
-        func,
-        args,
-        target: Some(_),
-        ..
-    } = &body.blocks[advance].terminator.kind
-    else {
-        return None;
-    };
-    let TyKind::RigidTy(RigidTy::FnDef(definition, arguments)) =
-        func.ty(body.locals()).ok()?.kind()
-    else {
-        return None;
-    };
-    let name = Instance::resolve(definition, &arguments).ok()?.name();
-    if !name.ends_with("Iterator for std::ops::Range<usize>>::next") {
-        return None;
-    }
-    let [Operand::Move(reference) | Operand::Copy(reference)] = args.as_slice() else {
-        return None;
-    };
-    let Rvalue::Ref(_, _, iterator) = definition_of(body, local(reference)?)? else {
-        return None;
-    };
-    let iterator = local(&iterator)?;
-    // The definition and the borrow above are its only uses, so the body cannot advance it.
-    if mentions.get(&iterator) != Some(&2) {
-        return None;
-    }
-    let (start, end) = range(body, iterator, 4)?;
-    (end > start).then(|| end - start)
-}
-
-/// The constant bounds of the `Range<usize>` that `local` holds, following moves and
-/// `into_iter`.
-fn range(body: &Body, local: Local, depth: usize) -> Option<(u64, u64)> {
-    if depth == 0 {
-        return None;
-    }
-    match definition_of(body, local) {
-        Some(Rvalue::Aggregate(AggregateKind::Adt(..), operands)) => match operands.as_slice() {
-            [Operand::Constant(start), Operand::Constant(end)] => {
-                Some((*words(start)?.first()?, *words(end)?.first()?))
+impl<'body> Definitions<'body> {
+    fn of(body: &'body Body) -> Self {
+        struct Mentions(FxHashMap<Local, usize>);
+        impl MirVisitor for Mentions {
+            fn visit_local(&mut self, local: &Local, _: PlaceContext, _: Location) {
+                *self.0.entry(*local).or_default() += 1;
             }
-            _ => None,
-        },
-        Some(Rvalue::Use(operand, _)) => bounds(body, &operand, depth),
-        Some(_) => None,
-        None => body
-            .blocks
-            .iter()
-            .find_map(|block| match &block.terminator.kind {
-                TerminatorKind::Call {
-                    func,
-                    args,
-                    destination,
-                    ..
-                } if self::local(destination) == Some(local) => {
-                    let TyKind::RigidTy(RigidTy::FnDef(definition, arguments)) =
-                        func.ty(body.locals()).ok()?.kind()
-                    else {
-                        return None;
-                    };
-                    let name = Instance::resolve(definition, &arguments).ok()?.name();
-                    let [operand] = args.as_slice() else {
-                        return None;
-                    };
-                    name.ends_with("Range<usize> as std::iter::IntoIterator>::into_iter")
-                        .then(|| bounds(body, operand, depth))
-                        .flatten()
+        }
+        let mut assignments = FxHashMap::default();
+        let mut repeated = FxHashSet::default();
+        let mut calls = FxHashMap::default();
+        let mut mentions = Mentions(FxHashMap::default());
+        for (index, block) in body.blocks.iter().enumerate() {
+            for (position, statement) in block.statements.iter().enumerate() {
+                match &statement.kind {
+                    StatementKind::StorageLive(_) | StatementKind::StorageDead(_) => continue,
+                    StatementKind::Assign(place, rvalue) => {
+                        if let Some(local) = local(place)
+                            && assignments.insert(local, rvalue).is_some()
+                        {
+                            repeated.insert(local);
+                        }
+                    }
+                    _ => {}
                 }
-                _ => None,
-            }),
+                mentions.visit_statement(statement, statement_location(body, &index, position));
+            }
+            if let TerminatorKind::Call { destination, .. } = &block.terminator.kind
+                && let Some(local) = local(destination)
+            {
+                calls.insert(local, index);
+            }
+            mentions.visit_terminator(&block.terminator, terminator_location(body, &index));
+        }
+        assignments.retain(|local, _| !repeated.contains(local));
+        Definitions {
+            body,
+            assignments,
+            calls,
+            mentions: mentions.0,
+        }
     }
-}
 
-/// The bounds of a range operand: a constant range, or a local holding one.
-fn bounds(body: &Body, operand: &Operand, depth: usize) -> Option<(u64, u64)> {
-    match operand {
-        Operand::Constant(constant) => match words(constant)?.as_slice() {
-            [start, end] => Some((*start, *end)),
+    /// The item local, first value, and iteration count of the loop whose header `block` calls
+    /// `Range::next` on a range with constant bounds that nothing else touches.
+    fn iteration(&self, block: usize) -> Option<(Local, u64, u64)> {
+        let TerminatorKind::Call {
+            args, destination, ..
+        } = &self.body.blocks[block].terminator.kind
+        else {
+            return None;
+        };
+        if !self
+            .callee(block)?
+            .ends_with("Iterator for std::ops::Range<usize>>::next")
+        {
+            return None;
+        }
+        let [Operand::Move(reference) | Operand::Copy(reference)] = args.as_slice() else {
+            return None;
+        };
+        let Rvalue::Ref(_, _, iterator) = self.assignments.get(&local(reference)?)? else {
+            return None;
+        };
+        let iterator = local(iterator)?;
+        // The definition and the borrow above are its only uses, so the body cannot advance it.
+        if self.mentions.get(&iterator) != Some(&2) {
+            return None;
+        }
+        let item = local(destination)?;
+        let (start, end) = self.range(iterator, DEPTH)?;
+        (end > start).then_some((item, start, end - start))
+    }
+
+    /// The targets for an item and for the exhausted range of block `next`, which switches on
+    /// the discriminant of `item`.
+    fn arms(&self, next: usize, item: Local) -> Option<(usize, usize)> {
+        let TerminatorKind::SwitchInt {
+            discr: Operand::Move(discriminant) | Operand::Copy(discriminant),
+            targets,
+        } = &self.body.blocks[next].terminator.kind
+        else {
+            return None;
+        };
+        let defined =
+            self.body.blocks[next]
+                .statements
+                .iter()
+                .any(|statement| match &statement.kind {
+                    StatementKind::Assign(place, Rvalue::Discriminant(option)) => {
+                        local(place).is_some_and(|place| local(discriminant) == Some(place))
+                            && local(option) == Some(item)
+                    }
+                    _ => false,
+                });
+        let mut branches = targets.branches();
+        match (defined, branches.next(), branches.next(), branches.next()) {
+            (true, Some((0, exit)), Some((1, body)), None) => Some((body, exit)),
             _ => None,
-        },
-        Operand::Move(place) | Operand::Copy(place) => range(body, local(place)?, depth - 1),
-        _ => None,
+        }
+    }
+
+    /// The constant bounds of the `Range<usize>` that `local` holds, following moves and
+    /// `into_iter`.
+    fn range(&self, local: Local, depth: usize) -> Option<(u64, u64)> {
+        if depth == 0 {
+            return None;
+        }
+        if let Some(rvalue) = self.assignments.get(&local) {
+            return match rvalue {
+                Rvalue::Aggregate(AggregateKind::Adt(..), operands) => match operands.as_slice() {
+                    [Operand::Constant(start), Operand::Constant(end)] => {
+                        Some((*words(start)?.first()?, *words(end)?.first()?))
+                    }
+                    _ => None,
+                },
+                Rvalue::Use(operand, _) => self.bounds(operand, depth),
+                _ => None,
+            };
+        }
+        let block = *self.calls.get(&local)?;
+        let TerminatorKind::Call { args, .. } = &self.body.blocks[block].terminator.kind else {
+            return None;
+        };
+        let [operand] = args.as_slice() else {
+            return None;
+        };
+        self.callee(block)?
+            .ends_with("Range<usize> as std::iter::IntoIterator>::into_iter")
+            .then(|| self.bounds(operand, depth))
+            .flatten()
+    }
+
+    /// The bounds of a range operand: a constant range, or a local holding one.
+    fn bounds(&self, operand: &Operand, depth: usize) -> Option<(u64, u64)> {
+        match operand {
+            Operand::Constant(constant) => match words(constant)?.as_slice() {
+                [start, end] => Some((*start, *end)),
+                _ => None,
+            },
+            Operand::Move(place) | Operand::Copy(place) => self.range(local(place)?, depth - 1),
+            _ => None,
+        }
+    }
+
+    /// The name of the function the call ending `block` resolves to.
+    fn callee(&self, block: usize) -> Option<String> {
+        let TerminatorKind::Call { func, .. } = &self.body.blocks[block].terminator.kind else {
+            return None;
+        };
+        let TyKind::RigidTy(RigidTy::FnDef(definition, arguments)) =
+            func.ty(self.body.locals()).ok()?.kind()
+        else {
+            return None;
+        };
+        Some(Instance::resolve(definition, &arguments).ok()?.name())
     }
 }
 
@@ -146,82 +253,38 @@ fn words(constant: &ConstOperand) -> Option<Vec<u64>> {
     (bytes.len() % 8 == 0).then(|| {
         bytes
             .chunks(8)
-            .map(|word| u64::from_le_bytes(word.try_into().unwrap()))
+            .map(|word| u64::from_le_bytes(word.try_into().expect("chunks of eight bytes")))
             .collect()
     })
-}
-
-/// The right side of the only assignment to `local`.
-fn definition_of(body: &Body, local: Local) -> Option<Rvalue> {
-    let mut definitions = body
-        .blocks
-        .iter()
-        .flat_map(|block| &block.statements)
-        .filter_map(|statement| match &statement.kind {
-            StatementKind::Assign(place, rvalue) if self::local(place) == Some(local) => {
-                Some(rvalue.clone())
-            }
-            _ => None,
-        });
-    let definition = definitions.next()?;
-    definitions.next().is_none().then_some(definition)
 }
 
 fn local(place: &Place) -> Option<Local> {
     place.projection.is_empty().then_some(place.local)
 }
 
-/// How often each local is mentioned outside storage markers.
-fn mentions(body: &Body) -> FxHashMap<Local, usize> {
-    struct Mentions(FxHashMap<Local, usize>);
-    impl MirVisitor for Mentions {
-        fn visit_local(&mut self, local: &Local, _: PlaceContext, _: Location) {
-            *self.0.entry(*local).or_default() += 1;
-        }
-    }
-    let mut visitor = Mentions(FxHashMap::default());
-    for (index, block) in body.blocks.iter().enumerate() {
-        for (position, statement) in block.statements.iter().enumerate() {
-            if !matches!(
-                statement.kind,
-                StatementKind::StorageLive(_) | StatementKind::StorageDead(_)
-            ) {
-                visitor.visit_statement(statement, statement_location(body, &index, position));
-            }
-        }
-        visitor.visit_terminator(&block.terminator, terminator_location(body, &index));
-    }
-    visitor.0
-}
-
-/// The header and blocks of the innermost natural loop containing `block`.
-fn innermost_loop(
+/// The blocks of the natural loop headed by `header`, when its back edges come from blocks it
+/// dominates.
+fn natural_loop(
     graph: &Graph,
     dominators: &Dominators<usize>,
-    block: usize,
-) -> Option<(usize, FxHashSet<usize>)> {
+    header: usize,
+) -> Option<FxHashSet<usize>> {
     let reachable = |source: &&usize| dominators.is_reachable(**source);
-    let mut header = block;
-    loop {
-        let latches: Vec<usize> = graph
-            .predecessors(header)
-            .iter()
-            .filter(reachable)
-            .filter(|&&source| dominators.dominates(header, source))
-            .copied()
-            .collect();
-        if !latches.is_empty() {
-            let mut blocks = FxHashSet::from_iter([header]);
-            let mut pending = latches;
-            while let Some(source) = pending.pop() {
-                if blocks.insert(source) {
-                    pending.extend(graph.predecessors(source).iter().filter(reachable));
-                }
-            }
-            if blocks.contains(&block) {
-                return Some((header, blocks));
-            }
-        }
-        header = dominators.immediate_dominator(header)?;
+    let mut pending: Vec<usize> = graph
+        .predecessors(header)
+        .iter()
+        .filter(reachable)
+        .filter(|&&source| dominators.dominates(header, source))
+        .copied()
+        .collect();
+    if pending.is_empty() {
+        return None;
     }
+    let mut blocks = FxHashSet::from_iter([header]);
+    while let Some(source) = pending.pop() {
+        if blocks.insert(source) {
+            pending.extend(graph.predecessors(source).iter().filter(reachable));
+        }
+    }
+    Some(blocks)
 }
