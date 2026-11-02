@@ -44,7 +44,13 @@ fn atom(atom: &Atom, names: &Names) -> String {
     };
     let grouped = |polynomial: &Polynomial| {
         let text = self::polynomial(polynomial, names);
-        if polynomial.0.len() > 1 || polynomial.0.keys().any(|monomial| monomial.len() > 1) {
+        if polynomial.0.len() > 1
+            || polynomial
+                .0
+                .iter()
+                .map(|(monomial, _)| monomial)
+                .any(|monomial| monomial.len() > 1)
+        {
             format!("({text})")
         } else {
             text
@@ -79,15 +85,15 @@ pub fn predicate(predicate: &Predicate, names: &Names) -> String {
         } else {
             (&mut right, -coefficient)
         };
-        side.0.insert(monomial.clone(), value);
+        side.insert(monomial.clone(), value);
     }
     let mut relation = match predicate.relation {
         Relation::NonNegative => "≥",
         Relation::Zero => "=",
         Relation::NonZero => "≠",
     };
-    if predicate.relation == Relation::NonNegative && right.0.get(&Vec::new()) == Some(&1) {
-        right.0.remove(&Vec::new());
+    if predicate.relation == Relation::NonNegative && right.coefficient(&[]) == Some(&1) {
+        right.0.remove(0);
         relation = ">";
     }
     format!(

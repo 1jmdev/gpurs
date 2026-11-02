@@ -1,10 +1,11 @@
+use std::collections::{BTreeMap, BTreeSet};
+
 use gpurs_artifact::{self as artifact, Access, Extent, Parameter, Value};
 use gpurs_rustc::{
     CrateDef, Instance, Mutability, RigidTy, Session, Shape, TyKind, layout, session,
 };
 
 use crate::{
-    Certificate,
     analysis::{Analysis, Kind, Obligation},
     diagnostic::{self, Warning},
     policy::{self, Strictness},
@@ -12,6 +13,24 @@ use crate::{
     symbolic::{self, Clause},
     transfer,
 };
+
+/// Which checks of one function copy the verifier discharged, by MIR block.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Certificate {
+    /// Blocks whose assertion or panic cannot fail; their checks are omitted.
+    pub discharged: BTreeSet<usize>,
+    /// Blocks whose data-dependent arithmetic check records the failure and continues.
+    pub recorded: BTreeSet<usize>,
+    /// Certificates of the callees, by call block.
+    pub calls: BTreeMap<usize, Certificate>,
+}
+
+impl Certificate {
+    /// Whether a check of this copy or of a callee reports through the status word.
+    pub fn records(&self) -> bool {
+        !self.recorded.is_empty() || self.calls.values().any(Certificate::records)
+    }
+}
 
 #[derive(Clone)]
 pub struct KernelParameter {
@@ -119,11 +138,14 @@ pub fn kernel(
 
     let mut analysis = Analysis::new(sess, instance, &parameters);
     analysis.run();
+    if analysis.failure.is_none() {
+        analysis.collective_control();
+    }
     let span = instance.def.def_id().span();
-    let extent = if result.is_some() || !analysis.uses_index {
+    let extent = if result.is_some() || !analysis.findings.uses_index {
         Extent::Single
-    } else if !analysis.geometry && analysis.lengths.len() == 1 {
-        Extent::Length(analysis.lengths[0])
+    } else if !analysis.findings.geometry && analysis.findings.lengths.len() == 1 {
+        Extent::Length(analysis.findings.lengths[0])
     } else {
         Extent::Explicit
     };
@@ -140,6 +162,7 @@ pub fn kernel(
     }
 
     let residual: Vec<&Obligation> = analysis
+        .findings
         .obligations
         .iter()
         .filter(|obligation| obligation.verdict.is_none() && obligation.kind != Kind::Arithmetic)
@@ -160,6 +183,7 @@ pub fn kernel(
     };
     let mut preconditions: Vec<Clause> = Vec::new();
     for clause in analysis
+        .findings
         .obligations
         .iter()
         .filter_map(|obligation| obligation.verdict.as_ref())
@@ -196,7 +220,7 @@ pub fn kernel(
         parameters: parameters.clone(),
         extent,
         result,
-        requirements: clauses(&analysis.requirements),
+        requirements: clauses(&analysis.findings.requirements),
         preconditions: if certified {
             clauses(&preconditions)
         } else {
@@ -205,7 +229,7 @@ pub fn kernel(
         certificate,
         status,
         instrumented: !effects.tensor && (!certified || policy::instrumented()),
-        uses_index: analysis.uses_index,
+        uses_index: analysis.findings.uses_index,
         asynchronous: effects.asynchronous,
     };
     Some(Verification {
@@ -218,7 +242,7 @@ pub fn kernel(
 /// Which checks of `context` and its callees the certified entry point omits or records.
 fn certify(analysis: &Analysis<'_, '_>, context: usize) -> Certificate {
     let mut certificate = Certificate::default();
-    for obligation in &analysis.obligations {
+    for obligation in &analysis.findings.obligations {
         if obligation.context != context {
             continue;
         }
@@ -228,7 +252,7 @@ fn certify(analysis: &Analysis<'_, '_>, context: usize) -> Certificate {
             certificate.recorded.insert(obligation.block);
         }
     }
-    certificate.calls = analysis.contexts[context]
+    certificate.calls = analysis.program.contexts[context]
         .calls
         .iter()
         .map(|(block, child)| (*block, certify(analysis, *child)))

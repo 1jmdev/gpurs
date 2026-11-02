@@ -1,11 +1,11 @@
-use std::rc::Rc;
-
 use gpurs_rustc::{
     AdtKind, AggregateKind, Allocation, ConstantKind, NonDivergingIntrinsic, Operand, RigidTy,
     Rvalue, Shape, StatementKind, Ty, TyConstKind, TyKind, UnOp, VariantIdx, session,
 };
 
-use super::{Analysis, Origin, Pointer, Region, State, Value, arithmetic, place::Location, state};
+use super::{
+    Analysis, Origin, Pointer, Region, State, Value, ValueData, arithmetic, place::Location, state,
+};
 use crate::{
     engine, policy,
     symbolic::{Atom, Polynomial},
@@ -35,12 +35,12 @@ impl Analysis<'_, '_> {
                     let mut value = state::get(&state.slots[slot], &path);
                     value.variant = variant;
                     value.guards.clear();
-                    state::set(&mut Rc::make_mut(&mut state.slots)[slot], &path, value);
+                    state::set(&mut state.slots.make_mut()[slot], &path, value);
                 }
             }
             StatementKind::StorageLive(local) | StatementKind::StorageDead(local) => {
                 let slot = self.frame().base + local;
-                Rc::make_mut(&mut state.slots)[slot] = Value::default();
+                state.slots.make_mut()[slot] = Value::varying(0);
             }
             StatementKind::Intrinsic(NonDivergingIntrinsic::CopyNonOverlapping(_))
                 if self.collect && self.quiet == 0 =>
@@ -83,14 +83,14 @@ impl Analysis<'_, '_> {
                 if value.fields.len() == 2 && value.pointer.is_some() {
                     return value.fields[1].clone();
                 }
-                match value.pointer {
+                match &value.pointer {
                     Some(Pointer::Memory(Origin {
                         region: Region::Parameter(parameter),
                         index: Some(index),
                         inner: false,
                         ..
                     })) if index.value() == Some(0) => {
-                        Value::integer(Polynomial::atom(Atom::Length(parameter)), 0)
+                        Value::integer(Polynomial::atom(Atom::Length(*parameter)), 0)
                     }
                     _ => Value::varying(value.variance),
                 }
@@ -100,7 +100,7 @@ impl Analysis<'_, '_> {
                 if self.operand_type(operand) != Some(Ty::bool_ty()) {
                     return Value::varying(value.variance);
                 }
-                Value {
+                Value::from(ValueData {
                     integer: value
                         .integer
                         .as_ref()
@@ -114,8 +114,8 @@ impl Analysis<'_, '_> {
                     domain: Some(2),
                     exact_guards: value.exact_guards,
                     variance: value.variance,
-                    ..Value::default()
-                }
+                    ..ValueData::default()
+                })
             }
             Rvalue::UnaryOp(_, operand) => Value::varying(self.operand(operand, state).variance),
             Rvalue::BinaryOp(operation, left, right) => {
@@ -131,42 +131,42 @@ impl Analysis<'_, '_> {
                     .collect();
                 let variance = fields.iter().map(|field| field.variance).max().unwrap_or(0);
                 match kind {
-                    AggregateKind::RawPtr(..) => Value {
+                    AggregateKind::RawPtr(..) => Value::from(ValueData {
                         pointer: fields[0].pointer.clone(),
                         fields,
                         variance,
-                        ..Value::default()
-                    },
-                    AggregateKind::Adt(definition, variant, ..) => Value {
+                        ..ValueData::default()
+                    }),
+                    AggregateKind::Adt(definition, variant, ..) => Value::from(ValueData {
                         variant: (definition.kind() == AdtKind::Enum)
                             .then(|| definition.discriminant_for_variant(*variant).val as i128),
                         domain: (definition.kind() == AdtKind::Enum)
                             .then(|| definition.num_variants()),
                         fields,
                         variance,
-                        ..Value::default()
-                    },
-                    _ => Value {
+                        ..ValueData::default()
+                    }),
+                    _ => Value::from(ValueData {
                         fields,
                         variance,
-                        ..Value::default()
-                    },
+                        ..ValueData::default()
+                    }),
                 }
             }
             Rvalue::Repeat(operand, _) => Value::varying(self.operand(operand, state).variance),
             Rvalue::Discriminant(place) => {
-                let value = self.read(place, state);
+                let value = self.read(place, state).into_inner();
                 let domain = match session::rigid(self.place_type(place)) {
                     RigidTy::Adt(definition, _) => Some(definition.num_variants()),
                     _ => None,
                 };
-                Value {
+                Value::from(ValueData {
                     integer: value.variant.map(Polynomial::constant),
                     guards: value.guards,
                     domain,
                     variance: value.variance,
-                    ..Value::default()
-                }
+                    ..ValueData::default()
+                })
             }
             _ => Value::varying(2),
         }
@@ -181,9 +181,9 @@ impl Analysis<'_, '_> {
                     ConstantKind::Allocated(allocation) => allocation.clone(),
                     ConstantKind::Ty(value) => match value.kind() {
                         TyConstKind::Value(_, allocation) => allocation.clone(),
-                        _ => return Value::default(),
+                        _ => return Value::varying(0),
                     },
-                    _ => return Value::default(),
+                    _ => return Value::varying(0),
                 };
                 if let Some(kind) = arithmetic::integer_kind(ty) {
                     let value = if kind.0 {
@@ -191,30 +191,30 @@ impl Analysis<'_, '_> {
                     } else {
                         allocation.read_uint().ok().map(|value| value as i128)
                     };
-                    return Value {
+                    return Value::from(ValueData {
                         integer: value.map(Polynomial::constant),
-                        ..Value::default()
-                    };
+                        ..ValueData::default()
+                    });
                 }
                 if ty == Ty::bool_ty() {
-                    return Value {
+                    return Value::from(ValueData {
                         integer: allocation
                             .read_bool()
                             .ok()
                             .map(|value| Polynomial::constant(value as i128)),
                         domain: Some(2),
-                        ..Value::default()
-                    };
+                        ..ValueData::default()
+                    });
                 }
                 self.aggregate_constant(ty, &allocation)
             }
-            Operand::RuntimeChecks(checks) => Value {
+            Operand::RuntimeChecks(checks) => Value::from(ValueData {
                 integer: Some(Polynomial::constant(
                     policy::runtime_check(self.sess, checks) as i128,
                 )),
                 domain: Some(2),
-                ..Value::default()
-            },
+                ..ValueData::default()
+            }),
         }
     }
 
@@ -225,7 +225,7 @@ impl Analysis<'_, '_> {
             TyKind::RigidTy(RigidTy::Adt(definition, _)) if definition.kind() == AdtKind::Struct
         ) && !matches!(ty.kind(), TyKind::RigidTy(RigidTy::Tuple(_)))
         {
-            return Value::default();
+            return Value::varying(0);
         }
         let shape = Shape::of(self.sess, ty);
         let bytes = session::allocation_bytes(allocation);
@@ -236,12 +236,12 @@ impl Analysis<'_, '_> {
             .enumerate()
             .map(|(field, element)| {
                 let Some(kind) = arithmetic::integer_kind(element) else {
-                    return Value::default();
+                    return Value::varying(0);
                 };
                 let start = shape.offset(field).bytes();
                 let size = kind.1.div_ceil(8) as usize;
                 let Some(bytes) = bytes.get(start..start + size) else {
-                    return Value::default();
+                    return Value::varying(0);
                 };
                 let mut integer = [if kind.0 && bytes[size - 1] & 128 != 0 {
                     255
@@ -249,21 +249,21 @@ impl Analysis<'_, '_> {
                     0
                 }; 16];
                 integer[..size].copy_from_slice(bytes);
-                Value {
+                Value::from(ValueData {
                     integer: if kind.0 {
                         Some(i128::from_le_bytes(integer))
                     } else {
                         i128::try_from(u128::from_le_bytes(integer)).ok()
                     }
                     .map(Polynomial::constant),
-                    ..Value::default()
-                }
+                    ..ValueData::default()
+                })
             })
             .collect();
-        Value {
+        Value::from(ValueData {
             fields,
-            ..Value::default()
-        }
+            ..ValueData::default()
+        })
     }
 }
 

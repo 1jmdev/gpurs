@@ -1,6 +1,6 @@
 use gpurs_rustc::{BinOp, FxHashSet};
 
-use super::{Analysis, Region, control};
+use super::{Analysis, Region, program};
 use crate::{
     proof::{self, Comparison, Proofs},
     symbolic::{Atom, Fact, Polynomial, Predicate, Relation, Requirement},
@@ -8,11 +8,11 @@ use crate::{
 
 impl Analysis<'_, '_> {
     pub fn races(&mut self) {
-        for index in 0..self.accesses.len() {
-            if !self.accesses[index].write {
+        for index in 0..self.findings.accesses.len() {
+            if !self.findings.accesses[index].write {
                 continue;
             }
-            let access = &self.accesses[index];
+            let access = &self.findings.accesses[index];
             let comparisons = proof::comparisons(&access.facts);
             let proofs = Proofs {
                 facts: &comparisons,
@@ -51,17 +51,19 @@ impl Analysis<'_, '_> {
                 })
             };
             let warp_barriers: FxHashSet<_> = self
+                .findings
                 .barriers
                 .iter()
                 .copied()
                 .chain(
-                    self.collectives
+                    self.findings
+                        .collectives
                         .iter()
                         .filter(|(_, permitted, _, _)| *permitted == 1)
                         .map(|(block, _, _, _)| *block),
                 )
                 .collect();
-            for other in &self.accesses {
+            for other in &self.findings.accesses {
                 if (access.origin.region != other.origin.region
                     && access.origin.region != Region::Unknown
                     && other.origin.region != Region::Unknown)
@@ -92,14 +94,14 @@ impl Analysis<'_, '_> {
                 }
                 let apart = |barriers: &FxHashSet<usize>| {
                     access.block != other.block
-                        && !control::reachable(
-                            &self.successors,
+                        && !program::reachable(
+                            &self.program.successors,
                             access.block,
                             other.block,
                             barriers,
                         )
-                        && !control::reachable(
-                            &self.successors,
+                        && !program::reachable(
+                            &self.program.successors,
                             other.block,
                             access.block,
                             barriers,
@@ -107,7 +109,7 @@ impl Analysis<'_, '_> {
                 };
                 let other_comparisons = proof::comparisons(&other.facts);
                 let separated = shared
-                    && (apart(&self.barriers)
+                    && (apart(&self.findings.barriers)
                         || (owner(&comparisons).is_some()
                             && owner(&comparisons) == owner(&other_comparisons)
                             && apart(&warp_barriers)));
@@ -123,13 +125,13 @@ impl Analysis<'_, '_> {
                 }
             }
             for clause in clauses {
-                if !self.requirements.contains(&clause) {
-                    self.requirements.push(clause);
+                if !self.findings.requirements.contains(&clause) {
+                    self.findings.requirements.push(clause);
                 }
             }
         }
-        for index in 0..self.accesses.len() {
-            let access = &self.accesses[index];
+        for index in 0..self.findings.accesses.len() {
+            let access = &self.findings.accesses[index];
             let Region::Shared(..) = access.origin.region else {
                 continue;
             };
@@ -137,6 +139,7 @@ impl Analysis<'_, '_> {
                 continue;
             }
             let writes: Vec<_> = self
+                .findings
                 .accesses
                 .iter()
                 .filter(|write| {
@@ -146,13 +149,13 @@ impl Analysis<'_, '_> {
                         && !write.origin.path.contains(&usize::MAX)
                 })
                 .filter_map(|write| {
-                    if control::reachable(
-                        &self.successors,
+                    if program::reachable(
+                        &self.program.successors,
                         write.block,
                         access.block,
-                        &self.barriers,
-                    ) || !control::reachable(
-                        &self.successors,
+                        &self.findings.barriers,
+                    ) || !program::reachable(
+                        &self.program.successors,
                         write.block,
                         access.block,
                         &FxHashSet::default(),
@@ -161,17 +164,17 @@ impl Analysis<'_, '_> {
                     }
                     let mut guards = Vec::new();
                     let mut preceding = FxHashSet::from_iter([write.block]);
-                    for &(branch, successor) in &self.controls[write.block] {
+                    for &(branch, successor) in &self.program.controls[write.block] {
                         preceding.insert(branch);
-                        if self.controls[access.block].contains(&(branch, successor))
-                            && self.branches[branch].as_ref()?.variance == 0
+                        if self.program.controls[access.block].contains(&(branch, successor))
+                            && self.program.branches[branch].as_ref()?.variance == 0
                         {
                             continue;
                         }
-                        if !self.branches[branch].as_ref()?.exact_guards {
+                        if !self.program.branches[branch].as_ref()?.exact_guards {
                             return None;
                         }
-                        let (_, facts) = self.edges[branch]
+                        let (_, facts) = self.program.edges[branch]
                             .iter()
                             .find(|(target, _)| *target == successor)?;
                         if facts.is_empty() {
@@ -179,7 +182,7 @@ impl Analysis<'_, '_> {
                         }
                         guards.extend(facts.iter().cloned());
                     }
-                    if control::reachable(&self.successors, 0, access.block, &preceding) {
+                    if program::reachable(&self.program.successors, 0, access.block, &preceding) {
                         return None;
                     }
                     Some((write, guards))
@@ -200,7 +203,7 @@ impl Analysis<'_, '_> {
                             &self.engine(facts),
                         )
                     })
-                    .min_by_key(Requirement::len)
+                    .min_by_key(|requirement| requirement.len())
             };
             let initialized = (|| {
                 let stride = writes
@@ -209,8 +212,7 @@ impl Analysis<'_, '_> {
                     .origin
                     .index
                     .as_ref()?
-                    .0
-                    .get(&vec![Atom::Thread(0)])?;
+                    .coefficient(&[Atom::Thread(0)])?;
                 if *stride <= 1 || *stride > writes.len() as i128 {
                     return None;
                 }
@@ -232,8 +234,8 @@ impl Analysis<'_, '_> {
             match initialized {
                 Some(clauses) => {
                     for clause in clauses {
-                        if !self.requirements.contains(&clause) {
-                            self.requirements.push(clause);
+                        if !self.findings.requirements.contains(&clause) {
+                            self.findings.requirements.push(clause);
                         }
                     }
                 }

@@ -64,7 +64,9 @@ pub(super) fn report(analysis: &Analysis<'_, '_>, residual: &[&Obligation]) -> V
         });
     }
     for obligation in residual {
-        let function = analysis.contexts[obligation.context].instance.name();
+        let function = analysis.program.contexts[obligation.context]
+            .instance
+            .name();
         let mut notes = vec![why(analysis, obligation)];
         if let Some(goal) = &obligation.goal {
             notes.push(format!(
@@ -76,7 +78,7 @@ pub(super) fn report(analysis: &Analysis<'_, '_>, residual: &[&Obligation]) -> V
         warnings.push(Warning {
             function: function.clone(),
             block: Some(obligation.block),
-            statement: analysis.contexts[obligation.context]
+            statement: analysis.program.contexts[obligation.context]
                 .instance
                 .body()
                 .unwrap()
@@ -152,7 +154,9 @@ pub(super) fn summary(
         text.push_str(&format!(
             "  unproven: {} in `{}`; {}\n",
             obligation.description,
-            analysis.contexts[obligation.context].instance.name(),
+            analysis.program.contexts[obligation.context]
+                .instance
+                .name(),
             why(analysis, obligation)
         ));
     }

@@ -1,6 +1,6 @@
-use gpurs_rustc::{AssertMessage, BinOp, Body, Dominators, FxHashSet, Graph, TerminatorKind};
+use gpurs_rustc::{AssertMessage, BinOp, FxHashSet, TerminatorKind};
 
-use super::{Analysis, Kind, Obligation, Region, State, Value, arithmetic};
+use super::{Analysis, Kind, Obligation, Region, State, Value, arithmetic, program};
 use crate::{
     policy,
     symbolic::{Atom, Fact, Polynomial, Predicate, Relation, Requirement},
@@ -245,7 +245,7 @@ impl Analysis<'_, '_> {
             return;
         }
         let context = self.frame().context;
-        self.obligations.push(Obligation {
+        self.findings.obligations.push(Obligation {
             context,
             block,
             kind,
@@ -270,11 +270,11 @@ impl Analysis<'_, '_> {
                 if let Some(parameter) = parameter
                     && fact.predicate.relation == Relation::NonNegative
                     && polynomial.0.len() == 3
-                    && polynomial.0.get(&vec![Atom::Index]) == Some(&-1)
-                    && polynomial.0.get(&Vec::new()) == Some(&-1)
-                    && !self.lengths.contains(&parameter)
+                    && polynomial.coefficient(&[Atom::Index]) == Some(&-1)
+                    && polynomial.coefficient(&[]) == Some(&-1)
+                    && !self.findings.lengths.contains(&parameter)
                 {
-                    self.lengths.push(parameter);
+                    self.findings.lengths.push(parameter);
                 }
             }
         }
@@ -283,41 +283,53 @@ impl Analysis<'_, '_> {
     /// Rejects collectives that threads may reach on different paths of the kernel body, and
     /// records which branches control each block.
     pub fn collective_control(&mut self) {
-        if self.collectives.is_empty()
+        if self.findings.collectives.is_empty()
             && !self
+                .findings
                 .accesses
                 .iter()
                 .any(|access| matches!(access.origin.region, Region::Shared(..)))
         {
             return;
         }
-        let count = self.successors.len();
-        let postdominators = postdominators(&self.successors);
+        let count = self.program.successors.len();
+        let postdominators = program::postdominators(&self.program.successors);
         let postdominates = |first: usize, second: usize| {
             postdominators.is_reachable(second) && postdominators.dominates(first, second)
         };
         for block in 0..count {
-            let Some(value) = &self.branches[block] else {
+            let Some(value) = &self.program.branches[block] else {
                 continue;
             };
             let reconvergence: FxHashSet<usize> = (0..count)
                 .filter(|&candidate| candidate == block || postdominates(candidate, block))
                 .collect();
-            for successor in self.successors[block].clone() {
-                for (target, controls) in self.controls.iter_mut().enumerate() {
-                    if reachable(&self.successors, successor, target, &reconvergence) {
+            for successor in self.program.successors[block].clone() {
+                for (target, controls) in self.program.controls.iter_mut().enumerate() {
+                    if program::reachable(
+                        &self.program.successors,
+                        successor,
+                        target,
+                        &reconvergence,
+                    ) {
                         controls.push((block, successor));
                     }
                 }
             }
-            for &(collective, permitted, span, _) in &self.collectives {
+            for &(collective, permitted, span, _) in &self.findings.collectives {
                 if value.variance > permitted
                     && !postdominates(collective, block)
-                    && self.successors[block].iter().any(|&successor| {
-                        reachable(&self.successors, successor, collective, &reconvergence)
+                    && self.program.successors[block].iter().any(|&successor| {
+                        program::reachable(
+                            &self.program.successors,
+                            successor,
+                            collective,
+                            &reconvergence,
+                        )
                     })
                 {
                     let context = self
+                        .program
                         .contexts
                         .iter()
                         .rfind(|context| context.offset <= block)
@@ -350,70 +362,4 @@ impl Analysis<'_, '_> {
             }
         }
     }
-}
-
-pub fn postdominators(successors: &[Vec<usize>]) -> Dominators<usize> {
-    let count = successors.len();
-    let mut reversed = vec![Vec::new(); count + 1];
-    for (block, targets) in successors.iter().enumerate() {
-        if targets.is_empty() {
-            reversed[count].push(block);
-        }
-        for &target in targets {
-            reversed[target].push(block);
-        }
-    }
-    let exiting = Graph::new(count, reversed.clone()).reachable();
-    let dominators = Graph::new(0, successors.to_vec()).dominators();
-    for (block, targets) in successors.iter().enumerate() {
-        if !exiting[block]
-            && dominators.is_reachable(block)
-            && targets
-                .iter()
-                .any(|&target| dominators.dominates(target, block))
-        {
-            reversed[count].push(block);
-        }
-    }
-    Graph::new(count, reversed).dominators()
-}
-
-pub fn reachable(
-    successors: &[Vec<usize>],
-    start: usize,
-    target: usize,
-    barriers: &FxHashSet<usize>,
-) -> bool {
-    let mut pending = vec![start];
-    let mut visited = FxHashSet::default();
-    while let Some(block) = pending.pop() {
-        if !visited.insert(block) || barriers.contains(&block) {
-            continue;
-        }
-        if block == target {
-            return true;
-        }
-        pending.extend(successors[block].iter().copied());
-    }
-    false
-}
-
-pub fn normal_successors(body: &Body, block: usize) -> Vec<usize> {
-    let terminator = &body.blocks[block].terminator;
-    let successors = match &terminator.kind {
-        TerminatorKind::Call { target, .. } => target.iter().copied().collect(),
-        TerminatorKind::Assert { target, .. } | TerminatorKind::Drop { target, .. } => {
-            vec![*target]
-        }
-        _ => terminator.successors(),
-    };
-    successors
-        .into_iter()
-        .filter(|&successor| {
-            !matches!(
-                body.blocks[successor].terminator.kind,
-                TerminatorKind::Unreachable
-            )
-        })
-        .collect()
 }

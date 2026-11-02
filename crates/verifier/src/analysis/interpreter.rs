@@ -1,15 +1,15 @@
 use std::collections::BTreeMap;
 
 use gpurs_artifact::Parameter;
-use gpurs_rustc::{
-    FxHashMap, FxHashSet, Instance, RigidTy, Session, Span, TerminatorKind, Ty, session,
-};
+use gpurs_rustc::{FxHashMap, Instance, RigidTy, Session, Span, TerminatorKind, Ty, session};
 
 use super::{
-    Access, Context, Frame, Obligation, Origin, Pointer, Region, State, Value, arithmetic, control,
+    Context, Frame, Origin, Pointer, Region, State, Value, ValueData, arithmetic,
+    program::{self, Program, Summary},
+    state::Findings,
 };
 use crate::{
-    engine::{Engine, Variable},
+    engine::{Cache, Dependencies, Engine, Variable},
     kernel::KernelParameter,
     render::{self, Names},
     symbolic::{Atom, Clause, Fact, Polynomial, Predicate, Requirement},
@@ -21,23 +21,11 @@ pub struct Analysis<'a, 'sess> {
     pub parameters: &'a [KernelParameter],
     pub scalars: Vec<u32>,
     pub variables: Vec<Variable>,
+    pub dependencies: Dependencies,
+    pub proof_cache: Cache,
     keys: FxHashMap<(usize, usize, usize, Vec<usize>), usize>,
     pub loads: FxHashMap<(Origin, Ty), Polynomial>,
-    pub contexts: Vec<Context>,
-    pub obligations: Vec<Obligation>,
     pub frames: Vec<Frame>,
-    pub accesses: Vec<Access>,
-    pub barriers: FxHashSet<usize>,
-    pub collectives: Vec<(usize, u8, Span, Instance)>,
-    pub controls: Vec<Vec<(usize, usize)>>,
-    pub edges: Vec<Vec<(usize, Vec<Fact>)>>,
-    pub branches: Vec<Option<Value>>,
-    pub successors: Vec<Vec<usize>>,
-    pub requirements: Vec<Clause>,
-    /// Slice parameters whose length guards the linear index, for launch extent inference.
-    pub lengths: Vec<usize>,
-    pub uses_index: bool,
-    pub geometry: bool,
     pub collect: bool,
     /// Nesting depth of calls whose memory accesses belong to an intercepted model.
     pub quiet: usize,
@@ -47,9 +35,9 @@ pub struct Analysis<'a, 'sess> {
     pub failure: Option<String>,
     pub span: Span,
     pub names: Names,
-    /// Callee analyses outside the collecting pass, by context and entry state; valid while
-    /// the variable table is unchanged.
-    pub memo: FxHashMap<(usize, State), Option<(State, Value)>>,
+    pub program: Program,
+    pub findings: Findings,
+    pub memo: FxHashMap<(usize, State), Summary>,
 }
 
 impl<'a, 'sess> Analysis<'a, 'sess> {
@@ -69,27 +57,18 @@ impl<'a, 'sess> Analysis<'a, 'sess> {
                 })
                 .collect(),
             variables: Vec::new(),
+            dependencies: Dependencies::default(),
+            proof_cache: Cache::default(),
             keys: FxHashMap::default(),
             loads: FxHashMap::default(),
-            contexts: Vec::new(),
-            obligations: Vec::new(),
             frames: Vec::new(),
-            accesses: Vec::new(),
-            barriers: FxHashSet::default(),
-            collectives: Vec::new(),
-            controls: vec![Vec::new(); blocks],
-            edges: vec![Vec::new(); blocks],
-            branches: Vec::new(),
-            successors: Vec::new(),
-            requirements: Vec::new(),
-            lengths: Vec::new(),
-            uses_index: false,
-            geometry: false,
             collect: false,
             quiet: 0,
             changed: false,
             failure: None,
             span,
+            program: Program::new(blocks),
+            findings: Findings::default(),
             memo: FxHashMap::default(),
             names: Names(
                 (1..=parameters.len())
@@ -110,18 +89,18 @@ impl<'a, 'sess> Analysis<'a, 'sess> {
     /// Analyzes the kernel body twice: once to a fixpoint, once collecting obligations.
     pub fn run(&mut self) -> Option<State> {
         let body = self.sess.body(self.kernel);
-        let mut slots = vec![Value::default(); body.locals().len()];
+        let mut slots = vec![Value::varying(0); body.locals().len()];
         for (index, parameter) in self.parameters.iter().enumerate() {
             slots[1 + index] = match parameter.metadata {
-                Parameter::Slice { .. } | Parameter::Reference { .. } => Value {
+                Parameter::Slice { .. } | Parameter::Reference { .. } => Value::from(ValueData {
                     pointer: Some(Pointer::Memory(Origin {
                         region: Region::Parameter(index),
                         index: Some(Polynomial::default()),
                         inner: matches!(parameter.metadata, Parameter::Reference { .. }),
                         path: Vec::new(),
                     })),
-                    ..Value::default()
-                },
+                    ..ValueData::default()
+                }),
                 Parameter::Value(_)
                     if matches!(session::rigid(parameter.layout.ty), RigidTy::Uint(_)) =>
                 {
@@ -130,7 +109,7 @@ impl<'a, 'sess> Analysis<'a, 'sess> {
                 Parameter::Value(_)
                     if matches!(session::rigid(parameter.layout.ty), RigidTy::Array(..)) =>
                 {
-                    Value {
+                    Value::from(ValueData {
                         fields: (0..parameter.layout.count())
                             .map(|field| {
                                 let shape = parameter.layout.field(self.sess, field);
@@ -146,67 +125,70 @@ impl<'a, 'sess> Analysis<'a, 'sess> {
                                         0,
                                     )
                                 } else {
-                                    Value::default()
+                                    Value::varying(0)
                                 }
                             })
                             .collect(),
-                        ..Value::default()
-                    }
+                        ..ValueData::default()
+                    })
                 }
-                Parameter::Value(_) => Value::default(),
+                Parameter::Value(_) => Value::varying(0),
             };
         }
         let state = State {
             slots: slots.into(),
-            facts: Vec::new(),
-            controls: BTreeMap::new(),
+            facts: Vec::new().into(),
+            controls: BTreeMap::new().into(),
         };
         let context = self.context(None, self.kernel);
         self.collect = true;
-        let result = self
-            .function(self.kernel, context, &state)
-            .map(|(state, _)| state);
-        if self.failure.is_none() {
-            self.collective_control();
-        }
-        result
+        self.function(self.kernel, context, &state)
+            .map(|(state, _)| state)
     }
 
     /// The context of `instance` called from `parent`, rustc across passes.
     pub fn context(&mut self, parent: Option<(usize, usize)>, instance: Instance) -> usize {
         if let Some((context, block)) = parent
-            && let Some(child) = self.contexts[context].calls.get(&block)
+            && let Some(child) = self.program.contexts[context].calls.get(&block)
         {
             return *child;
         }
         let body = self.sess.body(instance);
-        let offset = self.successors.len();
-        self.successors.extend((0..body.blocks.len()).map(|block| {
-            control::normal_successors(&body, block)
-                .into_iter()
-                .map(|successor| offset + successor)
-                .collect()
-        }));
-        self.branches.resize(self.successors.len(), None);
-        self.edges.resize(self.successors.len(), Vec::new());
-        self.controls.resize(self.successors.len(), Vec::new());
-        self.contexts.push(Context {
+        let offset = self.program.successors.len();
+        self.program
+            .successors
+            .extend((0..body.blocks.len()).map(|block| {
+                program::normal_successors(&body, block)
+                    .into_iter()
+                    .map(|successor| offset + successor)
+                    .collect()
+            }));
+        self.program
+            .branches
+            .resize(self.program.successors.len(), None);
+        self.program
+            .edges
+            .resize(self.program.successors.len(), Vec::new());
+        self.program
+            .controls
+            .resize(self.program.successors.len(), Vec::new());
+        self.program.contexts.push(Context {
             instance,
             offset,
             calls: BTreeMap::new(),
         });
-        let child = self.contexts.len() - 1;
+        let child = self.program.contexts.len() - 1;
         if let Some((context, block)) = parent {
-            self.contexts[context].calls.insert(block, child);
+            self.program.contexts[context].calls.insert(block, child);
             if self.quiet > 0 {
                 return child;
             }
-            let caller = self.contexts[context].offset + block;
-            let continuation = self.successors[caller].clone();
-            self.successors[caller] = vec![offset];
+            let caller = self.program.contexts[context].offset + block;
+            let continuation = self.program.successors[caller].clone();
+            self.program.successors[caller] = vec![offset];
             for (block, data) in body.blocks.iter().enumerate() {
                 if matches!(data.terminator.kind, TerminatorKind::Return) {
-                    self.successors[offset + block] = continuation.clone();
+                    self.program.successors[offset + block] = continuation.clone();
                 }
             }
         }
@@ -219,11 +201,13 @@ impl<'a, 'sess> Analysis<'a, 'sess> {
 
     /// The context-specific block that the current position belongs to.
     pub fn kernel_block(&self) -> usize {
-        self.contexts[self.frame().context].offset + self.frame().block
+        self.program.contexts[self.frame().context].offset + self.frame().block
     }
 
     pub fn engine<'b>(&'b self, facts: &'b [Fact]) -> Engine<'b> {
         Engine {
+            cache: &self.proof_cache,
+            dependencies: &self.dependencies,
             variables: &self.variables,
             scalars: &self.scalars,
             facts,
@@ -253,10 +237,12 @@ impl<'a, 'sess> Analysis<'a, 'sess> {
                     updates: 0,
                     variance,
                 });
+                self.dependencies.touch(self.variables.len() - 1);
                 self.keys.insert(key, self.variables.len() - 1);
                 return Polynomial::atom(Atom::Variable(self.variables.len() - 1));
             }
         };
+        self.dependencies.touch(variable);
         self.variables[variable].variance = self.variables[variable].variance.max(variance);
         self.update(variable, lower, upper, requirement);
         Polynomial::atom(Atom::Variable(variable))
@@ -270,6 +256,7 @@ impl<'a, 'sess> Analysis<'a, 'sess> {
         upper: Option<Polynomial>,
         requirement: Requirement,
     ) {
+        self.dependencies.touch(variable);
         let info = &mut self.variables[variable];
         if info.lower == lower && info.upper == upper && info.requirement == requirement {
             return;
@@ -288,14 +275,14 @@ impl<'a, 'sess> Analysis<'a, 'sess> {
             info.requirement = requirement;
         }
         self.changed = true;
-        self.memo.clear();
+        self.dependencies.changed(variable);
     }
 
     /// Records a launch requirement of race freedom or initialization.
     pub fn requirement(&mut self, predicate: Predicate, reason: &str) {
         let clause = Clause::single(predicate, reason);
-        if !self.requirements.contains(&clause) {
-            self.requirements.push(clause);
+        if !self.findings.requirements.contains(&clause) {
+            self.findings.requirements.push(clause);
         }
     }
 

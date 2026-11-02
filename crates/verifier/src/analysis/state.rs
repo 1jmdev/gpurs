@@ -1,8 +1,11 @@
-use std::{collections::BTreeMap, rc::Rc};
+use std::{array, collections::BTreeMap, rc::Rc};
 
-use gpurs_rustc::{Body, Dominators, Instance, Span};
+use gpurs_rustc::{Body, Dominators, FxHashSet, Instance, Span};
 
-use crate::symbolic::{Fact, Polynomial, Predicate, Requirement};
+use crate::{
+    shared::Shared,
+    symbolic::{Clause, Fact, Polynomial, Predicate, Requirement},
+};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Region {
@@ -29,8 +32,10 @@ pub enum Pointer {
     Unknown,
 }
 
+pub type Value = Shared<ValueData>;
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
-pub struct Value {
+pub struct ValueData {
     /// The exact integer value; an opaque variable when only its interval is known.
     pub integer: Option<Polynomial>,
     /// Launch clauses under which `integer` is exact.
@@ -49,9 +54,9 @@ pub struct Value {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct State {
-    pub slots: Rc<Vec<Value>>,
-    pub facts: Vec<Fact>,
-    pub controls: BTreeMap<usize, (usize, u8)>,
+    pub slots: Shared<Vec<Value>>,
+    pub facts: Shared<Vec<Fact>>,
+    pub controls: Shared<BTreeMap<usize, (usize, u8)>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -83,7 +88,7 @@ pub struct Context {
 
 pub struct Frame {
     pub body: Rc<Body>,
-    pub postdominators: Dominators<usize>,
+    pub postdominators: Rc<Dominators<usize>>,
     /// Facts the caller established before entering; a panic is never blamed on them.
     pub inherited: Vec<Fact>,
     pub base: usize,
@@ -103,24 +108,27 @@ pub struct Access {
     /// accesses under the same partition.
     pub partition: Option<Partition>,
     pub block: usize,
-    pub facts: Vec<Fact>,
+    pub facts: Shared<Vec<Fact>>,
     pub span: Span,
 }
 
 impl Value {
     pub fn integer(integer: Polynomial, variance: u8) -> Self {
-        Value {
+        Value::from(ValueData {
             integer: Some(integer),
             variance,
-            ..Value::default()
-        }
+            ..ValueData::default()
+        })
     }
 
     pub fn varying(variance: u8) -> Self {
-        Value {
-            variance,
-            ..Value::default()
+        thread_local! {
+            static VALUES: [Value; 3] = array::from_fn(|variance| Value::from(ValueData {
+                variance: variance as u8,
+                ..ValueData::default()
+            }));
         }
+        VALUES.with(|values| values[variance as usize].clone())
     }
 
     /// Facts that hold when the value equals `key`.
@@ -157,7 +165,7 @@ pub fn set(value: &mut Value, path: &[usize], replacement: Value) {
         return;
     }
     if value.fields.len() <= *field {
-        value.fields.resize_with(field + 1, Value::default);
+        value.fields.resize_with(field + 1, || Value::varying(0));
     }
     value.integer = None;
     set(&mut value.fields[*field], rest, replacement);
@@ -170,4 +178,16 @@ pub fn pointed_slots(value: &Value) -> Vec<usize> {
         slots.push(slot);
     }
     slots
+}
+
+#[derive(Default)]
+pub struct Findings {
+    pub obligations: Vec<Obligation>,
+    pub accesses: Vec<Access>,
+    pub barriers: FxHashSet<usize>,
+    pub collectives: Vec<(usize, u8, Span, Instance)>,
+    pub requirements: Vec<Clause>,
+    pub lengths: Vec<usize>,
+    pub uses_index: bool,
+    pub geometry: bool,
 }

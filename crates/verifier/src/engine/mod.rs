@@ -7,8 +7,13 @@
 //! the analysis supplies facts and variable intervals.
 
 mod bounds;
+mod cache;
+mod context;
 mod numeric;
+mod proof;
 mod solver;
 
 pub(super) use bounds::{Bound, Direction};
+pub(super) use cache::{Cache, Dependencies, Snapshot};
+use proof::Proof;
 pub(super) use solver::{Engine, Variable, opaque};

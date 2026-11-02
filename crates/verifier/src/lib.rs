@@ -16,17 +16,16 @@
 #![feature(rustc_private)]
 
 mod analysis;
-mod certificate;
 mod diagnostic;
 mod engine;
 mod kernel;
 pub mod policy;
 mod proof;
 mod render;
+mod shared;
 mod support;
 mod symbolic;
 pub mod transfer;
 
-pub use certificate::Certificate;
 pub use diagnostic::Warning;
-pub use kernel::{KernelParameter, KernelPlan, Verification, kernel};
+pub use kernel::{Certificate, KernelParameter, KernelPlan, Verification, kernel};

@@ -1,6 +1,6 @@
 use gpurs_rustc::{BinOp, CastKind, IntTy, Operand, RigidTy, Ty, TyKind, UintTy};
 
-use super::{Analysis, Origin, Pointer, State, Value};
+use super::{Analysis, Origin, Pointer, State, Value, ValueData};
 use crate::symbolic::{Atom, Fact, Polynomial, Predicate, Relation, Requirement};
 
 /// `(signed, bits)` of an integer type.
@@ -113,12 +113,14 @@ impl Analysis<'_, '_> {
         } else {
             integer.offset(-limit)?
         };
-        requirement.extend(self.engine(&state.facts).prove(
+        requirement.extend(self.engine(&state.facts).prove_with(
             &Predicate::new(goal, Relation::NonNegative),
-            &format!(
-                "the value of `{}` fits its integer type",
-                self.describe(integer)
-            ),
+            || {
+                format!(
+                    "the value of `{}` fits its integer type",
+                    self.describe(integer)
+                )
+            },
         )?);
         Some(requirement)
     }
@@ -146,7 +148,7 @@ impl Analysis<'_, '_> {
                 .and(operands)
                 .and_then(|(left, right)| Predicate::compare(operation, &left, &right));
             return match predicate {
-                Some(predicate) => Value {
+                Some(predicate) => Value::from(ValueData {
                     integer: predicate
                         .truth()
                         .map(|truth| Polynomial::constant(truth as i128)),
@@ -165,12 +167,13 @@ impl Analysis<'_, '_> {
                     domain: Some(2),
                     exact_guards: true,
                     variance,
-                    ..Value::default()
-                },
-                None => Value {
+                    ..ValueData::default()
+                }),
+                None => Value::from(ValueData {
                     domain: Some(2),
-                    ..Value::varying(variance)
-                },
+                    variance,
+                    ..ValueData::default()
+                }),
             };
         }
         if operation == BinOp::Offset {
@@ -187,11 +190,11 @@ impl Analysis<'_, '_> {
                 }),
                 _ => Pointer::Unknown,
             };
-            return Value {
+            return Value::from(ValueData {
                 pointer: Some(pointer),
                 variance,
-                ..Value::default()
-            };
+                ..ValueData::default()
+            });
         }
         let integer = kind.zip(operands).and_then(|((signed, bits), (a, b))| {
             let (minimum, maximum) = range((signed, bits));
@@ -242,7 +245,6 @@ impl Analysis<'_, '_> {
             if unchecked {
                 return Some(result);
             }
-            let reason = format!("`{}` does not overflow", self.describe(&result));
             let engine = self.engine(&state.facts);
             let mut goals = Vec::new();
             if signed || operation == BinOp::Sub {
@@ -252,17 +254,20 @@ impl Analysis<'_, '_> {
                 goals.push(Polynomial::constant(maximum).add(&result, -1)?);
             }
             for goal in goals {
-                requirement
-                    .extend(engine.prove(&Predicate::new(goal, Relation::NonNegative), &reason)?);
+                requirement.extend(
+                    engine.prove_with(&Predicate::new(goal, Relation::NonNegative), || {
+                        format!("`{}` does not overflow", self.describe(&result))
+                    })?,
+                );
             }
             Some(result)
         });
-        let mut value = Value {
+        let mut value = Value::from(ValueData {
             integer,
             requirement,
             variance,
-            ..Value::default()
-        };
+            ..ValueData::default()
+        });
         if value.integer.is_none() {
             value.requirement.clear();
         }
@@ -301,11 +306,11 @@ impl Analysis<'_, '_> {
             } else {
                 Value::varying(variance)
             };
-            Value {
+            Value::from(ValueData {
                 fields: vec![value, overflow],
                 variance,
-                ..Value::default()
-            }
+                ..ValueData::default()
+            })
         } else {
             value
         }

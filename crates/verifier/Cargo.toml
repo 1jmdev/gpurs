@@ -10,6 +10,8 @@ repository.workspace = true
 rustc_private = true
 
 [dependencies]
+fixedbitset.workspace = true
+rustc-hash.workspace = true
 gpurs-artifact.workspace = true
 gpurs-rustc.workspace = true
 serde.workspace = true

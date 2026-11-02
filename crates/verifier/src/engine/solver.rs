@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
-use super::Direction;
-use crate::symbolic::{self, Atom, Clause, Fact, Polynomial, Predicate, Relation, Requirement};
+use super::{Cache, Dependencies, Direction, Proof};
+use crate::symbolic::{self, Clause, Fact, Polynomial, Predicate, Relation, Requirement};
 
 const OPTIONS: usize = 4;
 
@@ -17,6 +17,8 @@ pub struct Variable {
 }
 
 pub struct Engine<'a> {
+    pub cache: &'a Cache,
+    pub dependencies: &'a Dependencies,
     pub variables: &'a [Variable],
     /// Bit width of each kernel parameter that is a scalar launch variable.
     pub scalars: &'a [u32],
@@ -45,34 +47,69 @@ fn clean(requirement: Requirement) -> Requirement {
 }
 
 pub(super) fn union(left: &Requirement, right: &Requirement) -> Requirement {
-    left.union(right).cloned().collect()
+    if left.is_empty() {
+        right.clone()
+    } else if right.is_empty() || left == right {
+        left.clone()
+    } else {
+        left.union(right).cloned().collect()
+    }
 }
 
 impl Engine<'_> {
     /// The requirement under which `goal` holds on this path, or `None` when it cannot be
     /// reduced to launch variables.
     pub fn prove(&self, goal: &Predicate, reason: &str) -> Option<Requirement> {
+        self.prove_with(goal, || reason.to_owned())
+    }
+
+    pub fn prove_with(
+        &self,
+        goal: &Predicate,
+        reason: impl FnOnce() -> String,
+    ) -> Option<Requirement> {
         if let Some(truth) = goal.truth() {
             return truth.then(Requirement::new);
         }
+        let key = (self.facts.to_vec(), goal.clone());
+        if let Some((snapshot, result)) = self.cache.proofs.borrow().get(&key)
+            && self.dependencies.valid(snapshot)
+        {
+            self.dependencies.include(snapshot);
+            return result.as_ref().map(|proof| proof.materialize(reason));
+        }
+        self.dependencies.begin();
+        let epoch = self.dependencies.epoch;
+        let result = self.solve(goal);
+        let snapshot = self.dependencies.finish(epoch);
+        self.cache
+            .proofs
+            .borrow_mut()
+            .insert(key, (snapshot, result.clone()));
+        result.as_ref().map(|proof| proof.materialize(reason))
+    }
+
+    fn solve(&self, goal: &Predicate) -> Option<Proof> {
         let facts = self.context(&goal.polynomial);
         match goal.relation {
-            Relation::NonNegative => self.nonnegative(&goal.polynomial, &facts, reason),
+            Relation::NonNegative => self.nonnegative(&goal.polynomial, &facts),
             Relation::Zero => {
-                let left = self.nonnegative(&goal.polynomial, &facts, reason)?;
-                let right = self.nonnegative(&goal.polynomial.scale(-1)?, &facts, reason)?;
-                Some(union(&left, &right))
+                let left = self.nonnegative(&goal.polynomial, &facts)?;
+                let right = self.nonnegative(&goal.polynomial.scale(-1)?, &facts)?;
+                Some(left.union(right))
             }
             Relation::NonZero => {
                 if let Some(requirement) = self.nonzero(&goal.polynomial) {
-                    return Some(requirement);
+                    return Some(Proof::fixed(requirement));
                 }
-                let positive = self.nonnegative(&goal.polynomial.offset(-1)?, &facts, reason);
-                if positive.as_ref().is_some_and(BTreeSet::is_empty) {
+                let positive = self.nonnegative(&goal.polynomial.offset(-1)?, &facts);
+                if positive
+                    .as_ref()
+                    .is_some_and(|requirement| requirement.is_empty())
+                {
                     return positive;
                 }
-                let negative =
-                    self.nonnegative(&goal.polynomial.scale(-1)?.offset(-1)?, &facts, reason);
+                let negative = self.nonnegative(&goal.polynomial.scale(-1)?.offset(-1)?, &facts);
                 match negative {
                     Some(requirement) if requirement.is_empty() => Some(requirement),
                     _ => positive.or(negative),
@@ -85,6 +122,28 @@ impl Engine<'_> {
     /// Only the last fact may be negated into a launch precondition, and only when the
     /// panicking function established it (`own`).
     pub fn contradiction(&self, reason: &str, own: bool) -> Option<Requirement> {
+        if self.facts.is_empty() {
+            return None;
+        }
+        let key = (self.facts.to_vec(), own, reason.to_owned());
+        if let Some((snapshot, result)) = self.cache.contradictions.borrow().get(&key)
+            && self.dependencies.valid(snapshot)
+        {
+            self.dependencies.include(snapshot);
+            return result.clone();
+        }
+        self.dependencies.begin();
+        let epoch = self.dependencies.epoch;
+        let result = self.find_contradiction(reason, own);
+        let snapshot = self.dependencies.finish(epoch);
+        self.cache
+            .contradictions
+            .borrow_mut()
+            .insert(key, (snapshot, result.clone()));
+        result
+    }
+
+    fn find_contradiction(&self, reason: &str, own: bool) -> Option<Requirement> {
         let mut best: Option<Requirement> = None;
         for (index, fact) in self.facts.iter().enumerate() {
             let others: Vec<_> = self
@@ -121,95 +180,13 @@ impl Engine<'_> {
         best
     }
 
-    /// Path facts in non-negative form, with the intervals of the variables and the division
-    /// axioms of the atoms in `goal`.
-    pub(super) fn context(&self, goal: &Polynomial) -> Vec<(Polynomial, Requirement)> {
-        let mut facts: Vec<_> = self
-            .facts
-            .iter()
-            .flat_map(|fact| {
-                fact.predicate
-                    .bounds()
-                    .into_iter()
-                    .map(|bound| (bound, fact.requirement.clone()))
-            })
-            .collect();
-        let mut variables = goal.variables();
-        for fact in self.facts {
-            variables.extend(fact.predicate.polynomial.variables());
-        }
-        let mut pending: Vec<_> = variables.iter().copied().collect();
-        while let Some(variable) = pending.pop() {
-            let info = &self.variables[variable];
-            for bound in info.upper.iter().chain([&info.lower]) {
-                for nested in bound.variables() {
-                    if variables.insert(nested) {
-                        pending.push(nested);
-                    }
-                }
-            }
-        }
-        for variable in variables {
-            let info = &self.variables[variable];
-            let atom = Polynomial::atom(Atom::Variable(variable));
-            if info.lower.value() != Some(0)
-                && let Some(lower) = atom.add(&info.lower, -1)
-            {
-                facts.push((lower, info.requirement.clone()));
-            }
-            if let Some(upper) = info.upper.as_ref().and_then(|upper| upper.add(&atom, -1)) {
-                facts.push((upper, info.requirement.clone()));
-            }
-        }
-        let mut divisions = BTreeSet::new();
-        for polynomial in [goal]
-            .into_iter()
-            .chain(self.facts.iter().map(|fact| &fact.predicate.polynomial))
-        {
-            polynomial.atoms(&mut |atom| {
-                if let Atom::Quotient(dividend, divisor) | Atom::Remainder(dividend, divisor) = atom
-                {
-                    divisions.insert(((**dividend).clone(), (**divisor).clone()));
-                }
-            });
-        }
-        for (dividend, divisor) in divisions {
-            let quotient = Polynomial::quotient(dividend.clone(), divisor.clone());
-            let remainder = Polynomial::remainder(dividend.clone(), divisor.clone());
-            facts.extend(
-                [dividend.add(&quotient, -1), dividend.add(&remainder, -1)]
-                    .into_iter()
-                    .flatten()
-                    .map(|fact| (fact, Requirement::new())),
-            );
-            if let Some(requirement) = self.nonzero(&divisor) {
-                let identity = divisor
-                    .multiply(&quotient)
-                    .and_then(|product| dividend.add(&product, -1))
-                    .and_then(|rest| rest.add(&remainder, -1));
-                for fact in identity
-                    .iter()
-                    .flat_map(|identity| [Some(identity.clone()), identity.scale(-1)])
-                    .chain([divisor.add(&remainder, -1).and_then(|fact| fact.offset(-1))])
-                    .flatten()
-                {
-                    facts.push((fact, requirement.clone()));
-                }
-            }
-        }
-        facts.sort();
-        facts.dedup();
-        facts
-    }
-
     fn nonnegative(
         &self,
         polynomial: &Polynomial,
         facts: &[(Polynomial, Requirement)],
-        reason: &str,
-    ) -> Option<Requirement> {
+    ) -> Option<Proof> {
         if let Some(value) = polynomial.value() {
-            return (value >= 0).then(Requirement::new);
+            return (value >= 0).then(Proof::default);
         }
         let launch: Vec<_> = facts
             .iter()
@@ -219,7 +196,7 @@ impl Engine<'_> {
         let candidates = self.search(polynomial, Direction::Lower, facts);
         for (bound, requirement, _) in &candidates {
             if let Some(decided) = self.decide(bound, &launch) {
-                return Some(clean(union(requirement, &decided)));
+                return Some(Proof::fixed(clean(union(requirement, &decided))));
             }
         }
         // Any bound suffices together with its own requirement, so the host clauses are the distribution
@@ -257,14 +234,10 @@ impl Engine<'_> {
                 })
                 .collect();
         }
-        let mut requirement = Requirement::new();
-        for options in clauses {
-            requirement.insert(Clause {
-                options,
-                reason: reason.to_owned(),
-            });
-        }
-        Some(requirement)
+        Some(Proof {
+            fixed: Requirement::new(),
+            pending: clauses,
+        })
     }
 
     /// Whether a path fact or the atom ranges show `polynomial ≠ 0`.

@@ -4,10 +4,12 @@
 //! Every atom denotes a non-negative integer. Division follows the device semantics of a
 //! certified entry point, where a zero divisor is replaced by one: `x / 0 = x` and `x % 0 = 0`.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use gpurs_artifact as artifact;
 use gpurs_rustc::BinOp;
+
+use crate::shared::Shared;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Atom {
@@ -28,7 +30,7 @@ pub enum Atom {
 pub type Monomial = Vec<Atom>;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Polynomial(pub BTreeMap<Monomial, i128>);
+pub struct Polynomial(pub Shared<Vec<(Monomial, i128)>>);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Relation {
@@ -52,7 +54,7 @@ pub struct Clause {
 }
 
 /// A conjunction of clauses.
-pub type Requirement = BTreeSet<Clause>;
+pub type Requirement = Shared<BTreeSet<Clause>>;
 
 /// A predicate known on a path, valid when its requirement holds.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -66,9 +68,13 @@ impl Atom {
         match self {
             Atom::Block(_) => true,
             Atom::Quotient(dividend, divisor) | Atom::Remainder(dividend, divisor) => {
-                [dividend, divisor]
-                    .iter()
-                    .all(|value| value.0.keys().flatten().all(Atom::block_uniform))
+                [dividend, divisor].iter().all(|value| {
+                    value
+                        .0
+                        .iter()
+                        .flat_map(|(monomial, _)| monomial)
+                        .all(Atom::block_uniform)
+                })
             }
             _ => self.launch(),
         }
@@ -106,15 +112,15 @@ pub fn divide_monomial(left: &[Atom], right: &[Atom]) -> Option<Monomial> {
 
 impl Polynomial {
     pub fn constant(value: i128) -> Self {
-        Polynomial(if value == 0 {
-            BTreeMap::new()
+        if value == 0 {
+            Self::default()
         } else {
-            BTreeMap::from([(Vec::new(), value)])
-        })
+            Polynomial(vec![(Vec::new(), value)].into())
+        }
     }
 
     pub fn atom(atom: Atom) -> Self {
-        Polynomial(BTreeMap::from([(vec![atom], 1)]))
+        Polynomial(vec![(vec![atom], 1)].into())
     }
 
     pub fn monomial(monomial: Monomial, coefficient: i128) -> Self {
@@ -123,12 +129,26 @@ impl Polynomial {
         polynomial
     }
 
-    fn insert(&mut self, mut monomial: Monomial, coefficient: i128) -> Option<()> {
+    pub fn coefficient(&self, monomial: &[Atom]) -> Option<&i128> {
+        self.0
+            .binary_search_by(|(term, _)| term.as_slice().cmp(monomial))
+            .ok()
+            .map(|index| &self.0[index].1)
+    }
+
+    pub fn insert(&mut self, mut monomial: Monomial, coefficient: i128) -> Option<()> {
         monomial.sort();
-        let entry = self.0.entry(monomial.clone()).or_default();
-        *entry = entry.checked_add(coefficient)?;
-        if *entry == 0 {
-            self.0.remove(&monomial);
+        match self.0.binary_search_by(|(term, _)| term.cmp(&monomial)) {
+            Ok(index) => {
+                let coefficient = self.0[index].1.checked_add(coefficient)?;
+                if coefficient == 0 {
+                    self.0.remove(index);
+                } else {
+                    self.0[index].1 = coefficient;
+                }
+            }
+            Err(index) if coefficient != 0 => self.0.insert(index, (monomial, coefficient)),
+            Err(_) => {}
         }
         Some(())
     }
@@ -165,24 +185,28 @@ impl Polynomial {
     pub fn value(&self) -> Option<i128> {
         match self.0.len() {
             0 => Some(0),
-            1 => self.0.get(&Vec::new()).copied(),
+            1 => self.coefficient(&[]).copied(),
             _ => None,
         }
     }
 
     pub fn variable(&self) -> Option<&Atom> {
-        let (monomial, coefficient) = self.0.first_key_value()?;
+        let (monomial, coefficient) = self.0.first()?;
         (self.0.len() == 1 && *coefficient == 1 && monomial.len() == 1).then(|| &monomial[0])
     }
 
     pub fn launch(&self) -> bool {
-        self.0.keys().all(|monomial| launch_monomial(monomial))
+        self.0
+            .iter()
+            .map(|(monomial, _)| monomial)
+            .all(|monomial| launch_monomial(monomial))
     }
 
     /// Monomials that the host cannot evaluate.
     pub fn varying(&self) -> usize {
         self.0
-            .keys()
+            .iter()
+            .map(|(monomial, _)| monomial)
             .filter(|monomial| !launch_monomial(monomial))
             .count()
     }
@@ -198,7 +222,8 @@ impl Polynomial {
                 if divisor > 0
                     && dividend
                         .0
-                        .values()
+                        .iter()
+                        .map(|(_, coefficient)| coefficient)
                         .all(|coefficient| coefficient % divisor == 0) =>
             {
                 Polynomial(
@@ -223,7 +248,8 @@ impl Polynomial {
                 if divisor > 0
                     && dividend
                         .0
-                        .values()
+                        .iter()
+                        .map(|(_, coefficient)| coefficient)
                         .all(|coefficient| coefficient % divisor == 0) =>
             {
                 Polynomial::default()
@@ -234,7 +260,7 @@ impl Polynomial {
 
     /// Every atom, including those nested in quotients and remainders.
     pub fn atoms(&self, visit: &mut impl FnMut(&Atom)) {
-        for atom in self.0.keys().flatten() {
+        for atom in self.0.iter().flat_map(|(monomial, _)| monomial) {
             visit(atom);
             if let Atom::Quotient(dividend, divisor) | Atom::Remainder(dividend, divisor) = atom {
                 dividend.atoms(visit);

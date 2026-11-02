@@ -1,9 +1,7 @@
-use std::rc::Rc;
-
 use gpurs_artifact::{Access, Parameter};
 use gpurs_rustc::{Operand, Place, ProjectionElem, RigidTy, Ty, session};
 
-use super::{Analysis, Origin, Pointer, Region, State, Value, state};
+use super::{Analysis, Origin, Pointer, Region, State, Value, ValueData, state};
 use crate::symbolic::Polynomial;
 
 /// Where a place lives.
@@ -20,7 +18,9 @@ impl Analysis<'_, '_> {
             location = match (location, projection) {
                 (location, ProjectionElem::Deref) => {
                     let pointer = match &location {
-                        Location::Slot(slot, path) => state::get(&state.slots[*slot], path).pointer,
+                        Location::Slot(slot, path) => {
+                            state::get(&state.slots[*slot], path).into_inner().pointer
+                        }
                         _ => None,
                     };
                     match pointer {
@@ -141,11 +141,11 @@ impl Analysis<'_, '_> {
             Location::Memory(origin) => Pointer::Memory(origin),
             Location::Unknown => Pointer::Unknown,
         };
-        Value {
+        Value::from(ValueData {
             pointer: Some(pointer),
             variance,
-            ..Value::default()
-        }
+            ..ValueData::default()
+        })
     }
 
     pub fn read(&mut self, place: &Place, state: &State) -> Value {
@@ -211,7 +211,7 @@ impl Analysis<'_, '_> {
             .unwrap_or(0);
         match self.locate(place, state) {
             Location::Slot(slot, path) => {
-                state::set(&mut Rc::make_mut(&mut state.slots)[slot], &path, value)
+                state::set(&mut state.slots.make_mut()[slot], &path, value)
             }
             Location::Memory(origin) => self.access(&origin, true, false, state),
             Location::Unknown => {
@@ -220,7 +220,7 @@ impl Analysis<'_, '_> {
                 let addressed: Vec<usize> =
                     state.slots.iter().flat_map(state::pointed_slots).collect();
                 for slot in addressed {
-                    if let Some(value) = Rc::make_mut(&mut state.slots).get_mut(slot) {
+                    if let Some(value) = state.slots.make_mut().get_mut(slot) {
                         *value = Value::varying(2);
                     }
                 }
@@ -230,7 +230,7 @@ impl Analysis<'_, '_> {
 
     pub fn access(&mut self, origin: &Origin, write: bool, atomic: bool, state: &State) {
         if self.collect && self.quiet == 0 {
-            self.accesses.push(super::Access {
+            self.findings.accesses.push(super::Access {
                 origin: origin.clone(),
                 write,
                 atomic,

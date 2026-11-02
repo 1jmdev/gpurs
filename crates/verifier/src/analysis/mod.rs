@@ -12,11 +12,16 @@ mod control;
 mod evaluation;
 mod function;
 mod interpreter;
+mod join;
 mod memory;
+mod model;
+mod partition;
 mod place;
+mod primitive;
+mod program;
 mod state;
 
 pub(super) use interpreter::Analysis;
 pub(super) use state::{
-    Access, Context, Frame, Kind, Obligation, Origin, Pointer, Region, State, Value,
+    Access, Context, Frame, Kind, Obligation, Origin, Pointer, Region, State, Value, ValueData,
 };

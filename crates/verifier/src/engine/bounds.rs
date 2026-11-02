@@ -1,7 +1,6 @@
-use std::{
-    cmp::Reverse,
-    collections::{BTreeSet, BinaryHeap},
-};
+use std::{cmp::Reverse, collections::BinaryHeap};
+
+use gpurs_rustc::FxHashSet;
 
 use super::{Engine, solver};
 use crate::symbolic::{self, Atom, Monomial, Polynomial, Requirement};
@@ -9,7 +8,7 @@ use crate::symbolic::{self, Atom, Monomial, Polynomial, Requirement};
 const LIMIT: usize = 3;
 const DEPTH: usize = 6;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Direction {
     Lower,
     Upper,
@@ -30,11 +29,27 @@ impl Direction {
 impl Engine<'_> {
     /// Launch bounds of `polynomial` in `direction` on this path.
     pub fn bounds(&self, polynomial: &Polynomial, direction: Direction) -> Vec<Bound> {
+        let key = (self.facts.to_vec(), polynomial.clone(), direction);
+        if let Some((snapshot, result)) = self.cache.bounds.borrow().get(&key)
+            && self.dependencies.valid(snapshot)
+        {
+            self.dependencies.include(snapshot);
+            return result.clone();
+        }
+        self.dependencies.begin();
+        let epoch = self.dependencies.epoch;
         let facts = self.context(polynomial);
-        self.search(polynomial, direction, &facts)
+        let result: Vec<_> = self
+            .search(polynomial, direction, &facts)
             .into_iter()
             .map(|(bound, requirement, _)| (bound, requirement))
-            .collect()
+            .collect();
+        let snapshot = self.dependencies.finish(epoch);
+        self.cache
+            .bounds
+            .borrow_mut()
+            .insert(key, (snapshot, result.clone()));
+        result
     }
 
     /// Eliminates per-thread monomials with facts, then bounds the remainder structurally.
@@ -45,7 +60,11 @@ impl Engine<'_> {
         facts: &[(Polynomial, Requirement)],
     ) -> Vec<(Polynomial, Requirement, usize)> {
         let mut results = Vec::new();
-        let mut visited = BTreeSet::new();
+        #[expect(
+            clippy::mutable_key_type,
+            reason = "Cached hashes do not change polynomial equality or ordering"
+        )]
+        let mut visited = FxHashSet::default();
         // Best first: the fewer per-thread monomials remain, the more the facts have said.
         let mut pending = BinaryHeap::from([Reverse((
             polynomial.varying(),
@@ -209,6 +228,7 @@ impl Engine<'_> {
                 .map(|bound| vec![(bound, none())])
                 .unwrap_or_default(),
             (Atom::Variable(variable), direction) => {
+                self.dependencies.touch(*variable);
                 let info = &self.variables[*variable];
                 let bound = match direction {
                     Direction::Lower => Some(&info.lower),
