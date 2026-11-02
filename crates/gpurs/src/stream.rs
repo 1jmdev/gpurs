@@ -79,11 +79,6 @@ pub(crate) mod sealed {
 }
 
 impl Stream {
-    #[doc(hidden)]
-    pub fn benchmark_raw(&self) -> *mut std::ffi::c_void {
-        self.raw.raw
-    }
-
     /// Exports a borrowed handle. External allocation accesses require `submit_external`;
     /// the handle must not be destroyed or used after the stream's retained lifetime.
     pub fn as_raw(&self) -> *mut std::ffi::c_void {

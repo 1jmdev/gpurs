@@ -68,15 +68,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "gpurs-benchmarks"
-version = "0.1.0"
-dependencies = [
- "gpurs",
- "gpurs-build",
- "gpurs-nvvm",
-]
-
-[[package]]
 name = "gpurs-blackwell-examples"
 version = "0.1.0"
 dependencies = [
