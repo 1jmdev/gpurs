@@ -328,6 +328,7 @@ impl<T> Transfer<T> {
 
     /// Retains the completion handle and its storage when observation fails.
     pub fn try_wait(&mut self) -> Result<T> {
+        let _context = self.accesses[0].allocation.device.context.try_enter()?;
         self.finish()?;
         tracking::try_observe(&self.statuses)?;
         self.data.take().ok_or_else(|| {
