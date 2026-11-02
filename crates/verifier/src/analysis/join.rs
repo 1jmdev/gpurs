@@ -1,7 +1,7 @@
 use super::{Analysis, Pointer, State, Value, ValueData};
 use crate::{
     engine::{Bound, Direction},
-    symbolic::{Fact, Polynomial, Requirement},
+    symbolic::{Fact, Facts, Polynomial, Requirement},
 };
 
 impl Analysis<'_, '_> {
@@ -18,40 +18,45 @@ impl Analysis<'_, '_> {
         let (saved_block, saved_statement) = (frame.block, frame.statement);
         frame.block = block;
         frame.statement = usize::MAX;
-        let facts: Vec<_> = previous
-            .facts
-            .iter()
-            .filter(|fact| next.facts.contains(fact))
-            .cloned()
-            .collect();
-        let slots = (0..previous.slots.len())
-            .map(|slot| {
-                self.join(
-                    &previous.slots[slot],
-                    &next.slots[slot],
-                    vec![slot],
-                    (previous, &next),
-                    &facts,
-                )
-            })
-            .collect::<Vec<_>>()
-            .into();
+        let facts = if previous.facts == next.facts {
+            previous.facts.clone()
+        } else {
+            previous
+                .facts
+                .iter()
+                .filter(|fact| next.facts.contains(fact))
+                .cloned()
+                .collect()
+        };
+        let mut slots = previous.slots.clone();
+        for (slot, left, right) in previous.slots.differences(&next.slots) {
+            let joined = self.join(left, right, vec![slot], (previous, &next), &facts);
+            if joined != *left {
+                slots.make_mut()[slot] = joined;
+            }
+        }
         let frame = self.frames.last_mut().unwrap();
         frame.block = saved_block;
         frame.statement = saved_statement;
-        let controls = previous
-            .controls
-            .iter()
-            .filter(|(branch, edge)| next.controls.get(branch) == Some(edge))
-            .map(|(branch, edge)| (*branch, *edge))
-            .collect();
+        let controls = if previous.controls == next.controls {
+            previous.controls.clone()
+        } else {
+            previous
+                .controls
+                .iter()
+                .filter(|(branch, edge)| next.controls.get(branch) == Some(edge))
+                .map(|(branch, edge)| (*branch, *edge))
+                .collect()
+        };
         let joined = State {
             slots,
-            facts: facts.into(),
+            facts,
             controls,
         };
         let changed = joined != *previous;
-        *previous = joined;
+        if changed {
+            *previous = joined;
+        }
         changed
     }
 
@@ -217,7 +222,7 @@ impl Analysis<'_, '_> {
 
     /// A bound covering one bound of each side, preferring the tightest.
     fn common(&self, left: &[Bound], right: &[Bound], direction: Direction) -> Option<Bound> {
-        let engine = self.engine(&[]);
+        let engine = self.engine(&Facts::default());
         let at_least = |a: &Polynomial, b: &Polynomial| {
             a.add(b, -1)
                 .and_then(|difference| engine.numeric(&difference, Direction::Lower))

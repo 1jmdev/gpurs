@@ -4,12 +4,12 @@ use fixedbitset::FixedBitSet;
 use gpurs_rustc::FxHashMap;
 
 use super::{Bound, Direction, Proof};
-use crate::symbolic::{Fact, Polynomial, Predicate, Requirement};
+use crate::symbolic::{Facts, Polynomial, Predicate, Requirement};
 
-type ProofKey = (Vec<Fact>, Predicate);
-type ContextKey = (Vec<Fact>, Polynomial);
-type ContradictionKey = (Vec<Fact>, bool, String);
-type BoundsKey = (Vec<Fact>, Polynomial, Direction);
+type ProofKey = (Facts, Predicate);
+type ContextKey = (Facts, Polynomial);
+type ContradictionKey = (Facts, bool, String);
+type BoundsKey = (Facts, Polynomial, Direction);
 
 type Entries<K, V> = RefCell<FxHashMap<K, (Snapshot, V)>>;
 

@@ -1,4 +1,9 @@
-use std::{array, collections::BTreeMap, rc::Rc};
+use std::{
+    array,
+    collections::BTreeMap,
+    ops::{Index, IndexMut},
+    rc::Rc,
+};
 
 use gpurs_rustc::{Body, Dominators, FxHashSet, Instance, Span};
 
@@ -54,9 +59,95 @@ pub struct ValueData {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct State {
-    pub slots: Shared<Vec<Value>>,
+    pub slots: Shared<Slots>,
     pub facts: Shared<Vec<Fact>>,
     pub controls: Shared<BTreeMap<usize, (usize, u8)>>,
+}
+
+const SLOT_CHUNK: usize = 32;
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Slots(Vec<Shared<Vec<Value>>>);
+
+impl From<Vec<Value>> for Shared<Slots> {
+    fn from(values: Vec<Value>) -> Self {
+        Slots(
+            values
+                .chunks(SLOT_CHUNK)
+                .map(|chunk| chunk.to_vec().into())
+                .collect(),
+        )
+        .into()
+    }
+}
+
+impl Slots {
+    pub fn len(&self) -> usize {
+        self.0
+            .last()
+            .map_or(0, |chunk| (self.0.len() - 1) * SLOT_CHUNK + chunk.len())
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &Value> {
+        self.0.iter().flat_map(|chunk| chunk.iter())
+    }
+
+    pub fn get_mut(&mut self, slot: usize) -> Option<&mut Value> {
+        self.0
+            .get_mut(slot / SLOT_CHUNK)?
+            .get_mut(slot % SLOT_CHUNK)
+    }
+
+    pub fn resize_with(&mut self, length: usize, mut value: impl FnMut() -> Value) {
+        for slot in self.len()..length {
+            if slot % SLOT_CHUNK == 0 {
+                self.0.push(Vec::with_capacity(SLOT_CHUNK).into());
+            }
+            self.0.last_mut().unwrap().push(value());
+        }
+    }
+
+    pub fn truncate(&mut self, length: usize) {
+        if length >= self.len() {
+            return;
+        }
+        self.0.truncate(length.div_ceil(SLOT_CHUNK));
+        if !length.is_multiple_of(SLOT_CHUNK) {
+            self.0.last_mut().unwrap().truncate(length % SLOT_CHUNK);
+        }
+    }
+
+    pub fn differences<'a>(
+        &'a self,
+        other: &'a Self,
+    ) -> impl Iterator<Item = (usize, &'a Value, &'a Value)> {
+        self.0
+            .iter()
+            .zip(&other.0)
+            .enumerate()
+            .filter(|(_, (left, right))| left != right)
+            .flat_map(|(chunk, (left, right))| {
+                left.iter()
+                    .zip(right.iter())
+                    .enumerate()
+                    .filter(|(_, (left, right))| left != right)
+                    .map(move |(offset, (left, right))| (chunk * SLOT_CHUNK + offset, left, right))
+            })
+    }
+}
+
+impl Index<usize> for Slots {
+    type Output = Value;
+
+    fn index(&self, slot: usize) -> &Value {
+        &self.0[slot / SLOT_CHUNK][slot % SLOT_CHUNK]
+    }
+}
+
+impl IndexMut<usize> for Slots {
+    fn index_mut(&mut self, slot: usize) -> &mut Value {
+        &mut self.0[slot / SLOT_CHUNK][slot % SLOT_CHUNK]
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -148,7 +239,9 @@ pub fn get(value: &Value, path: &[usize]) -> Value {
                 .fields
                 .get(*field)
                 .map_or_else(|| Value::varying(value.variance), |field| get(field, rest));
-            field.variance = field.variance.max(value.variance);
+            if field.variance < value.variance {
+                field.variance = value.variance;
+            }
             field
         }
     }

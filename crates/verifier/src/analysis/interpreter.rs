@@ -12,7 +12,7 @@ use crate::{
     engine::{Cache, Dependencies, Engine, Variable},
     kernel::KernelParameter,
     render::{self, Names},
-    symbolic::{Atom, Clause, Fact, Polynomial, Predicate, Requirement},
+    symbolic::{Atom, Clause, Facts, Polynomial, Predicate, Requirement},
 };
 
 pub struct Analysis<'a, 'sess> {
@@ -204,13 +204,13 @@ impl<'a, 'sess> Analysis<'a, 'sess> {
         self.program.contexts[self.frame().context].offset + self.frame().block
     }
 
-    pub fn engine<'b>(&'b self, facts: &'b [Fact]) -> Engine<'b> {
+    pub fn engine(&self, facts: &Facts) -> Engine<'_> {
         Engine {
             cache: &self.proof_cache,
             dependencies: &self.dependencies,
             variables: &self.variables,
             scalars: &self.scalars,
-            facts,
+            facts: facts.clone(),
         }
     }
 

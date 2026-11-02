@@ -7,7 +7,7 @@ impl Engine<'_> {
     /// Path facts in non-negative form, with the intervals of the variables and the division
     /// axioms of the atoms in `goal`.
     pub(super) fn context(&self, goal: &Polynomial) -> Rc<Vec<(Polynomial, Requirement)>> {
-        let key = (self.facts.to_vec(), goal.clone());
+        let key = (self.facts.clone(), goal.clone());
         if let Some((snapshot, context)) = self.cache.contexts.borrow().get(&key)
             && self.dependencies.valid(snapshot)
         {
@@ -37,7 +37,7 @@ impl Engine<'_> {
             })
             .collect();
         let mut variables = goal.variables();
-        for fact in self.facts {
+        for fact in &self.facts {
             variables.extend(fact.predicate.polynomial.variables());
         }
         let mut pending: Vec<_> = variables.iter().copied().collect();

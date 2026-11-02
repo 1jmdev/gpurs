@@ -1,3 +1,4 @@
+use fixedbitset::FixedBitSet;
 use gpurs_rustc::{AssertMessage, BinOp, FxHashSet, TerminatorKind};
 
 use super::{Analysis, Kind, Obligation, Region, State, Value, arithmetic, program};
@@ -304,29 +305,19 @@ impl Analysis<'_, '_> {
             let reconvergence: FxHashSet<usize> = (0..count)
                 .filter(|&candidate| candidate == block || postdominates(candidate, block))
                 .collect();
-            for successor in self.program.successors[block].clone() {
-                for (target, controls) in self.program.controls.iter_mut().enumerate() {
-                    if program::reachable(
-                        &self.program.successors,
-                        successor,
-                        target,
-                        &reconvergence,
-                    ) {
-                        controls.push((block, successor));
-                    }
+            let mut controlled = FixedBitSet::with_capacity(count);
+            for &successor in &self.program.successors[block] {
+                let reachable =
+                    program::reachable_set(&self.program.successors, successor, &reconvergence);
+                for target in reachable.ones() {
+                    self.program.controls[target].push((block, successor));
                 }
+                controlled.union_with(&reachable);
             }
             for &(collective, permitted, span, _) in &self.findings.collectives {
                 if value.variance > permitted
                     && !postdominates(collective, block)
-                    && self.program.successors[block].iter().any(|&successor| {
-                        program::reachable(
-                            &self.program.successors,
-                            successor,
-                            collective,
-                            &reconvergence,
-                        )
-                    })
+                    && controlled.contains(collective)
                 {
                     let context = self
                         .program

@@ -1,5 +1,6 @@
 use std::rc::Rc;
 
+use fixedbitset::FixedBitSet;
 use gpurs_artifact::Primitive;
 use gpurs_rustc::{
     Body, Dominators, FxHashMap, FxHashSet, Graph, Instance, Session, TerminatorKind, Ty,
@@ -110,6 +111,23 @@ pub fn reachable(
         pending.extend(successors[block].iter().copied());
     }
     false
+}
+
+pub fn reachable_set(
+    successors: &[Vec<usize>],
+    start: usize,
+    barriers: &FxHashSet<usize>,
+) -> FixedBitSet {
+    let mut pending = vec![start];
+    let mut visited = FixedBitSet::with_capacity(successors.len());
+    while let Some(block) = pending.pop() {
+        if visited.contains(block) || barriers.contains(&block) {
+            continue;
+        }
+        visited.insert(block);
+        pending.extend(successors[block].iter().copied());
+    }
+    visited
 }
 
 pub fn normal_successors(body: &Body, block: usize) -> Vec<usize> {

@@ -50,7 +50,14 @@ impl<T: Clone> DerefMut for Shared<T> {
 
 impl<T: PartialEq> PartialEq for Shared<T> {
     fn eq(&self, other: &Self) -> bool {
-        Rc::ptr_eq(&self.0, &other.0) || self.0.value == other.0.value
+        Rc::ptr_eq(&self.0, &other.0)
+            || (self
+                .0
+                .hash
+                .get()
+                .zip(other.0.hash.get())
+                .is_none_or(|(left, right)| left == right)
+                && self.0.value == other.0.value)
     }
 }
 
@@ -119,12 +126,6 @@ where
 impl<A, T: FromIterator<A>> FromIterator<A> for Shared<T> {
     fn from_iter<I: IntoIterator<Item = A>>(iter: I) -> Self {
         T::from_iter(iter).into()
-    }
-}
-
-impl<T: Default> Shared<T> {
-    pub fn new() -> Self {
-        Self::default()
     }
 }
 

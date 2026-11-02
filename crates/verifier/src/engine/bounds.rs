@@ -29,7 +29,10 @@ impl Direction {
 impl Engine<'_> {
     /// Launch bounds of `polynomial` in `direction` on this path.
     pub fn bounds(&self, polynomial: &Polynomial, direction: Direction) -> Vec<Bound> {
-        let key = (self.facts.to_vec(), polynomial.clone(), direction);
+        if polynomial.launch() {
+            return vec![(polynomial.clone(), Requirement::new())];
+        }
+        let key = (self.facts.clone(), polynomial.clone(), direction);
         if let Some((snapshot, result)) = self.cache.bounds.borrow().get(&key)
             && self.dependencies.valid(snapshot)
         {
@@ -40,7 +43,7 @@ impl Engine<'_> {
         let epoch = self.dependencies.epoch;
         let facts = self.context(polynomial);
         let result: Vec<_> = self
-            .search(polynomial, direction, &facts)
+            .search(polynomial, direction, &facts, |_, _| false)
             .into_iter()
             .map(|(bound, requirement, _)| (bound, requirement))
             .collect();
@@ -58,8 +61,18 @@ impl Engine<'_> {
         polynomial: &Polynomial,
         direction: Direction,
         facts: &[(Polynomial, Requirement)],
+        mut accept: impl FnMut(&Polynomial, &Requirement) -> bool,
     ) -> Vec<(Polynomial, Requirement, usize)> {
         let mut results = Vec::new();
+        let terms: Vec<_> = facts
+            .iter()
+            .flat_map(|(fact, extra)| {
+                fact.0
+                    .iter()
+                    .filter(|(term, _)| !symbolic::launch_monomial(term))
+                    .map(move |(term, factor)| (fact, extra, term, factor))
+            })
+            .collect();
         #[expect(
             clippy::mutable_key_type,
             reason = "Cached hashes do not change polynomial equality or ordering"
@@ -80,7 +93,11 @@ impl Engine<'_> {
                 break;
             }
             for (bound, extra) in self.structural(&current, direction, 0) {
-                results.push((bound, solver::union(&requirement, &extra), count));
+                let requirement = solver::union(&requirement, &extra);
+                if accept(&bound, &requirement) {
+                    return results;
+                }
+                results.push((bound, requirement, count));
             }
             if steps == DEPTH {
                 continue;
@@ -89,43 +106,39 @@ impl Engine<'_> {
                 if symbolic::launch_monomial(monomial) {
                     continue;
                 }
-                for (fact, extra) in facts {
-                    for (term, factor) in &fact.0 {
-                        if symbolic::launch_monomial(term) {
-                            continue;
-                        }
-                        let Some(multiplier) = symbolic::divide_monomial(monomial, term) else {
-                            continue;
-                        };
-                        if !symbolic::launch_monomial(&multiplier) {
-                            continue;
-                        }
-                        let numerator = match direction {
-                            Direction::Upper => -coefficient,
-                            Direction::Lower => *coefficient,
-                        };
-                        if numerator % factor != 0 || numerator / factor <= 0 {
-                            continue;
-                        }
-                        let scaled = Polynomial::monomial(multiplier, numerator / factor);
-                        let sign = match direction {
-                            Direction::Upper => 1,
-                            Direction::Lower => -1,
-                        };
-                        let Some(next) = scaled
-                            .multiply(fact)
-                            .and_then(|scaled| current.add(&scaled, sign))
-                        else {
-                            continue;
-                        };
-                        if next.varying() <= count {
-                            pending.push(Reverse((
-                                next.varying(),
-                                steps + 1,
-                                next,
-                                solver::union(&requirement, extra),
-                            )));
-                        }
+                for &(fact, extra, term, factor) in &terms {
+                    let Some(multiplier) = symbolic::divide_monomial(monomial, term) else {
+                        continue;
+                    };
+                    if !symbolic::launch_monomial(&multiplier) {
+                        continue;
+                    }
+                    let numerator = match direction {
+                        Direction::Upper => -coefficient,
+                        Direction::Lower => *coefficient,
+                    };
+                    if numerator % factor != 0 || numerator / factor <= 0 {
+                        continue;
+                    }
+                    let scaled = Polynomial::monomial(multiplier, numerator / factor);
+                    let sign = match direction {
+                        Direction::Upper => 1,
+                        Direction::Lower => -1,
+                    };
+                    let Some(next) = scaled
+                        .multiply(fact)
+                        .and_then(|scaled| current.add(&scaled, sign))
+                    else {
+                        continue;
+                    };
+                    let varying = next.varying();
+                    if varying <= count {
+                        pending.push(Reverse((
+                            varying,
+                            steps + 1,
+                            next,
+                            solver::union(&requirement, extra),
+                        )));
                     }
                 }
             }
@@ -140,6 +153,9 @@ impl Engine<'_> {
         direction: Direction,
         depth: usize,
     ) -> Vec<Bound> {
+        if polynomial.launch() {
+            return vec![(polynomial.clone(), Requirement::new())];
+        }
         let mut sums = vec![(Polynomial::default(), Requirement::new())];
         for (monomial, coefficient) in &polynomial.0 {
             let terms = if symbolic::launch_monomial(monomial) {
@@ -251,7 +267,7 @@ impl Engine<'_> {
                 let mut bounds = Vec::new();
                 let mut dividends = Vec::new();
                 if direction == Direction::Upper {
-                    for fact in self.facts {
+                    for fact in &self.facts {
                         for bound in fact.predicate.bounds() {
                             if let Some(upper) = bound.add(dividend, 1)
                                 && upper.launch()

@@ -3,7 +3,7 @@ use gpurs_rustc::{BinOp, FxHashSet};
 use super::{Analysis, Region, program};
 use crate::{
     proof::{self, Comparison, Proofs},
-    symbolic::{Atom, Fact, Polynomial, Predicate, Relation, Requirement},
+    symbolic::{Atom, Fact, Facts, Polynomial, Predicate, Relation, Requirement},
 };
 
 impl Analysis<'_, '_> {
@@ -188,7 +188,7 @@ impl Analysis<'_, '_> {
                     Some((write, guards))
                 })
                 .collect();
-            let coverage = |facts: &[Fact]| {
+            let coverage = |facts: &Facts| {
                 writes
                     .iter()
                     .filter_map(|(write, guards)| {

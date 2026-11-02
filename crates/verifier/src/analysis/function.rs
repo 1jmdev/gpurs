@@ -44,6 +44,7 @@ impl Analysis<'_, '_> {
         });
         let count = body.blocks.len();
         let collect = mem::replace(&mut self.collect, false);
+        let mut exits = vec![None; count];
         self.dependencies.begin();
         let mut epoch = self.dependencies.epoch;
         let states = if let Some(states) = cached_states {
@@ -54,6 +55,7 @@ impl Analysis<'_, '_> {
         } else {
             let mut states = Vec::new();
             for round in 0..ROUNDS {
+                exits.fill(None);
                 self.dependencies.restart();
                 epoch = self.dependencies.epoch;
                 let changed = mem::replace(&mut self.changed, false);
@@ -75,6 +77,12 @@ impl Analysis<'_, '_> {
                     }
                     let mut state = states[block].clone().unwrap();
                     if !self.block(block, &mut state) {
+                        continue;
+                    }
+                    if !collect
+                        && matches!(body.blocks[block].terminator.kind, TerminatorKind::Return)
+                    {
+                        exits[block] = Some(state);
                         continue;
                     }
                     let variance = match &body.blocks[block].terminator.kind {
@@ -130,11 +138,11 @@ impl Analysis<'_, '_> {
             return None;
         }
         let mut exit = None;
-        let mut exits = vec![None; count];
         for (block, state) in states.iter().cloned().enumerate() {
-            if !self.collect
-                && !matches!(body.blocks[block].terminator.kind, TerminatorKind::Return)
-            {
+            if !self.collect {
+                if let Some(state) = exits[block].take() {
+                    self.merge(&mut exit, state, count);
+                }
                 continue;
             }
             let Some(mut state) = state else {
@@ -216,13 +224,16 @@ impl Analysis<'_, '_> {
     pub fn block(&mut self, block: usize, state: &mut State) -> bool {
         let frame = self.frame();
         let offset = self.program.contexts[frame.context].offset;
-        state.controls.retain(|&branch, _| {
+        let keep = |branch| {
             branch < offset
                 || branch >= offset + frame.body.blocks.len()
                 || (branch != offset + block
                     && !(frame.postdominators.is_reachable(branch - offset)
                         && frame.postdominators.dominates(block, branch - offset)))
-        });
+        };
+        if state.controls.keys().any(|&branch| !keep(branch)) {
+            state.controls.retain(|&branch, _| keep(branch));
+        }
         let body = self.frame().body.clone();
         self.frames.last_mut().unwrap().block = block;
         for (index, statement) in body.blocks[block].statements.iter().enumerate() {

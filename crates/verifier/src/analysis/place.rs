@@ -202,16 +202,21 @@ impl Analysis<'_, '_> {
     }
 
     pub fn assign(&mut self, place: &Place, mut value: Value, state: &mut State) {
-        value.variance = state
+        let variance = state
             .controls
             .values()
             .map(|(_, variance)| *variance)
             .chain([value.variance])
             .max()
             .unwrap_or(0);
+        if value.variance != variance {
+            value.variance = variance;
+        }
         match self.locate(place, state) {
             Location::Slot(slot, path) => {
-                state::set(&mut state.slots.make_mut()[slot], &path, value)
+                if !path.is_empty() || state.slots[slot] != value {
+                    state::set(&mut state.slots.make_mut()[slot], &path, value);
+                }
             }
             Location::Memory(origin) => self.access(&origin, true, false, state),
             Location::Unknown => {

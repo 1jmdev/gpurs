@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use super::{Cache, Dependencies, Direction, Proof};
-use crate::symbolic::{self, Clause, Fact, Polynomial, Predicate, Relation, Requirement};
+use crate::symbolic::{self, Clause, Facts, Polynomial, Predicate, Relation, Requirement};
 
 const OPTIONS: usize = 4;
 
@@ -22,7 +22,7 @@ pub struct Engine<'a> {
     pub variables: &'a [Variable],
     /// Bit width of each kernel parameter that is a scalar launch variable.
     pub scalars: &'a [u32],
-    pub facts: &'a [Fact],
+    pub facts: Facts,
 }
 
 /// The requirement marking a bound that rests on the type range of an opaque value. Such a
@@ -71,7 +71,7 @@ impl Engine<'_> {
         if let Some(truth) = goal.truth() {
             return truth.then(Requirement::new);
         }
-        let key = (self.facts.to_vec(), goal.clone());
+        let key = (self.facts.clone(), goal.clone());
         if let Some((snapshot, result)) = self.cache.proofs.borrow().get(&key)
             && self.dependencies.valid(snapshot)
         {
@@ -125,7 +125,7 @@ impl Engine<'_> {
         if self.facts.is_empty() {
             return None;
         }
-        let key = (self.facts.to_vec(), own, reason.to_owned());
+        let key = (self.facts.clone(), own, reason.to_owned());
         if let Some((snapshot, result)) = self.cache.contradictions.borrow().get(&key)
             && self.dependencies.valid(snapshot)
         {
@@ -154,7 +154,7 @@ impl Engine<'_> {
                 .map(|(_, fact)| fact.clone())
                 .collect();
             let engine = Engine {
-                facts: &others,
+                facts: others.into(),
                 ..*self
             };
             let Some(negation) = fact.predicate.negate() else {
@@ -193,11 +193,15 @@ impl Engine<'_> {
             .filter(|(fact, _)| fact.launch())
             .cloned()
             .collect();
-        let candidates = self.search(polynomial, Direction::Lower, facts);
-        for (bound, requirement, _) in &candidates {
-            if let Some(decided) = self.decide(bound, &launch) {
-                return Some(Proof::fixed(clean(union(requirement, &decided))));
-            }
+        let mut proof = None;
+        let candidates = self.search(polynomial, Direction::Lower, facts, |bound, requirement| {
+            proof = self
+                .decide(bound, &launch)
+                .map(|decided| Proof::fixed(clean(union(requirement, &decided))));
+            proof.is_some()
+        });
+        if proof.is_some() {
+            return proof;
         }
         // Any bound suffices together with its own requirement, so the host clauses are the distribution
         // of `⋁ (bound ≥ 0 ∧ requirement)` into conjunctive form.
