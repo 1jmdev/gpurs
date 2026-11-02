@@ -17,7 +17,24 @@ struct Program {
     destroy: unsafe extern "C" fn(*mut Handle) -> c_int,
 }
 
+pub struct Compiler {
+    library: Library,
+    libdevice: Vec<u8>,
+}
+
 impl Toolkit {
+    pub fn compiler(&self) -> io::Result<Compiler> {
+        // SAFETY: the library remains loaded for the lifetime of every program.
+        let library = unsafe { Library::new(self.root.join(LIBNVVM)) }
+            .map_err(|error| io::Error::other(format!("cannot load libNVVM: {error}")))?;
+        Ok(Compiler {
+            library,
+            libdevice: fs::read(self.root.join(LIBDEVICE))?,
+        })
+    }
+}
+
+impl Compiler {
     /// Compiles NVVM IR to PTX for `sm_XY`, linking libdevice lazily.
     ///
     /// # Errors
@@ -25,11 +42,9 @@ impl Toolkit {
     pub fn ptx(&self, ir: &str, architecture: &str) -> io::Result<String> {
         // SAFETY: entry points match nvvm.h; buffers and the library outlive the program.
         unsafe {
-            let library = Library::new(self.root.join(LIBNVVM))
-                .map_err(|error| io::Error::other(format!("cannot load libNVVM: {error}")))?;
             macro_rules! entry {
                 ($name:literal: $($argument:ty),*) => {
-                    *library
+                    *self.library
                         .get::<unsafe extern "C" fn($($argument),*) -> c_int>($name)
                         .map_err(io::Error::other)?
                 };
@@ -46,15 +61,14 @@ impl Toolkit {
             let result_size = entry!(b"nvvmGetCompiledResultSize": Handle, *mut usize);
             let result = entry!(b"nvvmGetCompiledResult": Handle, *mut c_char);
 
-            let libdevice = fs::read(self.root.join(LIBDEVICE))?;
             let mut handle = ptr::null_mut();
             check(create(&mut handle))?;
             let program = Program { handle, destroy };
             check(add(handle, ir.as_ptr().cast(), ir.len(), c"gpurs".as_ptr()))?;
             check(lazy(
                 handle,
-                libdevice.as_ptr().cast(),
-                libdevice.len(),
+                self.libdevice.as_ptr().cast(),
+                self.libdevice.len(),
                 c"libdevice".as_ptr(),
             ))?;
             let architecture = CString::new(format!(

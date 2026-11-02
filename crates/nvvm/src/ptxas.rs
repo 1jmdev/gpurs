@@ -18,7 +18,6 @@ impl Toolkit {
         let result = command
             .arg(format!("-arch={architecture}"))
             .arg("-O3")
-            .arg("--split-compile=0")
             .arg(&source)
             .arg("-o")
             .arg(&output)

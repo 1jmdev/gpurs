@@ -26,8 +26,7 @@ pub struct Artifact {
     pub alternatives: Vec<Artifact>,
 }
 
-/// The kernels of one crate lowered for one architecture; `gpurs-build` links those of every
-/// crate of a package into one module.
+/// The kernels of one crate lowered for one architecture, with one fragment per kernel.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct LoweredCrate {
     pub compiler: String,

@@ -32,25 +32,57 @@ impl Function {
         let dominators = graph.dominators();
         let frontiers = graph.frontiers(&dominators);
 
+        let mut predecessors = vec![Vec::new(); self.blocks.len()];
+        let mut definitions = vec![FxHashSet::default(); self.blocks.len()];
+        let mut live = vec![FxHashSet::default(); self.blocks.len()];
+        let mut stores: FxHashMap<u32, Vec<usize>> = FxHashMap::default();
+        for block in 0..self.blocks.len() {
+            for successor in self.successors(block) {
+                predecessors[successor].push(block);
+            }
+            for (_, instruction) in &self.blocks[block].instructions {
+                match instruction {
+                    Instruction::Load(pointer, ..) => {
+                        if let Some(slot) = slot_of(&addresses, pointer)
+                            && types.contains_key(&slot)
+                            && !definitions[block].contains(&slot)
+                        {
+                            live[block].insert(slot);
+                        }
+                    }
+                    Instruction::Store(_, pointer, ..) => {
+                        if let Some(slot) = slot_of(&addresses, pointer)
+                            && types.contains_key(&slot)
+                            && definitions[block].insert(slot)
+                        {
+                            stores.entry(slot).or_default().push(block);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let mut pending: Vec<_> = (0..self.blocks.len()).collect();
+        while let Some(block) = pending.pop() {
+            for &predecessor in &predecessors[block] {
+                let incoming: Vec<_> = live[block]
+                    .difference(&definitions[predecessor])
+                    .copied()
+                    .collect();
+                let length = live[predecessor].len();
+                live[predecessor].extend(incoming);
+                if live[predecessor].len() != length {
+                    pending.push(predecessor);
+                }
+            }
+        }
         let mut phis: FxHashMap<(usize, u32), u32> = FxHashMap::default();
         for slot in types.keys() {
-            let mut pending: Vec<usize> = order
-                .iter()
-                .copied()
-                .filter(|&block| {
-                    self.blocks[block]
-                        .instructions
-                        .iter()
-                        .any(|(_, instruction)| {
-                            matches!(instruction, Instruction::Store(_, pointer, ..)
-                            if slot_of(&addresses, pointer) == Some(*slot))
-                        })
-                })
-                .collect();
+            let mut pending = stores.get(slot).cloned().unwrap_or_default();
             let mut placed = FxHashSet::default();
             while let Some(block) = pending.pop() {
                 for &frontier in &frontiers[block] {
-                    if placed.insert(frontier) {
+                    if live[frontier].contains(slot) && placed.insert(frontier) {
                         let register = self.fresh_register();
                         phis.insert((frontier, *slot), register);
                         pending.push(frontier);
@@ -88,20 +120,12 @@ impl Function {
         }
 
         // A phi takes one entry per incoming edge, unreachable or repeated ones included.
-        let edges: Vec<(usize, usize)> = (0..self.blocks.len())
-            .flat_map(|source| {
-                self.successors(source)
-                    .into_iter()
-                    .map(move |target| (source, target))
-            })
-            .collect();
         let mut inserted: FxHashMap<usize, Vec<(Option<u32>, Instruction)>> = FxHashMap::default();
         for (&(block, slot), &register) in &phis {
             let ty = types[&slot].clone();
-            let incoming = edges
+            let incoming = predecessors[block]
                 .iter()
-                .filter(|(_, target)| *target == block)
-                .map(|&(source, _)| {
+                .map(|&source| {
                     let value = exits
                         .get(&source)
                         .and_then(|exit| exit.get(&slot))
@@ -118,6 +142,34 @@ impl Function {
         for (block, mut phis) in inserted {
             phis.sort_by_key(|(register, _)| *register);
             self.blocks[block].instructions.splice(0..0, phis);
+        }
+        loop {
+            let mut changed = false;
+            for block in &mut self.blocks {
+                block.instructions.retain_mut(|(result, instruction)| {
+                    let Instruction::Phi(_, incoming) = instruction else {
+                        return true;
+                    };
+                    for (value, _) in incoming.iter_mut() {
+                        resolve(value, &replacements);
+                    }
+                    let mut values = incoming
+                        .iter()
+                        .map(|(value, _)| value)
+                        .filter(|value| value.kind != Kind::Register(result.unwrap()));
+                    if let Some(value) = values.next()
+                        && values.all(|other| other == value)
+                    {
+                        replacements.insert(result.unwrap(), value.clone());
+                        changed = true;
+                        return false;
+                    }
+                    true
+                });
+            }
+            if !changed {
+                break;
+            }
         }
         for block in &mut self.blocks {
             for (_, instruction) in &mut block.instructions {

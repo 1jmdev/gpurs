@@ -1,9 +1,12 @@
 use std::{
+    cmp::Reverse,
     collections::{BTreeSet, HashSet},
     env, fs,
     hash::{DefaultHasher, Hash, Hasher},
     path::{Path, PathBuf},
-    process, thread,
+    process,
+    sync::atomic::{AtomicUsize, Ordering},
+    thread,
 };
 
 use gpurs_artifact::{self as artifact, Artifact, Fragment, Kernel, LoweredCrate, Module, Target};
@@ -404,9 +407,7 @@ fn library_view(
     json!({ "externs": externs, "directories": directories }).to_string()
 }
 
-/// Links the kernels of every crate into one module for `architecture`. Each kernel's PTX is
-/// cached by its IR, so only changed kernels pass through libNVVM; ptxas assembles the linked
-/// PTX, which defines every shared function and variable once.
+/// Compiles each kernel into a separately cached module for `architecture`.
 fn link(lowered: &[&LoweredCrate], architecture: &str, cache: &Path) -> Artifact {
     let mut kernels: Vec<Kernel> = Vec::new();
     let mut fragments = Vec::new();
@@ -440,56 +441,79 @@ fn link(lowered: &[&LoweredCrate], architecture: &str, cache: &Path) -> Artifact
     let fingerprint = toolkit
         .fingerprint()
         .unwrap_or_else(|error| fail(&error.to_string()));
-    let modules: Vec<_> = thread::scope(|scope| {
-        let threads: Vec<_> = fragments
-            .iter()
-            .map(|fragment| {
-                let (toolkit, fingerprint) = (&toolkit, &fingerprint);
-                scope.spawn(move || {
-                    let path = cache.join(format!(
-                        "{}.ptx",
-                        content_hash(&format!("{fingerprint}\n{architecture}\n{fragment}"))
-                    ));
-                    fs::read_to_string(&path).unwrap_or_else(|_| {
-                        let fragment = fs::read(cache.join(format!("{fragment}.fragment")))
-                            .unwrap_or_else(|error| fail(&error.to_string()));
-                        let fragment = postcard::from_bytes::<Fragment>(&fragment).unwrap();
-                        let ir = artifact::link([&fragment]);
-                        let ptx = toolkit
-                            .ptx(&ir, architecture)
-                            .unwrap_or_else(|error| fail(&error.to_string()));
-                        write_atomically(&path, ptx.as_bytes());
-                        ptx
-                    })
+    let compiler = toolkit
+        .compiler()
+        .unwrap_or_else(|error| fail(&error.to_string()));
+    let registers = env::var("GPURS_MAX_REGISTERS").unwrap_or_default();
+    let mut work: Vec<_> = fragments.iter().enumerate().collect();
+    work.sort_by_cached_key(|(_, fragment)| {
+        Reverse(
+            fs::metadata(cache.join(format!("{fragment}.fragment")))
+                .unwrap()
+                .len(),
+        )
+    });
+    let next = AtomicUsize::new(0);
+    let mut modules = thread::scope(|scope| {
+        let threads: Vec<_> = (0..thread::available_parallelism().unwrap().get())
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut modules = Vec::new();
+                    while let Some(&(index, fragment)) =
+                        work.get(next.fetch_add(1, Ordering::Relaxed))
+                    {
+                        let path = cache.join(format!(
+                            "{}.ptx",
+                            content_hash(&format!("{fingerprint}\n{architecture}\n{fragment}"))
+                        ));
+                        let ptx = fs::read_to_string(&path).unwrap_or_else(|_| {
+                            let fragment = fs::read(cache.join(format!("{fragment}.fragment")))
+                                .unwrap_or_else(|error| fail(&error.to_string()));
+                            let fragment = postcard::from_bytes::<Fragment>(&fragment).unwrap();
+                            let ir = artifact::link([&fragment]);
+                            let ptx = compiler
+                                .ptx(&ir, architecture)
+                                .unwrap_or_else(|error| fail(&error.to_string()));
+                            write_atomically(&path, ptx.as_bytes());
+                            ptx
+                        });
+                        let hash = content_hash(&format!(
+                            "{fingerprint}\n{architecture}\n{registers}\n{ptx}"
+                        ));
+                        let path = cache.join(format!("{hash}.cubin"));
+                        let cubin = fs::read(&path).unwrap_or_else(|_| {
+                            let scratch =
+                                cache.join(format!("{hash}.{}.{index}.ptxas", process::id()));
+                            fs::create_dir_all(&scratch)
+                                .unwrap_or_else(|error| fail(&error.to_string()));
+                            let cubin = toolkit
+                                .assemble(&ptx, architecture, &scratch)
+                                .unwrap_or_else(|error| fail(&error.to_string()));
+                            fs::remove_dir_all(scratch)
+                                .unwrap_or_else(|error| fail(&error.to_string()));
+                            write_atomically(&path, &cubin);
+                            cubin
+                        });
+                        modules.push((
+                            index,
+                            Module {
+                                cubin,
+                                ptx,
+                                kernels: vec![kernels[index].clone()],
+                            },
+                        ));
+                    }
+                    modules
                 })
             })
             .collect();
         threads
             .into_iter()
-            .map(|thread| thread.join().unwrap())
-            .collect()
+            .flat_map(|thread| thread.join().unwrap())
+            .collect::<Vec<_>>()
     });
-    let ptx = gpurs_nvvm::link_ptx(&modules);
-    let registers = env::var("GPURS_MAX_REGISTERS").unwrap_or_default();
-    let hash = content_hash(&format!(
-        "{fingerprint}\n{architecture}\n{registers}\n{ptx}"
-    ));
-    let path = cache.join(format!("{hash}.cubin"));
-    let cubin = fs::read(&path).unwrap_or_else(|_| {
-        let scratch = cache.join(format!("{hash}.{}.ptxas", process::id()));
-        fs::create_dir_all(&scratch).unwrap_or_else(|error| fail(&error.to_string()));
-        let cubin = toolkit
-            .assemble(&ptx, architecture, &scratch)
-            .unwrap_or_else(|error| fail(&error.to_string()));
-        fs::remove_dir_all(scratch).unwrap_or_else(|error| fail(&error.to_string()));
-        write_atomically(&path, &cubin);
-        cubin
-    });
-    artifact.modules.push(Module {
-        cubin,
-        ptx,
-        kernels,
-    });
+    modules.sort_by_key(|(index, _)| *index);
+    artifact.modules = modules.into_iter().map(|(_, module)| module).collect();
     artifact
 }
 
