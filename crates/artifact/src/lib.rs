@@ -32,10 +32,9 @@ pub struct Artifact {
 pub struct LoweredCrate {
     pub compiler: String,
     pub architecture: String,
-    pub kernels: Vec<(Kernel, Fragment)>,
+    /// Each kernel with the identity of its NVVM fragment in the compiler cache.
+    pub kernels: Vec<(Kernel, String)>,
     pub types: Vec<TransferType>,
-    /// Host statements per device function, keyed by its source file and line.
-    pub references: Vec<(String, u32, String)>,
 }
 
 /// Kernel entry points compiled into one CUBIN image.

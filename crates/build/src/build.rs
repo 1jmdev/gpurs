@@ -6,7 +6,7 @@ use std::{
     process, thread,
 };
 
-use gpurs_artifact::{self as artifact, Artifact, Kernel, LoweredCrate, Module, Target};
+use gpurs_artifact::{self as artifact, Artifact, Fragment, Kernel, LoweredCrate, Module, Target};
 use gpurs_nvvm::{TOOLKIT_ENVIRONMENT, Toolkit};
 use serde_json::{Map, Value, json};
 
@@ -53,12 +53,8 @@ pub fn compile_architectures(architectures: &[&str]) {
     let compiler = Path::new(COMPILER_LIBRARY).parent().unwrap();
     let cache = compiler.join("cache");
     fs::create_dir_all(&cache).unwrap_or_else(|error| fail(&error.to_string()));
-    let library = fs::metadata(COMPILER_LIBRARY).unwrap();
     let mut configuration = vec![
-        (
-            "GPURS_COMPILER_ID",
-            format!("{:?}:{}", library.modified().unwrap(), library.len()),
-        ),
+        ("GPURS_VERSION", env!("CARGO_PKG_VERSION").to_owned()),
         ("GPURS_ARCHITECTURE", architectures.join(",")),
         (
             "GPURS_OVERFLOW_CHECKS",
@@ -97,47 +93,64 @@ pub fn compile_architectures(architectures: &[&str]) {
         .filter(|path| path.extension().is_some_and(|extension| extension == "bin"))
         .collect();
     paths.sort();
-    let mut crates = Vec::new();
+    let mut inputs = Vec::new();
+    let mut references = String::new();
     for path in paths {
         let name = path.file_name().unwrap().to_string_lossy();
         if sources.contains(name.split_once('-').unwrap().0) {
-            let bytes = fs::read(&path).unwrap();
-            crates.push(postcard::from_bytes::<Vec<LoweredCrate>>(&bytes).unwrap());
+            references.push_str(
+                &fs::read_to_string(path.with_extension("references")).unwrap_or_default(),
+            );
+            inputs.push(fs::read(&path).unwrap());
         } else {
             fs::remove_file(&path).unwrap();
         }
     }
-    let references: String = crates
-        .iter()
-        .flat_map(|lowered| &lowered[0].references)
-        .map(|(file, line, statement)| format!("{file}\t{line}\t{statement}\n"))
-        .collect();
+    let image = directory.join("gpurs_artifact.bin");
     let references_path = directory.join("gpurs_references.tsv");
     fs::write(&references_path, references).unwrap_or_else(|error| fail(&error.to_string()));
+    // The image depends only on the lowered kernels and the toolkit configuration, so
+    // unchanged kernels skip decoding and linking.
+    let identity_path = directory.join("gpurs_artifact.identity");
+    let mut hasher = DefaultHasher::new();
+    (&inputs, architectures).hash(&mut hasher);
+    for name in TOOLKIT_ENVIRONMENT
+        .into_iter()
+        .chain(["GPURS_MAX_REGISTERS"])
+    {
+        env::var_os(name).hash(&mut hasher);
+    }
+    let identity = format!("{:016x}", hasher.finish());
+    if !image.exists() || fs::read_to_string(&identity_path).ok().as_ref() != Some(&identity) {
+        let crates: Vec<_> = inputs
+            .iter()
+            .map(|bytes| postcard::from_bytes::<Vec<LoweredCrate>>(bytes).unwrap())
+            .collect();
+        let mut compiled = thread::scope(|scope| {
+            let threads: Vec<_> = architectures
+                .iter()
+                .enumerate()
+                .map(|(index, architecture)| {
+                    let lowered: Vec<_> = crates.iter().map(|lowered| &lowered[index]).collect();
+                    let cache = &cache;
+                    scope.spawn(move || link(&lowered, architecture, cache))
+                })
+                .collect();
+            threads
+                .into_iter()
+                .map(|thread| thread.join().unwrap())
+                .collect::<Vec<_>>()
+                .into_iter()
+        });
+        let mut artifact = compiled.next().unwrap();
+        artifact.alternatives = compiled.collect();
+        fs::write(&image, artifact.encode()).unwrap_or_else(|error| fail(&error.to_string()));
+        fs::write(&identity_path, identity).unwrap_or_else(|error| fail(&error.to_string()));
+    }
     println!(
         "cargo::rustc-env=GPURS_REFERENCES={}",
         references_path.display()
     );
-    let mut compiled = thread::scope(|scope| {
-        let threads: Vec<_> = architectures
-            .iter()
-            .enumerate()
-            .map(|(index, architecture)| {
-                let lowered: Vec<_> = crates.iter().map(|lowered| &lowered[index]).collect();
-                let cache = &cache;
-                scope.spawn(move || link(&lowered, architecture, cache))
-            })
-            .collect();
-        threads
-            .into_iter()
-            .map(|thread| thread.join().unwrap())
-            .collect::<Vec<_>>()
-            .into_iter()
-    });
-    let mut artifact = compiled.next().unwrap();
-    artifact.alternatives = compiled.collect();
-    let image = directory.join("gpurs_artifact.bin");
-    fs::write(&image, artifact.encode()).unwrap_or_else(|error| fail(&error.to_string()));
     println!("cargo::rustc-env=GPURS_ARTIFACT={}", image.display());
     println!("cargo::rerun-if-changed={COMPILER_LIBRARY}");
     for name in TOOLKIT_ENVIRONMENT.into_iter().chain([
@@ -433,12 +446,15 @@ fn link(lowered: &[&LoweredCrate], architecture: &str, cache: &Path) -> Artifact
             .map(|fragment| {
                 let (toolkit, fingerprint) = (&toolkit, &fingerprint);
                 scope.spawn(move || {
-                    let ir = artifact::link([*fragment]);
                     let path = cache.join(format!(
                         "{}.ptx",
-                        content_hash(&format!("{fingerprint}\n{architecture}\n{ir}"))
+                        content_hash(&format!("{fingerprint}\n{architecture}\n{fragment}"))
                     ));
                     fs::read_to_string(&path).unwrap_or_else(|_| {
+                        let fragment = fs::read(cache.join(format!("{fragment}.fragment")))
+                            .unwrap_or_else(|error| fail(&error.to_string()));
+                        let fragment = postcard::from_bytes::<Fragment>(&fragment).unwrap();
+                        let ir = artifact::link([&fragment]);
                         let ptx = toolkit
                             .ptx(&ir, architecture)
                             .unwrap_or_else(|error| fail(&error.to_string()));

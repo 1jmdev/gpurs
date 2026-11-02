@@ -331,7 +331,10 @@ impl<'tcx> Session<'tcx> {
             let FileName::Real(name) = &location.file.name else {
                 continue;
             };
-            let Some(file) = name.local_path().and_then(|path| fs::canonicalize(path).ok()) else {
+            let Some(file) = name
+                .local_path()
+                .and_then(|path| fs::canonicalize(path).ok())
+            else {
                 continue;
             };
             let device = tcx.parent_module_from_def_id(def).to_local_def_id();
@@ -364,7 +367,8 @@ impl<'tcx> Session<'tcx> {
                 .items_in_stable_order()
                 .into_iter()
                 .filter_map(|(local_id, resolution)| {
-                    let (DefKind::AssocFn | DefKind::AssocConst, item) = *resolution.as_ref().ok()?
+                    let (DefKind::AssocFn | DefKind::AssocConst, item) =
+                        *resolution.as_ref().ok()?
                     else {
                         return None;
                     };
@@ -406,29 +410,32 @@ impl<'tcx> Session<'tcx> {
                 })
                 .all(|def| !def.is_local() || tcx.visibility(def).is_accessible_from(module, tcx))
         };
-        let nameable = args.iter().flat_map(|arg| arg.walk()).all(|arg| match arg.kind() {
-            GenericArgKind::Type(ty) => match ty.kind() {
-                ty::Adt(adt, _) => visible(adt.did()),
-                ty::Alias(_, alias) => !alias.is_opaque(),
-                ty::Closure(..)
-                | ty::CoroutineClosure(..)
-                | ty::Coroutine(..)
-                | ty::CoroutineWitness(..)
-                | ty::FnDef(..)
-                | ty::Foreign(..)
-                | ty::Dynamic(..)
-                | ty::Infer(..)
-                | ty::Error(..)
-                | ty::Bound(..)
-                | ty::Placeholder(..) => false,
-                _ => true,
-            },
-            GenericArgKind::Const(constant) => matches!(
-                constant.kind(),
-                ty::ConstKind::Param(..) | ty::ConstKind::Value(..)
-            ),
-            GenericArgKind::Lifetime(_) => true,
-        });
+        let nameable = args
+            .iter()
+            .flat_map(|arg| arg.walk())
+            .all(|arg| match arg.kind() {
+                GenericArgKind::Type(ty) => match ty.kind() {
+                    ty::Adt(adt, _) => visible(adt.did()),
+                    ty::Alias(_, alias) => !alias.is_opaque(),
+                    ty::Closure(..)
+                    | ty::CoroutineClosure(..)
+                    | ty::Coroutine(..)
+                    | ty::CoroutineWitness(..)
+                    | ty::FnDef(..)
+                    | ty::Foreign(..)
+                    | ty::Dynamic(..)
+                    | ty::Infer(..)
+                    | ty::Error(..)
+                    | ty::Bound(..)
+                    | ty::Placeholder(..) => false,
+                    _ => true,
+                },
+                GenericArgKind::Const(constant) => matches!(
+                    constant.kind(),
+                    ty::ConstKind::Param(..) | ty::ConstKind::Value(..)
+                ),
+                GenericArgKind::Lifetime(_) => true,
+            });
         if !nameable || !visible(item) {
             return None;
         }
