@@ -208,11 +208,11 @@ impl Analysis<'_, '_> {
                     format!("`{operation:?}` does not overflow"),
                 )
             }
-            AssertMessage::DivisionByZero(divisor) | AssertMessage::RemainderByZero(divisor) => {
-                let divisor = self.operand(divisor, state);
-                let description = match &divisor.integer {
-                    Some(divisor) => {
-                        format!("the divisor `{}` is not zero", self.describe(divisor))
+            AssertMessage::DivisionByZero(dividend) | AssertMessage::RemainderByZero(dividend) => {
+                let dividend = self.operand(dividend, state);
+                let description = match &dividend.integer {
+                    Some(dividend) => {
+                        format!("the divisor of `{}` is not zero", self.describe(dividend))
                     }
                     None => "the divisor is not zero".to_owned(),
                 };
