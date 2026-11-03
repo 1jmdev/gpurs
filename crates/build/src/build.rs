@@ -69,6 +69,13 @@ pub fn compile_architectures(architectures: &[&str]) {
             .to_owned(),
         ),
         ("GPURS_ARTIFACTS", artifacts.display().to_string()),
+        // Lowered kernels are cached by this build of the compiler, not only by its version.
+        (
+            "GPURS_COMPILER",
+            content_hash(
+                fs::read(COMPILER_LIBRARY).unwrap_or_else(|error| fail(&error.to_string())),
+            ),
+        ),
     ];
     // Packages share one discovery per profile; a new artifact directory recompiles into it.
     let identity = configuration
@@ -531,11 +538,11 @@ pub(crate) fn source_identity(source: &Path) -> String {
     format!("{:016x}", hasher.finish())
 }
 
-/// A 128-bit hash of `text`, stable across processes of one build of gpurs.
-fn content_hash(text: &str) -> String {
+/// A 128-bit hash of `value`, stable across processes of one build of gpurs.
+fn content_hash(value: impl Hash) -> String {
     let [first, second] = [0u8, 1].map(|seed| {
         let mut hasher = DefaultHasher::new();
-        (seed, text).hash(&mut hasher);
+        (seed, &value).hash(&mut hasher);
         hasher.finish()
     });
     format!("{first:016x}{second:016x}")

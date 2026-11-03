@@ -32,6 +32,7 @@ impl Cache {
             "GPURS_OVERFLOW_CHECKS",
             "GPURS_STRICTNESS",
             "GPURS_INSTRUMENTED",
+            "GPURS_COMPILER",
         ]
         .map(|name| env::var(name).unwrap_or_default())
         .join("\n");
