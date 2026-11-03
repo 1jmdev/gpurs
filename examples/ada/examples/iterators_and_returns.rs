@@ -46,9 +46,20 @@ fn sample(start: f32, step: f32) -> f32 {
     start + gpu::index() as f32 * step
 }
 
+#[gpu]
+fn normalized_quotient(value: u32, divisor: u32) -> u32 {
+    value / divisor.max(1)
+}
+
 fn main() {
     let gpu = Gpu::new(0);
     let stream = gpu.stream();
+    for divisor in [0, 1, 7] {
+        assert_eq!(
+            normalized_quotient(&stream, 42, divisor).read(),
+            42 / divisor.max(1)
+        );
+    }
 
     let values = gpu.upload(&[1.0, -2.0, 3.0, -4.0]);
     let weights = gpu.upload(&[1.0, 2.0, 3.0, 4.0]);

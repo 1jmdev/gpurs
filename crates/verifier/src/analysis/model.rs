@@ -27,6 +27,33 @@ impl Analysis<'_, '_> {
             };
             return Some(Value::integer(Polynomial::constant(value), 0));
         }
+        if matches!(path, "core::cmp::Ord::max" | "core::cmp::max")
+            && let Some(kind @ (false, _)) = receiver.and_then(arithmetic::integer_kind)
+            && let Some(lower) = arguments
+                .iter()
+                .filter_map(|value| value.integer.as_ref().and_then(Polynomial::value))
+                .max()
+        {
+            let variance = arguments
+                .iter()
+                .map(|value| value.variance)
+                .max()
+                .unwrap_or(0);
+            return Some(Value::integer(
+                self.variable(
+                    Vec::new(),
+                    Polynomial::constant(lower),
+                    Some(Polynomial::constant(arithmetic::range(kind).1)),
+                    arguments
+                        .iter()
+                        .flat_map(|value| value.requirement.iter().cloned())
+                        .collect(),
+                    variance,
+                    "an unsigned maximum",
+                ),
+                variance,
+            ));
+        }
         let range = receiver.is_some_and(|ty| self.is_range(ty));
         if range && path == "core::iter::traits::collect::IntoIterator::into_iter" {
             return Some(arguments[0].clone());
