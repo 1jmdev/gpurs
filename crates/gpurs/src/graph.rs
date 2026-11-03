@@ -346,6 +346,7 @@ impl Graph {
     }
 
     pub fn try_instantiate(&self) -> Result<GraphExec> {
+        self.0.device.context.try_trim_pool(0)?;
         Ok(GraphExec {
             raw: self.0.raw.try_instantiate()?,
             graph: self.clone(),
