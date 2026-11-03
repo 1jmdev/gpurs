@@ -7,9 +7,10 @@
 //! as tensor-core fragments, then have constant indices and stay in registers.
 
 use gpurs_rustc::{
-    AggregateKind, Body, ConstOperand, ConstantKind, Dominators, FxHashMap, FxHashSet, Graph,
-    Instance, Local, Location, MirVisitor, Operand, Place, PlaceContext, RigidTy, Rvalue,
-    StatementKind, TerminatorKind, TyKind, statement_location, terminator_location,
+    AggregateKind, BinOp, Body, ConstOperand, ConstantKind, Dominators, FxHashMap, FxHashSet,
+    Graph, Instance, Local, Location, MirVisitor, Operand, Place, PlaceContext, ProjectionElem,
+    RigidTy, Rvalue, StatementKind, TerminatorKind, TyKind, statement_location,
+    terminator_location,
 };
 
 /// The most iterations a loop is unrolled for.
@@ -196,9 +197,7 @@ impl<'body> Definitions<'body> {
         if let Some(rvalue) = self.assignments.get(&local) {
             return match rvalue {
                 Rvalue::Aggregate(AggregateKind::Adt(..), operands) => match operands.as_slice() {
-                    [Operand::Constant(start), Operand::Constant(end)] => {
-                        Some((*words(start)?.first()?, *words(end)?.first()?))
-                    }
+                    [start, end] => Some((self.value(start, DEPTH)?, self.value(end, DEPTH)?)),
                     _ => None,
                 },
                 Rvalue::Use(operand, _) => self.bounds(operand, depth),
@@ -226,6 +225,34 @@ impl<'body> Definitions<'body> {
                 _ => None,
             },
             Operand::Move(place) | Operand::Copy(place) => self.range(local(place)?, depth - 1),
+            _ => None,
+        }
+    }
+
+    /// The value of a `usize` operand that constants determine, such as `BK / 16` of const
+    /// generics, following moves and arithmetic up to `depth` definitions deep.
+    fn value(&self, operand: &Operand, depth: usize) -> Option<u64> {
+        let place = match operand {
+            Operand::Constant(constant) => return constant.const_.eval_target_usize().ok(),
+            Operand::Move(place) | Operand::Copy(place) if depth > 0 => place,
+            _ => return None,
+        };
+        let rvalue = self.assignments.get(&place.local)?;
+        let (operation, left, right) = match (place.projection.as_slice(), rvalue) {
+            ([], Rvalue::Use(operand, _)) => return self.value(operand, depth - 1),
+            ([], Rvalue::BinaryOp(operation, left, right))
+            | ([ProjectionElem::Field(0, _)], Rvalue::CheckedBinaryOp(operation, left, right)) => {
+                (operation, left, right)
+            }
+            _ => return None,
+        };
+        let (left, right) = (self.value(left, depth - 1)?, self.value(right, depth - 1)?);
+        match operation {
+            BinOp::Add => left.checked_add(right),
+            BinOp::Sub => left.checked_sub(right),
+            BinOp::Mul => left.checked_mul(right),
+            BinOp::Div => left.checked_div(right),
+            BinOp::Rem => left.checked_rem(right),
             _ => None,
         }
     }
