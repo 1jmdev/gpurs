@@ -94,7 +94,7 @@ impl<const THREADS: usize> Block<THREADS> {
         let previous = if self.thread() == 0 {
             identity
         } else if warp::lane_id() == 0 {
-            boundaries[self.warp() - 1]
+            boundaries[self.warp().wrapping_sub(1) % 32]
         } else {
             previous
         };

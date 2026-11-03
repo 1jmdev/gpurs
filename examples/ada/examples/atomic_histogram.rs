@@ -15,6 +15,14 @@ fn histogram(input: &[u32], bins: &[AtomicU32]) {
     }
 }
 
+#[gpu]
+fn copy_counts(input: &[AtomicU32], output: &[AtomicU32]) {
+    let index = gpu::index();
+    if index < input.len() && index < output.len() {
+        output[index].store(input[index].load(Ordering::Relaxed), Ordering::Relaxed);
+    }
+}
+
 fn main() {
     let gpu = Gpu::new(0);
     let first_stream = gpu.stream();
@@ -28,11 +36,22 @@ fn main() {
     histogram(&first_stream, &input, &bins);
     histogram(&second_stream, &input, &bins);
 
-    let counts = bins
+    let output = gpu.zeros::<AtomicU32>(BIN_COUNT);
+    copy_counts(
+        &first_stream.with_launch(LaunchConfig {
+            grid: [1, 1, 1],
+            block: [32, 1, 1],
+            shared_bytes: 0,
+        }),
+        &bins,
+        &output,
+    );
+    let counts = output
         .download()
         .into_iter()
         .map(|value| value.into_inner())
         .collect::<Vec<_>>();
 
+    assert_eq!(counts, vec![512; BIN_COUNT]);
     println!("Histogram: {counts:?}");
 }

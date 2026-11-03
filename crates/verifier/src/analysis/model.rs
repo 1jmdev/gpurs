@@ -1,7 +1,7 @@
 use gpurs_rustc::{CrateDef, RigidTy, Ty, TyKind};
 
 use super::{Analysis, Pointer, State, Value, ValueData, arithmetic, state};
-use crate::symbolic::Requirement;
+use crate::symbolic::{Polynomial, Requirement};
 
 impl Analysis<'_, '_> {
     pub(super) fn model(
@@ -11,6 +11,22 @@ impl Analysis<'_, '_> {
         arguments: &[Value],
         state: &mut State,
     ) -> Option<Value> {
+        if let (
+            "core::cmp::Ord::min" | "core::cmp::Ord::max" | "core::cmp::min" | "core::cmp::max",
+            [left, right],
+        ) = (path, arguments)
+            && let (Some(left), Some(right)) = (
+                left.integer.as_ref().and_then(Polynomial::value),
+                right.integer.as_ref().and_then(Polynomial::value),
+            )
+        {
+            let value = if path.ends_with("min") {
+                left.min(right)
+            } else {
+                left.max(right)
+            };
+            return Some(Value::integer(Polynomial::constant(value), 0));
+        }
         let range = receiver.is_some_and(|ty| self.is_range(ty));
         if range && path == "core::iter::traits::collect::IntoIterator::into_iter" {
             return Some(arguments[0].clone());

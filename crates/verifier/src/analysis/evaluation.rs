@@ -1,6 +1,7 @@
 use gpurs_rustc::{
     AdtKind, AggregateKind, Allocation, ConstantKind, NonDivergingIntrinsic, Operand, RigidTy,
-    Rvalue, Shape, StatementKind, Ty, TyConstKind, TyKind, UnOp, VariantIdx, session,
+    Rvalue, Shape, StatementKind, TagEncoding, Ty, TyConstKind, TyKind, UnOp, ValueRepr,
+    VariantIdx, VariantsShape, session,
 };
 
 use super::{
@@ -218,8 +219,37 @@ impl Analysis<'_, '_> {
         }
     }
 
-    /// The integer fields of a struct or tuple constant, such as a `Range`.
+    /// Integer fields and fieldless enum discriminants of aggregate constants.
     fn aggregate_constant(&mut self, ty: Ty, allocation: &Allocation) -> Value {
+        if let TyKind::RigidTy(RigidTy::Adt(definition, _)) = ty.kind()
+            && definition.kind() == AdtKind::Enum
+        {
+            let shape = Shape::of(self.sess, ty);
+            if matches!(shape.repr(), ValueRepr::Scalar(_))
+                && matches!(
+                    shape.layout.variants,
+                    VariantsShape::Multiple {
+                        tag_encoding: TagEncoding::Direct,
+                        ..
+                    }
+                )
+                && shape
+                    .variants
+                    .iter()
+                    .all(|&variant| shape.for_variant(variant).count() == 0)
+                && let Ok(tag) = allocation.read_uint()
+            {
+                let mask = u128::MAX >> (128 - shape.size().bits());
+                return Value::from(ValueData {
+                    variant: shape.variants.iter().find_map(|&variant| {
+                        let value = definition.discriminant_for_variant(variant).val;
+                        (value & mask == tag).then_some(value as i128)
+                    }),
+                    domain: Some(definition.num_variants()),
+                    ..ValueData::default()
+                });
+            }
+        }
         if !matches!(
             ty.kind(),
             TyKind::RigidTy(RigidTy::Adt(definition, _)) if definition.kind() == AdtKind::Struct

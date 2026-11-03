@@ -143,6 +143,10 @@ impl Stream {
         self.record_event(self.raw.record_timed())
     }
 
+    pub fn try_record_timed(&self) -> Result<Event> {
+        Ok(self.record_event(self.raw.try_record_timed()?))
+    }
+
     fn record_event(&self, raw: driver::Event) -> Event {
         Event {
             raw: Rc::new(raw),

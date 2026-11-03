@@ -183,6 +183,21 @@ impl<
         }
     }
 
+    /// Partitions a `rows`x`columns` matrix stored transposed in `data`, as the row-major
+    /// `columns`x`rows` matrix, so that a swapped product `Bᵀ Aᵀ` writes `A B`. Columns the
+    /// slice cannot hold completely are absent.
+    pub fn transposed<const THREADS: usize>(
+        block: &Block<THREADS>,
+        data: &'a mut [T],
+        rows: usize,
+        columns: usize,
+    ) -> Self {
+        let mut output = Self::with_layout(block, data, rows, columns, [1, rows], 0);
+        output.valid_columns = columns.min(output.data.len().checked_div(rows).unwrap_or(0));
+        output.limit = rows;
+        output
+    }
+
     pub fn rows(&self) -> usize {
         self.rows
     }
