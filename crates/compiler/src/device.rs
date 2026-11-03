@@ -84,9 +84,9 @@ impl DeviceView {
             for mut child in children {
                 child.wait().map_err(|error| error.to_string())?;
             }
+            // A worker stops claiming kernels at its first error, so some markers never exist.
             for position in 0..missing.len() {
-                fs::remove_file(format!("{}.{position}", keys.display()))
-                    .map_err(|error| error.to_string())?;
+                let _ = fs::remove_file(format!("{}.{position}", keys.display()));
             }
             fs::remove_file(keys).map_err(|error| error.to_string())?;
         }
