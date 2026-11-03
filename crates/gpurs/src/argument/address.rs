@@ -3,9 +3,8 @@ use std::{marker::PhantomData, rc::Rc};
 use gpurs_macros::primitive;
 
 use crate::{
-    DeviceReferenceMut, ExternalAccess, Gpu,
+    Argument, ArgumentMut, ExternalAccess, Result, Stream,
     buffer::{Buffer, DeviceValue},
-    reference::sealed::Reference,
 };
 
 /// An explicit generic-space GPU address, transferable inside ordinary descriptors and arrays.
@@ -87,9 +86,12 @@ pub struct DeviceDescriptor<T> {
     accesses: Vec<ExternalAccess>,
 }
 
-impl Gpu {
+impl<T> DeviceDescriptor<T> {
     /// Uploads a descriptor and retains its declared dependencies.
     ///
+    ///
+    /// # Errors
+    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
     /// # Safety
     /// Register every reachable allocation, including indirect pointer-table targets, with
     /// its complete range and read/write effect. Addresses must belong to this GPU, respect
@@ -97,29 +99,29 @@ impl Gpu {
     /// must not acquire unregistered addresses during execution. Raw unregistered graphs
     /// require caller-managed retention and ordering instead. Overwrite declarations must
     /// initialize their entire range. Device dereferences remain unsafe.
-    pub unsafe fn upload_descriptor<T>(
-        &self,
+    pub unsafe fn new(
+        stream: &Stream,
         value: &T,
         accesses: &[ExternalAccess],
-    ) -> DeviceDescriptor<T> {
-        let value = self.upload_value(value);
+    ) -> Result<DeviceDescriptor<T>> {
+        let value = DeviceValue::new(stream, value)?;
         for access in accesses {
             assert!(
                 Rc::ptr_eq(&value.buffer.allocation.device, &access.0.allocation.device),
                 "descriptor storage belongs to another GPU"
             );
         }
-        DeviceDescriptor {
+        Ok(DeviceDescriptor {
             value,
             accesses: accesses
                 .iter()
                 .map(|access| ExternalAccess(access.0.clone()))
                 .collect(),
-        }
+        })
     }
 }
 
-impl<T> Reference<T> for DeviceDescriptor<T> {
+impl<T> Argument<T> for DeviceDescriptor<T> {
     fn buffer(&self) -> &Buffer<T> {
         &self.value.buffer
     }
@@ -129,4 +131,4 @@ impl<T> Reference<T> for DeviceDescriptor<T> {
     }
 }
 
-impl<T> DeviceReferenceMut<T> for DeviceDescriptor<T> {}
+impl<T> ArgumentMut<T> for DeviceDescriptor<T> {}

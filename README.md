@@ -1,6 +1,6 @@
 # gpurs
 
-gpurs lets you write NVIDIA GPU kernels in Rust and launch them from Rust. Mark a function with `#[gpu]`, work with device buffers and streams on the host, and use GPU thread and memory operations inside the function.
+Write NVIDIA GPU kernels in Rust and launch them from Rust.
 
 ## Requirements
 
@@ -10,7 +10,7 @@ gpurs lets you write NVIDIA GPU kernels in Rust and launch them from Rust. Mark 
 
 ## Setup
 
-Add gpurs and its build integration to `Cargo.toml`:
+`Cargo.toml`:
 
 ```toml
 [dependencies]
@@ -20,7 +20,7 @@ gpurs = { git = "https://github.com/1jmdev/gpurs" }
 gpurs-build = { git = "https://github.com/1jmdev/gpurs" }
 ```
 
-Add `build.rs` only to crates defining GPU kernels, and choose the compute architecture:
+`build.rs` for crates defining kernels; choose your GPU's architecture:
 
 ```rust
 fn main() {
@@ -28,16 +28,10 @@ fn main() {
 }
 ```
 
-The executable contains kernels compiled for the selected architecture. Choose one compatible with the GPU that will run it.
-
-Kernels can live in library crates and be re-exported from `lib.rs` like ordinary functions. Executables import and call their launchers directly; the build integration discovers and embeds them automatically, without an embedding macro. Kernel libraries embed their own artifacts; crates that only call them need neither a build script nor `gpurs-build`. Generic kernel specializations must be reachable from concrete functions in a crate with build integration.
-
-## A GPU pipeline
-
-A `#[gpu]` function can call other GPU functions. On the host, its generated launcher takes a stream followed by the function's arguments. This pipeline applies two operations to a buffer without copying it back to the host between launches:
+Chain kernels on the same stream:
 
 ```rust
-use gpurs::*;
+use gpurs::{DeviceSlice, Gpu, Result, gpu, kernel};
 
 #[gpu]
 fn adjust(value: f32, offset: f32) -> f32 {
@@ -46,7 +40,7 @@ fn adjust(value: f32, offset: f32) -> f32 {
 
 #[gpu]
 fn add_offset(values: &mut [f32], offset: f32) {
-    let index = gpu::index();
+    let index = kernel::index();
     if index < values.len() {
         values[index] = adjust(values[index], offset);
     }
@@ -54,45 +48,45 @@ fn add_offset(values: &mut [f32], offset: f32) {
 
 #[gpu]
 fn double(values: &mut [f32]) {
-    let index = gpu::index();
+    let index = kernel::index();
     if index < values.len() {
         values[index] *= 2.0;
     }
 }
 
-fn main() {
-    let gpu = Gpu::new(0);
-    let stream = gpu.stream();
-    let mut values = gpu.upload(&[1.0, 2.0, 3.0]);
+fn main() -> Result<()> {
+    let gpu = Gpu::new(0)?;
+    let stream = gpu.stream()?;
+    let mut values = gpu.upload(&[1.0, 2.0, 3.0])?;
 
-    add_offset(&stream, &mut values, 1.0);
-    double(&stream, &mut values);
+    add_offset(&stream, &mut values, 1.0)?;
+    double(&stream, &mut values)?;
 
-    println!("{:?}", values.download());
+    println!("{:?}", values.download()?);
+    Ok(())
 }
 ```
 
-This prints `[4.0, 6.0, 8.0]`. `gpu::index()` is the current thread's linear index. Guard accesses against the slice length because a launch can include extra threads. The stream orders the launches, and `download()` waits for the work needed to read the result.
-
-## Buffers and values
-
-`Gpu::new(0)` opens the first GPU; pass another ordinal to select another device. `upload` copies a host slice into a GPU buffer, and `zeros` allocates a buffer whose element type has a valid all-zero representation. `download` returns a `Vec` on the host.
+Allocate, fill, and download a buffer:
 
 ```rust
-let gpu = Gpu::new(0);
-let stream = gpu.stream();
-let input = gpu.upload(&[2.0_f32, 4.0, 6.0]);
-let mut output = gpu.zeros::<f32>(input.len());
-output.fill(&stream, 3.0);
-println!("{:?}", output.download());
+use gpurs::{DeviceSlice, DeviceSliceMut, Gpu, Result};
+
+fn main() -> Result<()> {
+    let gpu = Gpu::new(0)?;
+    let stream = gpu.stream()?;
+    let input = gpu.upload(&[2.0_f32, 4.0, 6.0])?;
+    let mut output = gpu.zeros::<f32>(input.len())?;
+    output.fill(&stream, 3.0)?;
+    println!("{:?}", output.download()?);
+    Ok(())
+}
 ```
 
-A kernel parameter of type `&[T]` accepts a device buffer or view; `&mut [T]` accepts a mutable buffer or view. Pass ordinary scalar arguments by value. gpurs verifies types transferred between host and device.
-
-Use `upload_value` for a single device-resident value passed by reference. Annotated methods can be launched on that value:
+Launch methods on a device-resident value:
 
 ```rust
-use gpurs::*;
+use gpurs::{DeviceValue, Gpu, Result, gpu};
 
 struct Counter {
     value: u32,
@@ -109,91 +103,79 @@ impl Counter {
     }
 }
 
-fn main() {
-    let gpu = Gpu::new(0);
-    let stream = gpu.stream();
-    let mut counter = gpu.upload_value(&Counter { value: 10 });
+fn main() -> Result<()> {
+    let gpu = Gpu::new(0)?;
+    let stream = gpu.stream()?;
+    let mut counter = DeviceValue::new(&stream, &Counter { value: 10 })?;
 
-    counter.increment(&stream, 5);
-    println!("{}", counter.current(&stream).read());
+    counter.increment(&stream, 5)?;
+    let current = counter.current(&stream)?.into_value();
+    println!("{}", current.read()?);
+    Ok(())
 }
 ```
 
-## Return values
-
-A value-returning function launched on an ordinary stream returns a pending result. Call `read()` to wait for it and retrieve the value. GPU functions can use supported Rust constructs including generics, iterators, tuples, `Option`, and `Result`.
+Return a value from a kernel:
 
 ```rust
-use gpurs::*;
+use gpurs::{Gpu, Result, gpu};
 
 #[gpu]
 fn total(values: &[f32]) -> f32 {
     values.iter().copied().fold(0.0, |sum, value| sum + value)
 }
 
-fn main() {
-    let gpu = Gpu::new(0);
-    let stream = gpu.stream();
-    let values = gpu.upload(&[2.0, 4.0, 6.0]);
-    let result = total(&stream, &values);
+fn main() -> Result<()> {
+    let gpu = Gpu::new(0)?;
+    let stream = gpu.stream()?;
+    let values = gpu.upload(&[2.0, 4.0, 6.0])?;
+    let result = total(&stream, &values)?.into_value();
 
-    println!("{}", result.read());
+    println!("{}", result.read()?);
+    Ok(())
 }
 ```
 
-## Streams and views
-
-A stream is an ordered queue of GPU work. Launches return before the GPU finishes; `stream.synchronize()` waits for all work on that stream. gpurs tracks accesses to buffer regions across streams and orders dependent work automatically. Views let kernels operate on a portion of a buffer, and `split_at_mut` provides two disjoint mutable views:
+Use the earlier `add_offset` kernel on disjoint views across two streams:
 
 ```rust
-let first_stream = gpu.stream();
-let second_stream = gpu.stream();
-let mut values = gpu.upload(&[1.0_f32, 2.0, 3.0, 4.0]);
+let first_stream = gpu.stream()?;
+let second_stream = gpu.stream()?;
+let mut values = gpu.upload(&[1.0_f32, 2.0, 3.0, 4.0])?;
 
 {
     let (mut first, mut second) = values.split_at_mut(2);
-    add_offset(&first_stream, &mut first, 10.0);
-    add_offset(&second_stream, &mut second, 20.0);
+    add_offset(&first_stream, &mut first, 10.0)?;
+    add_offset(&second_stream, &mut second, 20.0)?;
 }
 
-println!("{:?}", values.download());
+println!("{:?}", values.download()?);
 ```
 
-This uses `add_offset` from the pipeline above and prints `[11.0, 12.0, 23.0, 24.0]`. Use `view(range)` or `view_mut(range)` to access a single region. A later launch or download waits for the relevant earlier accesses, including work on other streams.
-
-## Launch geometry
-
-For kernels whose geometry cannot be inferred, or when you need specific dimensions, use `Stream::with_launch`. The grid and block dimensions are arrays of three sizes; `shared_bytes` is the amount of dynamic shared memory in bytes.
+Set explicit launch dimensions:
 
 ```rust
-use gpurs::*;
+use gpurs::{DeviceSlice, Gpu, LaunchConfig, Result, gpu, kernel};
 
 #[gpu]
 fn position(origin: f32, step: f32) -> f32 {
-    origin + gpu::index() as f32 * step
+    origin + kernel::index() as f32 * step
 }
 
-fn main() {
-    let gpu = Gpu::new(0);
-    let stream = gpu.stream();
-    let launch = stream.with_launch(LaunchConfig {
+fn main() -> Result<()> {
+    let gpu = Gpu::new(0)?;
+    let stream = gpu.stream()?;
+    let launch = stream.launch(LaunchConfig {
         grid: [2, 1, 1],
         block: [32, 1, 1],
         shared_bytes: 0,
     });
 
-    let positions = position(&launch, 0.0, 0.5);
-    println!("{:?}", positions.download());
+    let positions = position(&launch, 0.0, 0.5)?;
+    println!("{:?}", positions.download()?);
+    Ok(())
 }
 ```
-
-A configured launch of a value-returning function returns a buffer with one result per thread. Device code can also use `gpu::thread_id()`, `gpu::block_id()`, `gpu::block_dim()`, and `gpu::grid_dim()` to work with multidimensional geometry.
-
-## GPU operations
-
-`gpu::shared_array::<T, N>()` provides block-shared storage, and `gpu::sync_block()` synchronizes threads in a block. Warp operations are available under `gpu::warp`; atomic types and ordering are available under `gpu::atomic`. These operations require appropriate launch geometry and synchronization for the algorithm.
-
-Failures in GPU work are observed when the affected work is synchronized or its result is downloaded. gpurs tracks dependencies so failures can propagate to dependent work; overwriting affected buffer regions allows those regions to be recovered.
 
 ## License
 

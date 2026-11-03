@@ -1,13 +1,18 @@
-use std::{alloc::Layout, collections::HashSet, mem::MaybeUninit, rc::Rc, slice};
+use std::{
+    alloc::Layout,
+    collections::HashSet,
+    mem::{self, MaybeUninit},
+    rc::Rc,
+    slice,
+};
 
-use gpurs_driver as driver;
+use gpurs_driver::Module;
 
 use crate::{
-    Buffer, DeviceAddress, DeviceSlice, DeviceSliceMut, Error, ExternalAccess, Gpu, Launch,
-    LaunchConfig, PinnedBuffer, Result, Stream, Transfer,
+    Argument, Buffer, DeviceAddress, DeviceSlice, DeviceSliceMut, Error, ExternalAccess, Gpu,
+    Launch, LaunchConfig, PinnedBuffer, Result, Stream, Transfer,
     gpu::Scatter,
     graph::{CapturedKernel, CapturedOperation},
-    reference::sealed::Reference,
     tracking::{self, Access},
 };
 
@@ -20,32 +25,34 @@ pub struct DeviceScatter<T> {
     _upload: Option<Transfer<PinnedBuffer<Scatter<T>>>>,
 }
 
-impl Gpu {
+impl<T: Copy> DeviceScatter<T> {
     /// Snapshots GPU indices asynchronously, suppressing out-of-bounds and duplicate entries.
     /// Every occurrence of a duplicate destination is disabled. Subsequent source changes
-    /// do not affect this view; use `DeviceScatter::try_update_device` to refresh it.
-    pub fn try_scatter_device<T: Copy>(
-        &self,
+    /// do not affect this view; use `DeviceScatter::update_device` to refresh it.
+    ///
+    /// # Errors
+    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
+    pub fn from_device(
         stream: &Stream,
         target: &mut impl DeviceSliceMut<T>,
         indices: &impl DeviceSlice<usize>,
     ) -> Result<DeviceScatter<T>> {
+        let gpu = Gpu {
+            device: stream.device.clone(),
+        };
         let span = target.span();
         if span.len == 0
             || indices.is_empty()
-            || !Rc::ptr_eq(&self.device, &span.allocation.device)
-            || !Rc::ptr_eq(&self.device, &stream.device)
+            || !Rc::ptr_eq(&stream.device, &span.allocation.device)
+            || !Rc::ptr_eq(&stream.device, &stream.device)
         {
             return Err(Error::InvalidOperation(
                 "scatter views require nonempty ranges on the same GPU".to_owned(),
             ));
         }
-        let allocation =
-            self.try_allocate(Layout::array::<usize>(indices.len()).map_err(|_| {
-                Error::InvalidOperation(
-                    "scatter index allocation exceeds the size range".to_owned(),
-                )
-            })?)?;
+        let allocation = gpu.allocate(Layout::array::<usize>(indices.len()).map_err(|_| {
+            Error::InvalidOperation("scatter index allocation exceeds the size range".to_owned())
+        })?)?;
         let target_len = span.len;
         let descriptor = Scatter {
             // SAFETY: the target is retained by the descriptor's tracked dependency.
@@ -56,10 +63,7 @@ impl Gpu {
             target_len: span.len,
         };
         let mut snapshot = DeviceScatter {
-            buffer: Buffer::new(
-                self.try_allocate(Layout::new::<Scatter<T>>())?.allocation,
-                1,
-            ),
+            buffer: Buffer::new(gpu.allocate(Layout::new::<Scatter<T>>())?.allocation, 1),
             dependencies: [
                 ExternalAccess::write(target),
                 ExternalAccess(Access::read(&allocation.allocation, 0..allocation.len())),
@@ -69,21 +73,28 @@ impl Gpu {
             validation: None,
             _upload: None,
         };
-        snapshot.try_update_device(stream, indices)?;
+        snapshot.update_device(stream, indices)?;
         snapshot._upload =
             Some(stream.try_copy_descriptor(&mut snapshot.buffer, slice::from_ref(&descriptor))?);
         Ok(snapshot)
     }
 
-    pub fn try_scatter<T: Copy>(
-        &self,
+    /// Creates retained device storage and verifies its construction requirements.
+    ///
+    /// # Errors
+    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
+    pub fn new(
+        stream: &Stream,
         target: &mut impl DeviceSliceMut<T>,
         indices: &[usize],
     ) -> Result<DeviceScatter<T>> {
+        let gpu = Gpu {
+            device: stream.device.clone(),
+        };
         let span = target.span();
         if span.len == 0
             || indices.is_empty()
-            || !Rc::ptr_eq(&self.device, &span.allocation.device)
+            || !Rc::ptr_eq(&stream.device, &span.allocation.device)
             || indices.iter().any(|&index| index >= span.len)
             || indices.iter().collect::<HashSet<_>>().len() != indices.len()
         {
@@ -93,28 +104,34 @@ impl Gpu {
                     .to_owned(),
             ));
         }
-        let indices = self.try_copy(indices)?;
-        unsafe { self.try_scatter_unchecked(target, &indices) }
+        let indices = gpu.copy(indices)?;
+        unsafe { Self::new_unchecked(stream, target, &indices) }
     }
 
     /// Retains GPU-resident indices without downloading or validating their contents.
     /// Out-of-range destinations are ignored by stores and return `None` from loads.
     ///
+    ///
+    /// # Errors
+    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
     /// # Safety
     /// In-bounds destinations must be unique for every launch using this descriptor,
     /// including after changes through aliases of the index buffer. The index range
     /// must not overlap the target range. Index producers must use tracked GPU accesses.
-    pub unsafe fn try_scatter_unchecked<T: Copy>(
-        &self,
+    pub unsafe fn new_unchecked(
+        stream: &Stream,
         target: &mut impl DeviceSliceMut<T>,
         indices: &impl DeviceSlice<usize>,
     ) -> Result<DeviceScatter<T>> {
+        let gpu = Gpu {
+            device: stream.device.clone(),
+        };
         let span = target.span();
         let indices_span = indices.span();
         if span.len == 0
             || indices_span.len == 0
-            || !Rc::ptr_eq(&self.device, &span.allocation.device)
-            || !Rc::ptr_eq(&self.device, &indices_span.allocation.device)
+            || !Rc::ptr_eq(&stream.device, &span.allocation.device)
+            || !Rc::ptr_eq(&stream.device, &indices_span.allocation.device)
         {
             return Err(Error::InvalidOperation(
                 "scatter views require nonempty ranges on the same GPU".to_owned(),
@@ -130,7 +147,7 @@ impl Gpu {
             target_len,
         };
         Ok(DeviceScatter {
-            buffer: self.try_copy(slice::from_ref(&descriptor))?,
+            buffer: gpu.copy(slice::from_ref(&descriptor))?,
             dependencies: [
                 ExternalAccess::write(target),
                 ExternalAccess::read(&indices),
@@ -141,33 +158,16 @@ impl Gpu {
             _upload: None,
         })
     }
-
-    pub fn scatter<T: Copy>(
-        &self,
-        target: &mut impl DeviceSliceMut<T>,
-        indices: &[usize],
-    ) -> DeviceScatter<T> {
-        self.try_scatter(target, indices)
-            .unwrap_or_else(|error| panic!("{error}"))
-    }
-
-    /// # Safety
-    /// Follow the index ownership contract of [`Gpu::try_scatter_unchecked`].
-    pub unsafe fn scatter_unchecked<T: Copy>(
-        &self,
-        target: &mut impl DeviceSliceMut<T>,
-        indices: &impl DeviceSlice<usize>,
-    ) -> DeviceScatter<T> {
-        unsafe { self.try_scatter_unchecked(target, indices) }
-            .unwrap_or_else(|error| panic!("{error}"))
-    }
 }
 
 impl<T> DeviceScatter<T> {
     /// Revalidates a same-length GPU index buffer without host readback or synchronization.
     /// Duplicate destinations and out-of-bounds indices disable the corresponding entries.
     /// Existing graph consumers automatically wait for the refreshed snapshot.
-    pub fn try_update_device(
+    ///
+    /// # Errors
+    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
+    pub fn update_device(
         &mut self,
         queue: &impl Launch,
         indices: &impl DeviceSlice<usize>,
@@ -192,20 +192,19 @@ impl<T> DeviceScatter<T> {
         if device.scatter_validation.get().is_none() {
             let _ = device
                 .scatter_validation
-                .set(driver::Module::try_load_ptx(include_str!("scatter.ptx"))?);
+                .set(Module::try_load_ptx(include_str!("scatter.ptx"))?);
         }
         if self.validation.is_none() {
             let gpu = Gpu {
                 device: device.clone(),
             };
-            let snapshot =
-                gpu.try_allocate(Layout::array::<usize>(self.len()).map_err(|_| {
-                    Error::InvalidOperation(
-                        "scatter index allocation exceeds the size range".to_owned(),
-                    )
-                })?)?;
+            let snapshot = gpu.allocate(Layout::array::<usize>(self.len()).map_err(|_| {
+                Error::InvalidOperation(
+                    "scatter index allocation exceeds the size range".to_owned(),
+                )
+            })?)?;
             let allocation =
-                gpu.try_allocate(Layout::array::<u32>(self.target_len).map_err(|_| {
+                gpu.allocate(Layout::array::<u32>(self.target_len).map_err(|_| {
                     Error::InvalidOperation(
                         "scatter ownership allocation exceeds the size range".to_owned(),
                     )
@@ -223,7 +222,7 @@ impl<T> DeviceScatter<T> {
             Access::read(source.allocation, source.bytes::<usize>()),
             Access::recovering(
                 &self.indices.allocation,
-                self.indices.offset..self.indices.offset + self.len() * size_of::<usize>(),
+                self.indices.offset..self.indices.offset + self.len() * mem::size_of::<usize>(),
             ),
             Access::recovering(&snapshot.allocation, 0..snapshot.allocation.bytes),
             Access::recovering(&owners.allocation, 0..owners.allocation.bytes),
@@ -282,14 +281,11 @@ impl<T> DeviceScatter<T> {
         self.indices.is_empty()
     }
 
-    pub fn try_update(&mut self, stream: &Stream, indices: &[usize]) -> Result<()> {
-        self.try_update_async(stream, indices)?
-            .try_wait()
-            .map(|_| ())
-    }
-
     /// Enqueues validated replacement indices without waiting for prior descriptor reads.
-    pub fn try_update_async(
+    ///
+    /// # Errors
+    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
+    pub fn update(
         &mut self,
         stream: &Stream,
         indices: &[usize],
@@ -302,16 +298,11 @@ impl<T> DeviceScatter<T> {
                 "scatter updates require the same length and unique, in-bounds indices".to_owned(),
             ));
         }
-        stream.try_copy_from_host_async(&mut self.indices, indices)
-    }
-
-    pub fn update(&mut self, stream: &Stream, indices: &[usize]) {
-        self.try_update(stream, indices)
-            .unwrap_or_else(|error| panic!("{error}"));
+        stream.copy_from_host(&mut self.indices, indices)
     }
 }
 
-impl<T> Reference<Scatter<T>> for DeviceScatter<T> {
+impl<T> Argument<Scatter<T>> for DeviceScatter<T> {
     fn buffer(&self) -> &Buffer<Scatter<T>> {
         &self.buffer
     }

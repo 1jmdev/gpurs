@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use gpurs::{Half, Stream};
+use gpurs::{Result, Stream, gpu::Half};
 
 pub fn inputs(size: usize) -> (Vec<Half>, Vec<Half>) {
     (
@@ -13,17 +13,17 @@ pub fn inputs(size: usize) -> (Vec<Half>, Vec<Half>) {
     )
 }
 
-pub fn measure(stream: &Stream, mut launch: impl FnMut()) -> f64 {
+pub fn measure(stream: &Stream, mut launch: impl FnMut() -> Result<()>) -> Result<f64> {
     for _ in 0..5 {
-        launch();
+        launch()?;
     }
-    stream.synchronize();
+    stream.synchronize()?;
     let start = Instant::now();
     for _ in 0..50 {
-        launch();
+        launch()?;
     }
-    stream.synchronize();
-    start.elapsed().as_secs_f64() / 50.0
+    stream.synchronize()?;
+    Ok(start.elapsed().as_secs_f64() / 50.0)
 }
 
 pub fn report(

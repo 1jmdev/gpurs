@@ -1,7 +1,7 @@
 use std::{
     any,
     marker::PhantomData,
-    mem::MaybeUninit,
+    mem::{self, MaybeUninit},
     ops::{Bound, Range, RangeBounds},
     rc::Rc,
     slice,
@@ -9,8 +9,9 @@ use std::{
 
 use gpurs_driver as driver;
 
+use super::sealed::Sealed;
 use crate::{
-    Error, Result,
+    BitPattern, Error, Gpu, Result,
     stream::Stream,
     tracking::{self, Access, Allocation},
 };
@@ -40,11 +41,6 @@ pub struct DeviceValue<T> {
     pub(crate) buffer: Buffer<T>,
 }
 
-/// Result of a scalar launch. [`Pending::read`] waits for the launch.
-pub struct Pending<T> {
-    pub(crate) buffer: Buffer<T>,
-}
-
 #[doc(hidden)]
 #[derive(Clone, Copy)]
 pub struct Span<'a> {
@@ -53,16 +49,16 @@ pub struct Span<'a> {
     pub(crate) len: usize,
 }
 
-pub(crate) mod sealed {
-    use super::Span;
-
-    pub trait Sealed<T> {
-        fn span(&self) -> Span<'_>;
-    }
-}
-
 /// GPU data accepted where a kernel takes `&[T]`.
-pub trait DeviceSlice<T>: sealed::Sealed<T> {
+pub trait DeviceSlice<T>: Sealed<T> {
+    /// Copies this range to the host after its producing operations finish.
+    ///
+    /// # Errors
+    /// Returns transfer failures or failures inherited from kernels writing this range.
+    fn download(&self) -> Result<Vec<T>> {
+        download(self.span())
+    }
+
     fn len(&self) -> usize {
         self.span().len
     }
@@ -73,7 +69,18 @@ pub trait DeviceSlice<T>: sealed::Sealed<T> {
 }
 
 /// GPU data accepted where a kernel takes `&mut [T]`.
-pub trait DeviceSliceMut<T>: DeviceSlice<T> {}
+pub trait DeviceSliceMut<T>: DeviceSlice<T> {
+    /// Overwrites this range, recovering contents invalidated by failed kernels.
+    ///
+    /// # Errors
+    /// Returns context, submission, or dependency failures.
+    fn fill(&mut self, stream: &Stream, value: T) -> Result<()>
+    where
+        T: Copy,
+    {
+        fill(self.span(), stream, value)
+    }
+}
 
 impl<T> Buffer<T> {
     pub(crate) fn new(allocation: Rc<Allocation>, len: usize) -> Self {
@@ -91,19 +98,6 @@ impl<T> Buffer<T> {
 
     pub fn is_empty(&self) -> bool {
         self.len == 0
-    }
-
-    /// Copies the contents to the host after the work writing them finished.
-    ///
-    /// Panics if a launch that produced these contents failed.
-    #[track_caller]
-    pub fn download(&self) -> Vec<T> {
-        self.try_download()
-            .unwrap_or_else(|error| panic!("{error}"))
-    }
-
-    pub fn try_download(&self) -> Result<Vec<T>> {
-        try_download(self.whole())
     }
 
     #[track_caller]
@@ -142,22 +136,6 @@ impl<T> Buffer<T> {
         )
     }
 
-    /// Overwrites every element, recovering contents left by failed launches.
-    pub fn fill(&mut self, stream: &Stream, value: T)
-    where
-        T: Copy,
-    {
-        self.try_fill(stream, value)
-            .unwrap_or_else(|error| panic!("{error}"))
-    }
-
-    pub fn try_fill(&mut self, stream: &Stream, value: T) -> Result<()>
-    where
-        T: Copy,
-    {
-        try_fill(self.whole(), stream, value)
-    }
-
     pub(crate) fn whole(&self) -> Span<'_> {
         Span {
             allocation: &self.allocation,
@@ -167,74 +145,30 @@ impl<T> Buffer<T> {
     }
 }
 
-impl<T> View<'_, T> {
-    pub fn try_download(&self) -> Result<Vec<T>> {
-        try_download(self.span)
-    }
-
-    #[track_caller]
-    pub fn download(&self) -> Vec<T> {
-        self.try_download()
-            .unwrap_or_else(|error| panic!("{error}"))
-    }
-}
-
-impl<T> ViewMut<'_, T> {
-    pub fn try_download(&self) -> Result<Vec<T>> {
-        try_download(self.span)
-    }
-
-    #[track_caller]
-    pub fn download(&self) -> Vec<T> {
-        self.try_download()
-            .unwrap_or_else(|error| panic!("{error}"))
-    }
-
-    pub fn fill(&mut self, stream: &Stream, value: T)
-    where
-        T: Copy,
-    {
-        self.try_fill(stream, value)
-            .unwrap_or_else(|error| panic!("{error}"))
-    }
-
-    pub fn try_fill(&mut self, stream: &Stream, value: T) -> Result<()>
-    where
-        T: Copy,
-    {
-        try_fill(self.span, stream, value)
-    }
-}
-
 impl<T> DeviceValue<T> {
-    pub fn try_read(&self) -> Result<T> {
+    /// Copies one verified host value into retained device storage.
+    ///
+    /// # Errors
+    /// Returns transfer-type verification, allocation, or CUDA copy failures.
+    pub fn new(stream: &Stream, value: &T) -> Result<Self> {
+        Ok(Self {
+            buffer: Gpu {
+                device: stream.device.clone(),
+            }
+            .upload(slice::from_ref(value))?,
+        })
+    }
+
+    /// Waits for producing operations before returning the single retained device value.
+    ///
+    /// # Errors
+    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
+    pub fn read(&self) -> Result<T> {
         Ok(self
             .buffer
-            .try_download()?
+            .download()?
             .pop()
             .expect("device values hold one element"))
-    }
-
-    /// Copies the value to the host after the work writing it finished.
-    #[track_caller]
-    pub fn read(&self) -> T {
-        self.try_read().unwrap_or_else(|error| panic!("{error}"))
-    }
-}
-
-impl<T> Pending<T> {
-    pub fn try_read(&self) -> Result<T> {
-        Ok(self
-            .buffer
-            .try_download()?
-            .pop()
-            .expect("device values hold one element"))
-    }
-
-    /// Waits for the launch and returns its result, panicking if the launch failed.
-    #[track_caller]
-    pub fn read(&self) -> T {
-        self.try_read().unwrap_or_else(|error| panic!("{error}"))
     }
 }
 
@@ -259,18 +193,18 @@ impl<'a> Span<'a> {
         }
         Span {
             allocation: self.allocation,
-            start: self.start + start * size_of::<T>(),
+            start: self.start + start * mem::size_of::<T>(),
             len: end - start,
         }
     }
 
     pub fn bytes<T>(&self) -> Range<usize> {
-        self.start..self.start + self.len * size_of::<T>()
+        self.start..self.start + self.len * mem::size_of::<T>()
     }
 }
 
 #[track_caller]
-fn try_download<T>(span: Span<'_>) -> Result<Vec<T>> {
+fn download<T>(span: Span<'_>) -> Result<Vec<T>> {
     let _context = span.allocation.device.context.try_enter()?;
     let stream = &span.allocation.device.download;
     let range = span.bytes::<T>();
@@ -294,7 +228,7 @@ fn try_download<T>(span: Span<'_>) -> Result<Vec<T>> {
     Ok(host)
 }
 
-fn try_fill<T: Copy>(span: Span<'_>, stream: &Stream, value: T) -> Result<()> {
+fn fill<T: Copy>(span: Span<'_>, stream: &Stream, value: T) -> Result<()> {
     if !Rc::ptr_eq(&stream.device, &span.allocation.device) {
         return Err(Error::InvalidOperation(
             "fill allocation belongs to another GPU".to_owned(),
@@ -336,7 +270,7 @@ fn try_fill<T: Copy>(span: Span<'_>, stream: &Stream, value: T) -> Result<()> {
                     pointer,
                     slice::from_raw_parts(
                         host.as_ptr().cast::<MaybeUninit<u8>>(),
-                        size_of_val(&*host),
+                        mem::size_of_val(&*host),
                     ),
                     &stream.raw,
                 )?;
@@ -348,19 +282,19 @@ fn try_fill<T: Copy>(span: Span<'_>, stream: &Stream, value: T) -> Result<()> {
     Ok(())
 }
 
-impl<T> sealed::Sealed<T> for Buffer<T> {
+impl<T> Sealed<T> for Buffer<T> {
     fn span(&self) -> Span<'_> {
         self.whole()
     }
 }
 
-impl<T> sealed::Sealed<T> for View<'_, T> {
+impl<T> Sealed<T> for View<'_, T> {
     fn span(&self) -> Span<'_> {
         self.span
     }
 }
 
-impl<T> sealed::Sealed<T> for ViewMut<'_, T> {
+impl<T> Sealed<T> for ViewMut<'_, T> {
     fn span(&self) -> Span<'_> {
         self.span
     }
@@ -371,3 +305,41 @@ impl<T> DeviceSlice<T> for View<'_, T> {}
 impl<T> DeviceSlice<T> for ViewMut<'_, T> {}
 impl<T> DeviceSliceMut<T> for Buffer<T> {}
 impl<T> DeviceSliceMut<T> for ViewMut<'_, T> {}
+
+impl<T: BitPattern> Clone for Buffer<T> {
+    fn clone(&self) -> Self {
+        let mut buffer = Self::new(self.allocation.clone(), self.len());
+        buffer.offset = self.offset;
+        buffer
+    }
+}
+
+impl<T: BitPattern> Buffer<T> {
+    /// Shares this allocation through a checked element representation without copying bytes.
+    ///
+    /// # Errors
+    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
+    pub fn cast<U: BitPattern>(&self) -> Result<Buffer<U>> {
+        self.try_cast_range(0..self.len() * mem::size_of::<T>())
+    }
+
+    pub(crate) fn try_cast_range<U>(&self, bytes: Range<usize>) -> Result<Buffer<U>> {
+        if bytes.start > bytes.end || bytes.end > self.len() * mem::size_of::<T>() {
+            return Err(Error::InvalidOperation(
+                "typed view exceeds its source byte range".to_owned(),
+            ));
+        }
+        if mem::size_of::<U>() == 0
+            || !bytes.len().is_multiple_of(mem::size_of::<U>())
+            || !(self.allocation.pointer + self.offset as u64 + bytes.start as u64)
+                .is_multiple_of(mem::align_of::<U>() as u64)
+        {
+            return Err(Error::InvalidOperation(
+                "typed view has an invalid element size or alignment".to_owned(),
+            ));
+        }
+        let mut buffer = Buffer::new(self.allocation.clone(), bytes.len() / mem::size_of::<U>());
+        buffer.offset = self.offset + bytes.start;
+        Ok(buffer)
+    }
+}

@@ -1,6 +1,6 @@
 use std::{ffi::c_void, rc::Rc};
 
-use gpurs_driver as driver;
+use gpurs_driver::{self as driver, Function};
 
 use crate::{
     Error, Event, ExternalAccess, Gpu, LaunchConfig, Result, Stream, device::Device, tracking,
@@ -19,18 +19,16 @@ struct ModuleInner {
 #[derive(Clone)]
 pub struct Kernel {
     module: Module,
-    function: driver::Function,
+    function: Function,
     name: String,
 }
 
 impl Gpu {
-    /// Loads PTX through CUDA's driver JIT for the current GPU.
-    pub fn load_ptx(&self, ptx: &str) -> Module {
-        self.try_load_ptx(ptx)
-            .unwrap_or_else(|error| panic!("{error}"))
-    }
-
-    pub fn try_load_ptx(&self, ptx: &str) -> Result<Module> {
+    /// Loads a CUDA module from PTX text into this device context.
+    ///
+    /// # Errors
+    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
+    pub fn load_ptx(&self, ptx: &str) -> Result<Module> {
         let _context = self.device.context.try_enter()?;
         Ok(Module(Rc::new(ModuleInner {
             raw: driver::Module::try_load_ptx(ptx)?,
@@ -38,17 +36,12 @@ impl Gpu {
         })))
     }
 
-    /// Loads an external CUBIN or fat binary.
     ///
-    /// # Safety
-    /// The bytes must contain a complete valid CUDA module image, including its headers.
-    pub unsafe fn load_module(&self, image: &[u8]) -> Module {
-        unsafe { self.try_load_module(image) }.unwrap_or_else(|error| panic!("{error}"))
-    }
-
+    /// # Errors
+    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
     /// # Safety
     /// `image` must satisfy the complete-module contract of `load_module`.
-    pub unsafe fn try_load_module(&self, image: &[u8]) -> Result<Module> {
+    pub unsafe fn load_module(&self, image: &[u8]) -> Result<Module> {
         let _context = self.device.context.try_enter()?;
         Ok(Module(Rc::new(ModuleInner {
             raw: driver::Module::try_load(image)?,
@@ -58,16 +51,15 @@ impl Gpu {
 }
 
 impl Module {
-    pub fn as_raw(&self) -> *mut c_void {
+    pub(crate) fn as_raw(&self) -> *mut c_void {
         self.0.raw.as_raw()
     }
 
-    pub fn kernel(&self, name: &str) -> Kernel {
-        self.try_kernel(name)
-            .unwrap_or_else(|error| panic!("{error}"))
-    }
-
-    pub fn try_kernel(&self, name: &str) -> Result<Kernel> {
+    /// Resolves a named entry point while retaining its owning CUDA module.
+    ///
+    /// # Errors
+    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
+    pub fn kernel(&self, name: &str) -> Result<Kernel> {
         Ok(Kernel {
             module: self.clone(),
             name: name.to_owned(),
@@ -77,7 +69,7 @@ impl Module {
 }
 
 impl Kernel {
-    pub fn as_raw(&self) -> *mut c_void {
+    pub(crate) fn as_raw(&self) -> *mut c_void {
         self.function.as_raw()
     }
 
@@ -86,7 +78,11 @@ impl Kernel {
         self.function.attribute(attribute)
     }
 
-    pub fn try_set_attribute(&self, attribute: i32, value: i32) -> Result<()> {
+    /// Sets the requested CUDA function attribute before subsequent kernel submissions.
+    ///
+    /// # Errors
+    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
+    pub fn set_attribute(&self, attribute: i32, value: i32) -> Result<()> {
         let _context = self.module.0.device.context.try_enter()?;
         Ok(self.function.try_set_attribute(attribute, value)?)
     }
@@ -103,11 +99,19 @@ impl Kernel {
         self.attribute(8) as u32
     }
 
-    pub fn try_shared_carveout(&self, percent: i32) -> Result<()> {
-        self.try_set_attribute(9, percent)
+    /// Requests the preferred shared-memory percentage for subsequent kernel submissions.
+    ///
+    /// # Errors
+    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
+    pub fn shared_carveout(&self, percent: i32) -> Result<()> {
+        self.set_attribute(9, percent)
     }
 
-    pub fn try_active_blocks(&self, block_size: u32, shared_bytes: usize) -> Result<u32> {
+    /// Queries resident blocks for the supplied block size and shared-memory requirement.
+    ///
+    /// # Errors
+    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
+    pub fn active_blocks(&self, block_size: u32, shared_bytes: usize) -> Result<u32> {
         let _context = self.module.0.device.context.try_enter()?;
         Ok(self.function.try_active_blocks(block_size, shared_bytes)?)
     }
@@ -122,26 +126,12 @@ impl Kernel {
         self.function.preferred_block_size()
     }
 
-    /// Submits an external kernel with CUDA's individual-parameter pointer ABI.
     ///
-    /// # Safety
-    /// Parameters and geometry must satisfy the kernel's ABI and memory-safety contract.
-    /// Declare every accessed allocation, including indirect addresses. Parameter values
-    /// must outlive the call. Native kernels have no gpurs verifier or failure protocol.
-    pub unsafe fn launch(
-        &self,
-        stream: &Stream,
-        config: LaunchConfig,
-        parameters: &mut [*mut c_void],
-        accesses: &[ExternalAccess],
-    ) -> Event {
-        unsafe { self.try_launch(stream, config, parameters, accesses) }
-            .unwrap_or_else(|error| panic!("{error}"))
-    }
-
+    /// # Errors
+    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
     /// # Safety
     /// Parameters, geometry, accesses, and retained resources obey `launch`'s contract.
-    pub unsafe fn try_launch(
+    pub unsafe fn launch(
         &self,
         stream: &Stream,
         config: LaunchConfig,
@@ -186,7 +176,7 @@ impl Kernel {
         };
         tracking::complete(&stream.raw, &accesses, &statuses);
         stream.retain_statuses(&statuses);
-        stream.try_record_statuses(statuses)
+        stream.record_statuses(statuses)
     }
 }
 

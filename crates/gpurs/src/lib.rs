@@ -8,7 +8,7 @@
 //! a context per thread; operations restore the previously current context. Raw CUDA work
 //! must use the explicit external submission protocol to participate in dependency tracking.
 //!
-//! `try_` operations and `stream.fallible()` return [`Error`] without catching panics.
+//! Kernel submissions return [`Result`] without catching panics.
 //! Instrumented kernel failures invalidate dependent contents; a complete overwrite recovers
 //! those regions. CUDA context-fatal failures (illegal addresses, device assertions, launch
 //! timeouts, device loss) require abandoning the context and its allocations. Retrying a
@@ -20,48 +20,54 @@
 #![cfg_attr(gpurs_device, feature(rustc_attrs))]
 #![cfg_attr(gpurs_device, allow(internal_features))]
 
-mod address;
-mod buffer;
+mod argument;
 mod device;
 mod error;
 pub mod gpu;
 mod graph;
-mod indexed;
-mod interop;
+mod graph_exec;
+mod kernel_argument;
 mod launch;
 mod memory;
-mod module;
-mod reference;
-mod scatter;
-mod storage;
+pub mod raw;
 mod stream;
-mod strided;
-mod tensor_map;
 mod tracking;
 
-pub use address::{DeviceAddress, DeviceDescriptor};
-pub use buffer::{Buffer, DeviceSlice, DeviceSliceMut, DeviceValue, Pending, View, ViewMut};
+pub use argument::{
+    Argument, ArgumentMut, DeviceAddress, DeviceDescriptor, DeviceIndexed, DeviceScatter,
+    DeviceStrided, DeviceTensorMap,
+};
 pub use device::Gpu;
-pub(crate) use error::GpuResult as Result;
-pub use error::{Error, GpuResult};
-pub use gpu::{BFloat16, Half};
-pub use gpurs_driver::{Context, ContextGuard, KernelNodeParameters, Ownership};
+pub use error::{Error, Result};
+pub(crate) use gpurs_driver::Ownership;
 pub use gpurs_macros::{BitPattern, gpu, unsafe_primitive};
-pub use graph::{CaptureStream, Graph, GraphExec};
-pub use indexed::DeviceIndexed;
-pub use interop::{Event, ExternalAccess};
-pub use memory::{DeviceAllocation, PinnedBuffer, Transfer};
-pub use module::{Kernel, Module};
-pub use reference::{DeviceReference, DeviceReferenceMut};
-pub use scatter::DeviceScatter;
-pub use storage::{AtomicElement, BitPattern, Storage};
-pub use stream::{ConfiguredStream, FallibleStream, Launch, LaunchConfig, Stream};
-pub use strided::DeviceStrided;
-pub use tensor_map::DeviceTensorMap;
+pub use graph::{Capture, Graph, GraphExec};
+pub(crate) use memory::buffer;
+pub use memory::{
+    BitPattern, Buffer, DeviceSlice, DeviceSliceMut, DeviceValue, PinnedBuffer, Transfer, View,
+    ViewMut,
+};
+pub use raw::interop::Event;
+pub(crate) use raw::interop::ExternalAccess;
+pub use stream::{Launch, LaunchConfig, Stream};
 
 #[doc(hidden)]
 pub mod __private {
     pub use gpurs_macros::{compilation, device};
 
     pub use crate::launch::{KernelCache, KernelLaunch, kernel};
+}
+
+pub(crate) mod sealed_launch {
+    use std::cell::RefCell;
+
+    use crate::{LaunchConfig, Stream, graph::CapturedOperation};
+
+    pub trait Sealed {
+        fn stream(&self) -> &Stream;
+        fn config(&self) -> Option<LaunchConfig>;
+        fn capture(&self) -> Option<&RefCell<Vec<CapturedOperation>>> {
+            None
+        }
+    }
 }

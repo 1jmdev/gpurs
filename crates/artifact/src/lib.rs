@@ -204,7 +204,7 @@ pub enum Extent {
     Single,
     /// One thread per element of the slice parameter at this position.
     Length(usize),
-    /// Geometry cannot be inferred; the launch requires `with_launch`.
+    /// Geometry cannot be inferred; the launch requires `launch`.
     Explicit,
 }
 

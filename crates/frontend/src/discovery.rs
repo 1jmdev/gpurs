@@ -17,7 +17,7 @@ pub(crate) struct Launch {
     pub module: String,
     pub tail: String,
     pub generics: Vec<Ty>,
-    /// Launched through `ConfiguredStream`, i.e. with explicit geometry.
+    /// Launched through `Capture`, i.e. with explicit geometry.
     pub configured: bool,
 }
 
@@ -149,9 +149,7 @@ impl HostView {
                 .and_then(|argument| argument.ty())
                 .is_some_and(|stream| {
                     matches!(stream.kind(), TyKind::RigidTy(RigidTy::Adt(adt, _))
-                        if sess.is(adt.def_id(), "gpurs::stream::ConfiguredStream")
-                            || sess.is(adt.def_id(), "gpurs::stream::FallibleStream")
-                            || sess.is(adt.def_id(), "gpurs::graph::CaptureStream"))
+                        if sess.is(adt.def_id(), "gpurs::graph::Capture"))
                 });
             let launch = Launch {
                 key: format!("{module}::{tail}{suffix}"),

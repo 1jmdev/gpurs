@@ -1,4 +1,4 @@
-use std::marker::PhantomData;
+use std::{marker::PhantomData, mem};
 
 use gpurs_macros::primitive;
 
@@ -222,7 +222,7 @@ impl<S: Stage<Bulk>, const STAGES: usize, C: Consumer> TensorPipeline<S, STAGES,
         gpu::sync_block();
         let slot = self.slot(index).cast::<u64>();
         let mut word = block.thread();
-        while word < size_of::<S>() / 8 {
+        while word < mem::size_of::<S>() / 8 {
             // SAFETY: the word lies inside a free stage.
             unsafe { slot.add(word).write(0) };
             word += THREADS;
@@ -324,7 +324,7 @@ impl<'a, T: Element, const ROWS: usize, const COLUMNS: usize>
         if block.thread() == 0 {
             intrinsics::barrier_expect(
                 self.completion,
-                size_of::<SharedTile<T, ROWS, COLUMNS>>() as u32,
+                mem::size_of::<SharedTile<T, ROWS, COLUMNS>>() as u32,
             );
             // SAFETY: the pipeline hands out writers only for stages it owns.
             let destination = unsafe { &*self.tile }.address();

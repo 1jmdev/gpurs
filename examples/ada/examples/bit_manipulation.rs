@@ -18,18 +18,19 @@ fn unpack_colors(packed: &[u32], channels: &mut [u32]) {
     }
 }
 
-fn main() {
-    let gpu = Gpu::new(0);
-    let stream = gpu.stream();
+fn main() -> gpurs::Result<()> {
+    let gpu = Gpu::new(0)?;
+    let stream = gpu.stream()?;
 
     let data = (0..1024)
         .map(|value| value * 0x010203)
         .collect::<Vec<u32>>();
 
-    let packed = gpu.upload(&data);
-    let mut channels = gpu.zeros::<u32>(data.len());
+    let packed = gpu.upload(&data)?;
+    let mut channels = gpu.zeros::<u32>(data.len())?;
 
-    unpack_colors(&stream, &packed, &mut channels);
+    unpack_colors(&stream, &packed, &mut channels)?;
 
-    println!("Channels: {:?}", &channels.download()[..8]);
+    println!("Channels: {:?}", &channels.download()?[..8]);
+    Ok(())
 }

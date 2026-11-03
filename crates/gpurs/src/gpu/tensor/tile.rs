@@ -1,3 +1,5 @@
+use std::mem;
+
 use super::{Element, FragmentA, FragmentB};
 use crate::gpu;
 
@@ -19,7 +21,7 @@ impl<T: Element, const ROWS: usize, const COLUMNS: usize> SharedTile<T, ROWS, CO
             ROWS.is_power_of_two() && ROWS >= 16 && COLUMNS.is_power_of_two() && COLUMNS >= 16,
             "tile dimensions are powers of two of at least 16"
         );
-        COLUMNS * size_of::<T>() / 16
+        COLUMNS * mem::size_of::<T>() / 16
     };
 
     /// The 16x`T::DEPTH` block at (`row`, `column`) as an `A` operand; tile rows index `M` and columns
@@ -33,7 +35,7 @@ impl<T: Element, const ROWS: usize, const COLUMNS: usize> SharedTile<T, ROWS, CO
     /// The `T::DEPTH`x16 block at (`row`, `column`) as an `A` operand; tile rows index `K` and columns
     /// index `M`. Every lane of the warp takes part.
     pub fn load_a_transposed(&self, row: usize, column: usize) -> FragmentA<T> {
-        if size_of::<T>() == 1 {
+        if mem::size_of::<T>() == 1 {
             let lane = gpu::warp::lane_id();
             let (row, column) = (row + 4 * (lane % 4), column + lane / 4);
             return FragmentA::new([
@@ -51,7 +53,7 @@ impl<T: Element, const ROWS: usize, const COLUMNS: usize> SharedTile<T, ROWS, CO
     /// The `T::DEPTH`x16 block at (`row`, `column`) as two `B` operands, columns `column..column + 8`
     /// first; tile rows index `K` and columns index `N`. Every lane of the warp takes part.
     pub fn load_b(&self, row: usize, column: usize) -> [FragmentB<T>; 2] {
-        if size_of::<T>() == 1 {
+        if mem::size_of::<T>() == 1 {
             let lane = gpu::warp::lane_id();
             let (row, column) = (row + 4 * (lane % 4), column + lane / 4);
             return [
@@ -85,12 +87,12 @@ impl<T: Element, const ROWS: usize, const COLUMNS: usize> SharedTile<T, ROWS, CO
         let (row, chunk) = if across {
             (
                 row.wrapping_add(lane / 16 * 8 + lane % 8),
-                column / (16 / size_of::<T>()) + lane / 8 % 2,
+                column / (16 / mem::size_of::<T>()) + lane / 8 % 2,
             )
         } else {
             (
                 row.wrapping_add(lane % 16),
-                column / (16 / size_of::<T>()) + lane / 16,
+                column / (16 / mem::size_of::<T>()) + lane / 16,
             )
         };
         self.address() + Self::offset(row, chunk)
@@ -112,7 +114,7 @@ impl<T: Element, const ROWS: usize, const COLUMNS: usize> SharedTile<T, ROWS, CO
     /// between groups of eight rows. Valid for tiles of 128-byte rows at 1024-byte aligned
     /// addresses, with `row` a multiple of eight and `column` of 16.
     pub(super) fn descriptor(&self, row: usize, column: usize) -> u64 {
-        let offset = (row * COLUMNS + column) * size_of::<T>();
+        let offset = (row * COLUMNS + column) * mem::size_of::<T>();
         (self.address() + offset as u32) as u64 >> 4 | (1024 >> 4) << 32
     }
 

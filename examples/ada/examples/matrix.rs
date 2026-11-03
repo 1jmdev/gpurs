@@ -1,7 +1,7 @@
 use gpurs::{
-    Buffer, Gpu, Half, LaunchConfig, gpu,
+    Buffer, DeviceSlice, Gpu, LaunchConfig, gpu,
     gpu::{
-        Block,
+        Block, Half,
         tensor::{Accumulator, FragmentA, FragmentB, Matrix, Output, Pipeline, SharedTile},
     },
 };
@@ -75,20 +75,20 @@ fn multiply(left: &[Half], right_transposed: &[Half], output: &mut [f32]) {
     }
 }
 
-fn main() {
-    let gpu = Gpu::new(0);
-    let stream = gpu.stream();
+fn main() -> gpurs::Result<()> {
+    let gpu = Gpu::new(0)?;
+    let stream = gpu.stream()?;
 
     let (left_host, right_host) = matrix_benchmark::inputs(SIZE);
-    let left = gpu.upload(&left_host);
-    let right_transposed = gpu.upload(&right_host);
-    let mut output = gpu.zeros::<f32>(SIZE * SIZE);
-    let configured = stream.with_launch(LaunchConfig {
+    let left = gpu.upload(&left_host)?;
+    let right_transposed = gpu.upload(&right_host)?;
+    let mut output = gpu.zeros::<f32>(SIZE * SIZE)?;
+    let configured = stream.launch(LaunchConfig {
         grid: [PANEL_COLUMNS / TILE_COLUMNS, SIZE / TILE_ROWS, 1],
         block: [THREADS, 1, 1],
         shared_bytes: 0,
     });
-    let run = |output: &mut Buffer<f32>| {
+    let run = |output: &mut Buffer<f32>| -> gpurs::Result<()> {
         for panel in 0..SIZE / PANEL_COLUMNS {
             let start = panel * SIZE * PANEL_COLUMNS;
             let end = start + SIZE * PANEL_COLUMNS;
@@ -97,17 +97,17 @@ fn main() {
                 &left,
                 &right_transposed.view(start..end),
                 &mut output.view_mut(start..end),
-            );
+            )?;
         }
+        Ok(())
     };
-    let seconds = matrix_benchmark::measure(&stream, || {
-        run(&mut output);
-    });
+    let seconds = matrix_benchmark::measure(&stream, || run(&mut output))?;
     matrix_benchmark::report(
         [SIZE, PANEL_COLUMNS],
         seconds,
         &left_host,
         &right_host,
-        &output.download(),
+        &output.download()?,
     );
+    Ok(())
 }

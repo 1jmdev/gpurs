@@ -1,3 +1,5 @@
+use std::mem;
+
 use gpurs_macros::primitive;
 
 use super::{
@@ -122,7 +124,7 @@ impl<S: Stage<Asynchronous>, const STAGES: usize> Pipeline<S, STAGES> {
     fn zero(&mut self) {
         let slot = self.slot(self.filled).cast::<Zero>();
         let mut chunk = gpu::thread_id().x;
-        while chunk < size_of::<S>() / 16 {
+        while chunk < mem::size_of::<S>() / 16 {
             // SAFETY: the chunk lies inside a free stage, and tiles are 128-byte aligned.
             unsafe { slot.add(chunk).write(Zero([0; 4])) };
             chunk += gpu::block_dim().x;
@@ -163,7 +165,7 @@ impl<'a, T: Element, const ROWS: usize, const COLUMNS: usize>
         column: usize,
     ) -> Initialized<'a, SharedTile<T, ROWS, COLUMNS>> {
         let (source, indices) = source;
-        let lanes = 16 / size_of::<T>();
+        let lanes = 16 / mem::size_of::<T>();
         for step in 0..const { (ROWS * COLUMNS).div_ceil(THREADS) } {
             let element = step * THREADS + block.thread();
             if element >= ROWS * COLUMNS {
@@ -223,7 +225,7 @@ impl<'a, T: Element, const ROWS: usize, const COLUMNS: usize>
         column: usize,
     ) -> Initialized<'a, SharedTile<T, ROWS, COLUMNS>> {
         let width = SharedTile::<T, ROWS, COLUMNS>::CHUNKS;
-        let lanes = 16 / size_of::<T>();
+        let lanes = 16 / mem::size_of::<T>();
         let (data, rows, columns) = (source.data(), source.rows(), source.columns());
         if data.as_ptr() as usize % 16 == 0 && columns % lanes == 0 && column.is_multiple_of(lanes)
         {

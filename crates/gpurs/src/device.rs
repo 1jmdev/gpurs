@@ -1,24 +1,22 @@
 use std::{
     cell::{Cell, OnceCell, RefCell},
     collections::HashMap,
-    mem,
-    mem::MaybeUninit,
+    ffi::c_void,
+    mem::{self, MaybeUninit},
     rc::Rc,
     slice,
 };
 
-use gpurs_artifact::{Artifact, Entry as ArtifactEntry, Kernel, Target};
-use gpurs_driver::{self as driver, Context, DevicePointer, Function, Module};
+use gpurs_artifact::{Artifact, Kernel, PARAMETERS_OFFSET, RESULT_OFFSET, Target};
+use gpurs_driver::{self as driver, Context, Function, Module, Ownership};
 
 use crate::{
     Error, Result,
-    buffer::{Buffer, DeviceValue},
-    launch,
+    buffer::Buffer,
+    launch::{self, ValidatedLaunch},
     stream::Stream,
-    tracking::{self, Access, Allocation, Status},
+    tracking::{self, Access, Allocation, STATUS_CHUNK, Status, StatusPool},
 };
-
-const STATUS_CHUNK: usize = 1024;
 
 pub(crate) type KernelKey = (&'static str, &'static str, &'static str);
 
@@ -64,28 +62,25 @@ pub(crate) struct LoadedKernel {
     pub instrumented: Option<Entry>,
     pub offsets: Vec<u64>,
     pub size: usize,
-    pub validated: RefCell<Option<launch::ValidatedLaunch>>,
+    pub validated: RefCell<Option<ValidatedLaunch>>,
     pub metadata: Kernel,
     pub block_size: OnceCell<u32>,
 }
 
 impl Gpu {
-    /// Opens the device with the given ordinal and loads this executable's kernels.
-    #[track_caller]
-    pub fn new(ordinal: usize) -> Self {
-        Self::try_new(ordinal).unwrap_or_else(|error| panic!("{error}"))
+    /// Creates retained device storage and verifies its construction requirements.
+    ///
+    /// # Errors
+    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
+    pub fn new(ordinal: usize) -> Result<Self> {
+        Self::from_context(Context::try_primary(ordinal)?)
     }
 
-    pub fn try_new(ordinal: usize) -> Result<Self> {
-        Self::try_from_context(Context::try_primary(ordinal)?)
-    }
-
-    /// Uses a shared or unsafely imported context on this host thread.
-    pub fn from_context(context: Context) -> Self {
-        Self::try_from_context(context).unwrap_or_else(|error| panic!("{error}"))
-    }
-
-    pub fn try_from_context(context: Context) -> Result<Self> {
+    /// Loads embedded kernels into the supplied CUDA context on this host thread.
+    ///
+    /// # Errors
+    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
+    pub fn from_context(context: Context) -> Result<Self> {
         let _context = context.try_enter()?;
         context.try_set_pool_release_threshold(u64::MAX)?;
         let artifact = embedded_artifact(context.try_compute_capability()?)?;
@@ -127,31 +122,28 @@ impl Gpu {
         &self.device.context
     }
 
-    pub fn try_memory_info(&self) -> Result<(usize, usize)> {
+    /// Queries the free and total device memory available in this context.
+    ///
+    /// # Errors
+    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
+    pub fn memory_info(&self) -> Result<(usize, usize)> {
         Ok(self.device.context.try_memory_info()?)
     }
 
-    pub fn memory_info(&self) -> (usize, usize) {
-        self.try_memory_info()
-            .unwrap_or_else(|error| panic!("{error}"))
-    }
-
-    pub fn try_trim_memory(&self) -> Result<()> {
+    /// Waits for outstanding device work before releasing unused pooled allocations.
+    ///
+    /// # Errors
+    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
+    pub fn trim_memory(&self) -> Result<()> {
         self.device.context.try_synchronize()?;
         Ok(self.device.context.try_trim_pool(0)?)
     }
 
-    pub fn trim_memory(&self) {
-        self.try_trim_memory()
-            .unwrap_or_else(|error| panic!("{error}"));
-    }
-
-    pub fn stream_with_priority(&self, priority: i32) -> Stream {
-        self.try_stream_with_priority(priority)
-            .unwrap_or_else(|error| panic!("{error}"))
-    }
-
-    pub fn try_stream_with_priority(&self, priority: i32) -> Result<Stream> {
+    /// Creates an ordered queue with the requested CUDA scheduling priority.
+    ///
+    /// # Errors
+    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
+    pub fn stream_with_priority(&self, priority: i32) -> Result<Stream> {
         Ok(Stream::from_driver(
             self.device.clone(),
             driver::Stream::try_with_context(&self.device.context, priority)?,
@@ -164,49 +156,36 @@ impl Gpu {
     /// The handle must belong to this context. Borrowed streams must outlive the returned
     /// stream and queued uses. Owned streams transfer destruction rights. All external work
     /// touching tracked storage must follow `Stream::submit_external`'s contract.
-    pub unsafe fn import_stream(
-        &self,
-        raw: *mut std::ffi::c_void,
-        ownership: driver::Ownership,
-    ) -> Stream {
+    pub unsafe fn import_stream(&self, raw: *mut c_void, ownership: Ownership) -> Stream {
         let _context = self.device.context.enter();
         Stream::from_driver(self.device.clone(), unsafe {
             driver::Stream::from_raw(raw, self.device.context.clone(), ownership)
         })
     }
 
-    pub fn stream(&self) -> Stream {
-        self.try_stream().unwrap_or_else(|error| panic!("{error}"))
-    }
-
-    pub fn try_stream(&self) -> Result<Stream> {
+    /// Creates an ordered submission queue belonging to this device context.
+    ///
+    /// # Errors
+    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
+    pub fn stream(&self) -> Result<Stream> {
         Ok(Stream::from_driver(
             self.device.clone(),
             driver::Stream::try_with_context(&self.device.context, 0)?,
         ))
     }
 
-    /// Copies `data` into a new GPU buffer. The host slice may be reused once this returns.
-    #[track_caller]
-    pub fn upload<T>(&self, data: &[T]) -> Buffer<T> {
-        self.try_upload(data)
-            .unwrap_or_else(|error| panic!("{error}"))
-    }
-
-    pub fn try_upload<T>(&self, data: &[T]) -> Result<Buffer<T>> {
+    /// Copies host values into device storage while preserving tracked allocation dependencies.
+    ///
+    /// # Errors
+    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
+    pub fn upload<T>(&self, data: &[T]) -> Result<Buffer<T>> {
         launch::try_verified::<T>(&self.device)?;
-        self.try_copy(data)
+        self.copy(data)
     }
 
-    /// Copies the bytes of `data` into a new GPU buffer.
-    pub(crate) fn copy<T>(&self, data: &[T]) -> Buffer<T> {
-        self.try_copy(data)
-            .unwrap_or_else(|error| panic!("{error}"))
-    }
-
-    pub(crate) fn try_copy<T>(&self, data: &[T]) -> Result<Buffer<T>> {
+    pub(crate) fn copy<T>(&self, data: &[T]) -> Result<Buffer<T>> {
         let _context = self.device.context.try_enter()?;
-        let bytes = size_of_val(data);
+        let bytes = mem::size_of_val(data);
         let pointer = driver::try_allocate_async(bytes, &self.device.transfer)?;
         let allocation = Rc::new(Allocation::new(self.device.clone(), pointer, bytes));
         tracking::complete(
@@ -226,14 +205,11 @@ impl Gpu {
         Ok(Buffer::new(allocation, data.len()))
     }
 
-    /// Allocates `len` zero-initialized elements; `T` must accept the all-zero bit pattern.
-    #[track_caller]
-    pub fn zeros<T>(&self, len: usize) -> Buffer<T> {
-        self.try_zeros(len)
-            .unwrap_or_else(|error| panic!("{error}"))
-    }
-
-    pub fn try_zeros<T>(&self, len: usize) -> Result<Buffer<T>> {
+    /// Allocates verified elements initialized to their valid all-zero representation.
+    ///
+    /// # Errors
+    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
+    pub fn zeros<T>(&self, len: usize) -> Result<Buffer<T>> {
         let _context = self.device.context.try_enter()?;
         let descriptor = launch::try_verified::<T>(&self.device)?;
         if !descriptor.zeroable {
@@ -242,7 +218,7 @@ impl Gpu {
                 descriptor.name
             )));
         }
-        let bytes = len.checked_mul(size_of::<T>()).ok_or_else(|| {
+        let bytes = len.checked_mul(mem::size_of::<T>()).ok_or_else(|| {
             Error::InvalidOperation("GPU buffer size exceeds the addressable byte count".to_owned())
         })?;
         let pointer = driver::try_allocate_async(bytes, &self.device.transfer)?;
@@ -258,23 +234,14 @@ impl Gpu {
         tracking::complete(&self.device.transfer, &[access], &[]);
         Ok(Buffer::new(allocation, len))
     }
-
-    /// Copies one value to the GPU; annotated methods of `T` launch directly on the result.
-    #[track_caller]
-    pub fn upload_value<T>(&self, value: &T) -> DeviceValue<T> {
-        self.try_upload_value(value)
-            .unwrap_or_else(|error| panic!("{error}"))
-    }
-
-    pub fn try_upload_value<T>(&self, value: &T) -> Result<DeviceValue<T>> {
-        Ok(DeviceValue {
-            buffer: self.try_upload(slice::from_ref(value))?,
-        })
-    }
 }
 
 impl Device {
     #[track_caller]
+    /// Resolves a named entry point while retaining its owning CUDA module.
+    ///
+    /// # Errors
+    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
     pub fn kernel(
         &self,
         module: &'static str,
@@ -322,13 +289,13 @@ impl Device {
             .unwrap_or(8)
             .max(8);
         let start = if metadata.result.is_some() {
-            gpurs_artifact::RESULT_OFFSET
+            RESULT_OFFSET
         } else {
-            gpurs_artifact::PARAMETERS_OFFSET
+            PARAMETERS_OFFSET
         };
         let shared_bytes = u32::try_from(metadata.shared.dynamic_bytes)
             .expect("kernel shared memory exceeds CUDA's size range");
-        let load = |entry: &ArtifactEntry| {
+        let load = |entry: &gpurs_artifact::Entry| {
             let function = |symbol: &str| {
                 let function = module.try_function(symbol)?;
                 if shared_bytes > 0 {
@@ -361,6 +328,9 @@ impl Device {
     }
 
     /// Reserves a status word; the submission resets it on its own stream.
+    ///
+    /// # Errors
+    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
     pub fn status(&self, kernel: &str) -> Result<Rc<Status>> {
         self.statuses.trim();
         if self.statuses.free.borrow().is_empty() {
@@ -387,53 +357,6 @@ impl Device {
             error: None,
             pool: Some(self.statuses.clone()),
         }))
-    }
-}
-
-pub(crate) struct StatusPool {
-    chunks: RefCell<Vec<DevicePointer>>,
-    pub free: RefCell<Vec<(DevicePointer, DevicePointer)>>,
-    context: Context,
-    release: Rc<driver::Stream>,
-}
-
-impl StatusPool {
-    fn trim(&self) {
-        let mut free = self.free.borrow_mut();
-        if free.len() <= 2 * STATUS_CHUNK {
-            return;
-        }
-        let Ok(_context) = self.context.try_enter() else {
-            return;
-        };
-        let mut counts = HashMap::new();
-        for &(_, chunk) in free.iter() {
-            *counts.entry(chunk).or_insert(0) += 1;
-        }
-        let mut retained = false;
-        self.chunks.borrow_mut().retain(|chunk| {
-            if counts.get(chunk) != Some(&STATUS_CHUNK) || !retained {
-                retained = true;
-                return true;
-            }
-            // SAFETY: every slot is free, so no work or observer references this chunk.
-            if unsafe { driver::try_free_async(*chunk, &self.release) }.is_err() {
-                return true;
-            }
-            counts.remove(chunk);
-            false
-        });
-        free.retain(|(_, chunk)| counts.contains_key(chunk));
-    }
-}
-
-impl Drop for StatusPool {
-    fn drop(&mut self) {
-        let _context = self.context.try_enter();
-        for &chunk in self.chunks.get_mut().iter() {
-            // SAFETY: submissions retain their status until completion.
-            let _ = unsafe { driver::try_free(chunk) };
-        }
     }
 }
 

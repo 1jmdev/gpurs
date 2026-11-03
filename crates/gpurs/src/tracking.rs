@@ -7,19 +7,17 @@
 
 use std::{
     any::Any,
+    array,
     cell::{Cell, RefCell},
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     mem::{self, MaybeUninit},
     ops::Range,
     rc::{Rc, Weak},
 };
 
-use gpurs_driver::{self as driver, DevicePointer};
+use gpurs_driver::{self as driver, Context, DevicePointer, Stream};
 
-use crate::{
-    Error, Result,
-    device::{Device, StatusPool},
-};
+use crate::{Error, Result, device::Device};
 
 pub(crate) struct Allocation {
     pub device: Rc<Device>,
@@ -34,9 +32,9 @@ pub(crate) struct Allocation {
 struct Record {
     range: Range<usize>,
     write: bool,
-    stream: Rc<driver::Stream>,
+    stream: Rc<Stream>,
     sequence: u64,
-    waited: Vec<Weak<driver::Stream>>,
+    waited: Vec<Weak<Stream>>,
     statuses: Vec<Rc<Status>>,
 }
 
@@ -160,6 +158,10 @@ impl Status {
         })
     }
 
+    /// Updates retained device state while preserving tracked allocation dependencies.
+    ///
+    /// # Errors
+    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
     pub fn failure(&self) -> Result<()> {
         if let Some(error) = &self.error {
             self.reported.set(true);
@@ -195,9 +197,9 @@ pub(crate) fn read_statuses(statuses: &[Rc<Status>]) -> Result<()> {
             // SAFETY: the device copy initialized every byte.
             status
                 .observed
-                .set(Some(u32::from_ne_bytes(std::array::from_fn(
-                    |index| unsafe { bytes[index].assume_init() },
-                ))));
+                .set(Some(u32::from_ne_bytes(array::from_fn(|index| unsafe {
+                    bytes[index].assume_init()
+                }))));
         }
     }
     Ok(())
@@ -214,10 +216,7 @@ pub(crate) fn overlaps(left: &Range<usize>, right: &Range<usize>) -> bool {
 
 /// Orders `stream` after conflicting earlier work and returns the failure sources the
 /// operation depends on.
-pub(crate) fn try_order(
-    stream: &Rc<driver::Stream>,
-    accesses: &[Access],
-) -> Result<Vec<Rc<Status>>> {
+pub(crate) fn try_order(stream: &Rc<Stream>, accesses: &[Access]) -> Result<Vec<Rc<Status>>> {
     let mut sources: Vec<Rc<Status>> = Vec::new();
     for access in accesses {
         let mut records = access.allocation.records.borrow_mut();
@@ -256,7 +255,7 @@ pub(crate) fn try_order(
 
 /// Records the operation just submitted to `stream`; its writes carry `statuses`,
 /// the launch's own status and the failure sources it depends on.
-pub(crate) fn complete(stream: &Rc<driver::Stream>, accesses: &[Access], statuses: &[Rc<Status>]) {
+pub(crate) fn complete(stream: &Rc<Stream>, accesses: &[Access], statuses: &[Rc<Status>]) {
     let sequence = stream.submitted.get() + 1;
     stream.submitted.set(sequence);
     for access in accesses {
@@ -314,5 +313,55 @@ pub(crate) fn complete(stream: &Rc<driver::Stream>, accesses: &[Access], statuse
                 Vec::new()
             },
         });
+    }
+}
+
+/// Number of launch status words reserved in each device allocation.
+pub(crate) const STATUS_CHUNK: usize = 1024;
+
+pub(crate) struct StatusPool {
+    pub(crate) chunks: RefCell<Vec<DevicePointer>>,
+    pub free: RefCell<Vec<(DevicePointer, DevicePointer)>>,
+    pub(crate) context: Context,
+    pub(crate) release: Rc<Stream>,
+}
+
+impl StatusPool {
+    pub(crate) fn trim(&self) {
+        let mut free = self.free.borrow_mut();
+        if free.len() <= 2 * STATUS_CHUNK {
+            return;
+        }
+        let Ok(_context) = self.context.try_enter() else {
+            return;
+        };
+        let mut counts = HashMap::new();
+        for &(_, chunk) in free.iter() {
+            *counts.entry(chunk).or_insert(0) += 1;
+        }
+        let mut retained = false;
+        self.chunks.borrow_mut().retain(|chunk| {
+            if counts.get(chunk) != Some(&STATUS_CHUNK) || !retained {
+                retained = true;
+                return true;
+            }
+            // SAFETY: every slot is free, so no work or observer references this chunk.
+            if unsafe { driver::try_free_async(*chunk, &self.release) }.is_err() {
+                return true;
+            }
+            counts.remove(chunk);
+            false
+        });
+        free.retain(|(_, chunk)| counts.contains_key(chunk));
+    }
+}
+
+impl Drop for StatusPool {
+    fn drop(&mut self) {
+        let _context = self.context.try_enter();
+        for &chunk in self.chunks.get_mut().iter() {
+            // SAFETY: submissions retain their status until completion.
+            let _ = unsafe { driver::try_free(chunk) };
+        }
     }
 }

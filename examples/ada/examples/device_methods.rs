@@ -45,27 +45,31 @@ fn transform<T: Transform>(input: &[f32], output: &mut [f32], parameters: &T) {
     }
 }
 
-fn main() {
-    let gpu = Gpu::new(0);
-    let stream = gpu.stream();
+fn main() -> gpurs::Result<()> {
+    let gpu = Gpu::new(0)?;
+    let stream = gpu.stream()?;
 
-    let input = gpu.upload(&[-3.0, -1.0, 2.0, 5.0]);
-    let mut output = gpu.zeros::<f32>(4);
+    let input = gpu.upload(&[-3.0, -1.0, 2.0, 5.0])?;
+    let mut output = gpu.zeros::<f32>(4)?;
 
-    let mut parameters = gpu.upload_value(&Parameters {
-        factor: 2.0,
-        bias: 1.0,
-        activation: Activation::Clamp {
-            minimum: 0.0,
-            maximum: 10.0,
+    let mut parameters = DeviceValue::new(
+        &stream,
+        &Parameters {
+            factor: 2.0,
+            bias: 1.0,
+            activation: Activation::Clamp {
+                minimum: 0.0,
+                maximum: 10.0,
+            },
         },
-    });
+    )?;
 
-    let scalar = parameters.apply(&stream, 3.0);
+    let scalar = parameters.apply(&stream, 3.0)?.into_value();
 
-    parameters.update(&stream, 1.0, 0.0, Activation::Relu);
-    transform(&stream, &input, &mut output, &parameters);
+    parameters.update(&stream, 1.0, 0.0, Activation::Relu)?;
+    transform(&stream, &input, &mut output, &parameters)?;
 
-    println!("Scalar: {:?}", scalar.read());
-    println!("Transformed: {:?}", output.download());
+    println!("Scalar: {:?}", scalar.read()?);
+    println!("Transformed: {:?}", output.download()?);
+    Ok(())
 }

@@ -1,8 +1,8 @@
 use std::{rc::Rc, slice};
 
 use crate::{
-    Buffer, DeviceAddress, DeviceSlice, Error, ExternalAccess, Gpu, Result, gpu::Indexed,
-    reference::sealed::Reference,
+    Argument, Buffer, DeviceAddress, DeviceSlice, Error, ExternalAccess, Gpu, Result, Stream,
+    gpu::Indexed, tracking::Access,
 };
 
 pub struct DeviceIndexed<T> {
@@ -10,18 +10,25 @@ pub struct DeviceIndexed<T> {
     dependencies: [ExternalAccess; 2],
 }
 
-impl Gpu {
-    pub fn try_indexed<T: Copy>(
-        &self,
+impl<T: Copy> DeviceIndexed<T> {
+    /// Creates retained device storage and verifies its construction requirements.
+    ///
+    /// # Errors
+    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
+    pub fn new(
+        stream: &Stream,
         source: &impl DeviceSlice<T>,
         indices: &impl DeviceSlice<usize>,
     ) -> Result<DeviceIndexed<T>> {
+        let gpu = Gpu {
+            device: stream.device.clone(),
+        };
         let source = source.span();
         let indices = indices.span();
         if source.len == 0
             || indices.len == 0
-            || !Rc::ptr_eq(&self.device, &source.allocation.device)
-            || !Rc::ptr_eq(&self.device, &indices.allocation.device)
+            || !Rc::ptr_eq(&stream.device, &source.allocation.device)
+            || !Rc::ptr_eq(&stream.device, &indices.allocation.device)
         {
             return Err(Error::InvalidOperation(
                 "indexed views require nonempty ranges on the same GPU".to_owned(),
@@ -40,31 +47,16 @@ impl Gpu {
             last: source.len - 1,
         };
         Ok(DeviceIndexed {
-            buffer: self.try_copy(slice::from_ref(&descriptor))?,
+            buffer: gpu.copy(slice::from_ref(&descriptor))?,
             dependencies: [
-                ExternalAccess(crate::tracking::Access::read(
-                    source.allocation,
-                    source.bytes::<T>(),
-                )),
-                ExternalAccess(crate::tracking::Access::read(
-                    indices.allocation,
-                    indices.bytes::<usize>(),
-                )),
+                ExternalAccess(Access::read(source.allocation, source.bytes::<T>())),
+                ExternalAccess(Access::read(indices.allocation, indices.bytes::<usize>())),
             ],
         })
     }
-
-    pub fn indexed<T: Copy>(
-        &self,
-        source: &impl DeviceSlice<T>,
-        indices: &impl DeviceSlice<usize>,
-    ) -> DeviceIndexed<T> {
-        self.try_indexed(source, indices)
-            .unwrap_or_else(|error| panic!("{error}"))
-    }
 }
 
-impl<T> Reference<Indexed<T>> for DeviceIndexed<T> {
+impl<T> Argument<Indexed<T>> for DeviceIndexed<T> {
     fn buffer(&self) -> &Buffer<Indexed<T>> {
         &self.buffer
     }

@@ -1,5 +1,3 @@
-use std::panic::{self, AssertUnwindSafe};
-
 use gpurs::*;
 
 const BLOCK: usize = 256;
@@ -48,19 +46,19 @@ fn block_sum(input: &[f32], output: &mut [f32]) {
     }
 }
 
-fn fails<T>(operation: impl FnOnce() -> T) -> bool {
-    panic::catch_unwind(AssertUnwindSafe(operation)).is_err()
+fn fails<T>(operation: impl FnOnce() -> gpurs::Result<T>) -> bool {
+    operation().is_err()
 }
 
-fn main() {
-    let gpu = Gpu::new(0);
-    let stream = gpu.stream();
+fn main() -> gpurs::Result<()> {
+    let gpu = Gpu::new(0)?;
+    let stream = gpu.stream()?;
     let values = (0..1000).map(|value| value as f32).collect::<Vec<_>>();
 
-    let input = gpu.upload(&values);
-    let mut output = gpu.zeros::<f32>(1000);
-    offset_copy(&stream, &input, &mut output);
-    let copied = output.download();
+    let input = gpu.upload(&values)?;
+    let mut output = gpu.zeros::<f32>(1000)?;
+    offset_copy(&stream, &input, &mut output)?;
+    let copied = output.download()?;
     println!(
         "Guarded copy is correct: {}",
         copied
@@ -69,23 +67,20 @@ fn main() {
             .all(|(copy, value)| *copy == value + 1.0)
     );
 
-    let hook = panic::take_hook();
-    panic::set_hook(Box::new(|_| {}));
-
-    let short = gpu.upload(&values[..500]);
-    let mut output = gpu.zeros::<f32>(1000);
+    let short = gpu.upload(&values[..500])?;
+    let mut output = gpu.zeros::<f32>(1000)?;
     println!(
         "Short input fails: {}",
         fails(|| {
-            offset_copy(&stream, &short, &mut output);
+            offset_copy(&stream, &short, &mut output)?;
             output.download()
         })
     );
 
-    let input = gpu.upload(&values);
-    let mut output = gpu.zeros::<f32>(100);
-    strided_sum(&stream, &input, &mut output, 300);
-    let sums = output.download();
+    let input = gpu.upload(&values)?;
+    let mut output = gpu.zeros::<f32>(100)?;
+    strided_sum(&stream, &input, &mut output, 300)?;
+    let sums = output.download()?;
     println!(
         "Strided sum is correct: {}",
         sums.iter()
@@ -93,20 +88,20 @@ fn main() {
             .all(|(index, sum)| *sum == (0..4).map(|step| (index + step * 300) as f32).sum::<f32>())
     );
 
-    let mut output = gpu.zeros::<f32>(100);
+    let mut output = gpu.zeros::<f32>(100)?;
     println!(
         "Stride past the end fails: {}",
         fails(|| {
-            strided_sum(&stream, &input, &mut output, 400);
+            strided_sum(&stream, &input, &mut output, 400)?;
             output.download()
         })
     );
 
-    let mut output = gpu.zeros::<f32>(100);
+    let mut output = gpu.zeros::<f32>(100)?;
     println!(
         "Overflowing stride fails: {}",
         fails(|| {
-            strided_sum(&stream, &input, &mut output, usize::MAX / 2);
+            strided_sum(&stream, &input, &mut output, usize::MAX / 2)?;
             output.download()
         })
     );
@@ -116,20 +111,20 @@ fn main() {
         block: [BLOCK, 1, 1],
         shared_bytes: 0,
     };
-    let ones = gpu.upload(&vec![1.0_f32; 2 * BLOCK]);
-    let mut totals = gpu.zeros::<f32>(2);
-    block_sum(&stream.with_launch(config), &ones, &mut totals);
-    println!("Block sums: {:?}", totals.download());
+    let ones = gpu.upload(&vec![1.0_f32; 2 * BLOCK])?;
+    let mut totals = gpu.zeros::<f32>(2)?;
+    block_sum(&stream.launch(config), &ones, &mut totals)?;
+    println!("Block sums: {:?}", totals.download()?);
 
-    let short = gpu.upload(&vec![1.0_f32; 2 * BLOCK - 1]);
-    let mut totals = gpu.zeros::<f32>(2);
+    let short = gpu.upload(&vec![1.0_f32; 2 * BLOCK - 1])?;
+    let mut totals = gpu.zeros::<f32>(2)?;
     println!(
         "Failure before a barrier fails: {}",
         fails(|| {
-            block_sum(&stream.with_launch(config), &short, &mut totals);
+            block_sum(&stream.launch(config), &short, &mut totals)?;
             totals.download()
         })
     );
 
-    panic::set_hook(hook);
+    Ok(())
 }

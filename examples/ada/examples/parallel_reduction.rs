@@ -41,36 +41,37 @@ fn reduce_blocks(input: &[f32], output: &mut [f32]) {
     }
 }
 
-fn main() {
-    let gpu = Gpu::new(0);
-    let stream = gpu.stream();
+fn main() -> gpurs::Result<()> {
+    let gpu = Gpu::new(0)?;
+    let stream = gpu.stream()?;
 
     let count: usize = 10_000;
     let blocks = count.div_ceil(BLOCK_SIZE);
 
-    let input = gpu.upload(&vec![1.0_f32; count]);
-    let mut partial = gpu.zeros::<f32>(blocks);
-    let mut output = gpu.zeros::<f32>(1);
+    let input = gpu.upload(&vec![1.0_f32; count])?;
+    let mut partial = gpu.zeros::<f32>(blocks)?;
+    let mut output = gpu.zeros::<f32>(1)?;
 
     reduce_blocks(
-        &stream.with_launch(LaunchConfig {
+        &stream.launch(LaunchConfig {
             grid: [blocks, 1, 1],
             block: [BLOCK_SIZE, 1, 1],
             shared_bytes: 0,
         }),
         &input,
         &mut partial,
-    );
+    )?;
 
     reduce_blocks(
-        &stream.with_launch(LaunchConfig {
+        &stream.launch(LaunchConfig {
             grid: [1, 1, 1],
             block: [BLOCK_SIZE, 1, 1],
             shared_bytes: 0,
         }),
         &partial,
         &mut output,
-    );
+    )?;
 
-    println!("Sum: {:?}", output.download());
+    println!("Sum: {:?}", output.download()?);
+    Ok(())
 }

@@ -120,7 +120,7 @@ impl Analysis<'_, '_> {
                         other.span,
                         "GPU memory accesses may race",
                         "use the same distinct per-thread index, or separate shared-memory phases \
-                         with gpu::sync_block()",
+                         with kernel::sync_block()",
                     );
                 }
             }

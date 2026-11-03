@@ -1,3 +1,5 @@
+use std::mem;
+
 use gpurs_macros::primitive;
 
 use super::{Accumulator, sealed::Sealed};
@@ -162,7 +164,7 @@ impl<
         let paired = strides[1] == 1
             && valid_columns % 2 == 0
             && strides[0] % 2 == 0
-            && (data.as_ptr() as usize).is_multiple_of(2 * size_of::<T>())
+            && (data.as_ptr() as usize).is_multiple_of(2 * mem::size_of::<T>())
                 == offset.is_multiple_of(2);
         let tile = gpu::block_id();
         let warp = block.warp();

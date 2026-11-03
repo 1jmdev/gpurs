@@ -14,15 +14,19 @@ fn process(input: &[f32], output: &mut [f32]) {
     }
 }
 
-fn main() {
-    let gpu = Gpu::new(0);
-    let stream = gpu.stream();
-    let input = gpu.upload(&[1.0, 2.0, 3.0]);
-    let mut output = gpu.zeros::<f32>(3);
+fn main() -> gpurs::Result<()> {
+    let gpu = Gpu::new(0)?;
+    let stream = gpu.stream()?;
+    let input = gpu.upload(&[1.0, 2.0, 3.0])?;
+    let mut output = gpu.zeros::<f32>(3)?;
 
-    process(&stream, &input, &mut output);
+    process(&stream, &input, &mut output)?;
 
-    let result = output.download();
+    let result = output.download()?;
     println!("Squares: {result:?}");
-    println!("Square of 5: {:?}", square(&stream, 5.0).read());
+    println!(
+        "Square of 5: {:?}",
+        square(&stream, 5.0)?.into_value().read()?
+    );
+    Ok(())
 }

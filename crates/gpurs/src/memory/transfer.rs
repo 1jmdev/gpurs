@@ -8,7 +8,7 @@ use std::{
     slice,
 };
 
-use gpurs_driver as driver;
+use gpurs_driver::{self as driver, Event};
 
 use crate::{
     Buffer, DeviceSlice, DeviceSliceMut, DeviceValue, Error, Gpu, Result, Stream,
@@ -43,7 +43,7 @@ struct HostStorage {
 #[must_use]
 pub struct Transfer<T> {
     data: Option<T>,
-    event: Option<driver::Event>,
+    event: Option<Event>,
     stream: Rc<driver::Stream>,
     accesses: Vec<Access>,
     statuses: Vec<Rc<Status>>,
@@ -57,13 +57,11 @@ impl Gpu {
         self.device.context.device() as usize
     }
 
-    /// Allocates uninitialized bytes with the requested alignment.
-    pub fn allocate(&self, layout: Layout) -> DeviceAllocation {
-        self.try_allocate(layout)
-            .unwrap_or_else(|error| panic!("{error}"))
-    }
-
-    pub fn try_allocate(&self, layout: Layout) -> Result<DeviceAllocation> {
+    /// Reserves device storage with the size and alignment specified by the layout.
+    ///
+    /// # Errors
+    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
+    pub fn allocate(&self, layout: Layout) -> Result<DeviceAllocation> {
         let _context = self.device.context.try_enter()?;
         let bytes = layout
             .size()
@@ -111,12 +109,11 @@ impl Gpu {
         }
     }
 
-    /// Allocates page-locked storage and copies verified host values into it.
-    pub fn pin<T>(&self, data: &[T]) -> PinnedBuffer<T> {
-        self.try_pin(data).unwrap_or_else(|error| panic!("{error}"))
-    }
-
-    pub fn try_pin<T>(&self, data: &[T]) -> Result<PinnedBuffer<T>> {
+    /// Copies verified host values into owned page-locked storage for queued transfers.
+    ///
+    /// # Errors
+    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
+    pub fn pin<T>(&self, data: &[T]) -> Result<PinnedBuffer<T>> {
         launch::try_verified::<T>(&self.device)?;
         self.try_pin_copy(data)
     }
@@ -136,21 +133,19 @@ impl Gpu {
         })
     }
 
-    /// Registers an owned vector in place; its address stays fixed until unregistered.
-    pub fn register<T: 'static>(&self, data: Vec<T>) -> PinnedBuffer<T> {
-        self.try_register(data)
-            .unwrap_or_else(|error| panic!("{error}"))
-    }
-
-    pub fn try_register<T: 'static>(&self, mut data: Vec<T>) -> Result<PinnedBuffer<T>> {
+    /// Registers an owned host vector without changing its stable allocation address.
+    ///
+    /// # Errors
+    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
+    pub fn register<T: 'static>(&self, mut data: Vec<T>) -> Result<PinnedBuffer<T>> {
         launch::try_verified::<T>(&self.device)?;
-        if size_of_val(&*data) == 0 {
-            return self.try_pin(&data);
+        if mem::size_of_val(&*data) == 0 {
+            return self.pin(&data);
         }
         let _context = self.device.context.try_enter()?;
         let pointer = data.as_mut_ptr();
         // SAFETY: the vector is retained, and its capacity is never changed.
-        unsafe { driver::try_register_host(pointer.cast(), size_of_val(&*data))? };
+        unsafe { driver::try_register_host(pointer.cast(), mem::size_of_val(&*data))? };
         Ok(PinnedBuffer {
             pointer,
             len: data.len(),
@@ -238,11 +233,14 @@ impl<T> Buffer<MaybeUninit<T>> {
     }
 
     /// Initializes a suballocation from verified host values.
-    pub fn write(self, stream: &Stream, data: &[T]) -> Buffer<T> {
+    ///
+    /// # Errors
+    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
+    pub fn write(self, stream: &Stream, data: &[T]) -> Result<Buffer<T>> {
         let mut buffer = Buffer::new(self.allocation.clone(), self.len());
         buffer.offset = self.offset;
-        stream.copy_from_host(&mut buffer, data);
-        buffer
+        stream.copy_from_host(&mut buffer, data)?.wait()?;
+        Ok(buffer)
     }
 }
 
@@ -253,9 +251,9 @@ impl<T> Buffer<T> {
     /// All bytes, including source padding, must represent initialized transferable `U`
     /// values. Aliases must obey the same exclusivity rules as `assume_init`.
     pub unsafe fn reinterpret<U>(self) -> Buffer<U> {
-        let bytes = self.len() * size_of::<T>();
+        let bytes = self.len() * mem::size_of::<T>();
         assert!(
-            size_of::<U>() != 0 && bytes.is_multiple_of(size_of::<U>()),
+            mem::size_of::<U>() != 0 && bytes.is_multiple_of(mem::size_of::<U>()),
             "GPU reinterpretation requires a whole number of nonzero-sized elements"
         );
         // SAFETY: the caller guarantees initialized values and compatible aliases.
@@ -263,7 +261,7 @@ impl<T> Buffer<T> {
             DeviceAllocation {
                 allocation: self.allocation.clone(),
             }
-            .uninit::<U>(self.offset, bytes / size_of::<U>())
+            .uninit::<U>(self.offset, bytes / mem::size_of::<U>())
             .assume_init()
         }
     }
@@ -306,13 +304,11 @@ impl Drop for HostStorage {
 }
 
 impl<T> Transfer<T> {
-    /// Polls CUDA completion without waiting or exposing host storage.
-    pub fn is_complete(&self) -> bool {
-        self.try_is_complete()
-            .unwrap_or_else(|error| panic!("{error}"))
-    }
-
-    pub fn try_is_complete(&self) -> Result<bool> {
+    /// Queries completion without exposing device contents before their dependencies finish.
+    ///
+    /// # Errors
+    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
+    pub fn is_complete(&self) -> Result<bool> {
         let _context = self.accesses[0].allocation.device.context.try_enter()?;
         self.event
             .as_ref()
@@ -321,13 +317,11 @@ impl<T> Transfer<T> {
             .map_err(Error::from)
     }
 
-    /// Waits for this transfer and returns its storage, reporting kernel failures.
-    pub fn wait(mut self) -> T {
-        self.try_wait().unwrap_or_else(|error| panic!("{error}"))
-    }
-
     /// Retains the completion handle and its storage when observation fails.
-    pub fn try_wait(&mut self) -> Result<T> {
+    ///
+    /// # Errors
+    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
+    pub fn wait(&mut self) -> Result<T> {
         let _context = self.accesses[0].allocation.device.context.try_enter()?;
         self.finish()?;
         tracking::try_observe(&self.statuses)?;
@@ -392,7 +386,10 @@ impl Stream {
     }
 
     /// Copies equal-length, nonoverlapping device ranges without host staging.
-    pub fn try_copy<T>(
+    ///
+    /// # Errors
+    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
+    pub fn copy<T>(
         &self,
         destination: &mut impl DeviceSliceMut<T>,
         source: &impl DeviceSlice<T>,
@@ -434,25 +431,11 @@ impl Stream {
         )
     }
 
-    /// Copies host values into an existing allocation or view, recovering overwritten bytes.
-    /// The host slice may be reused when this returns.
-    pub fn copy_from_host<T>(&self, destination: &mut impl DeviceSliceMut<T>, source: &[T]) {
-        self.try_copy_from_host(destination, source)
-            .unwrap_or_else(|error| panic!("{error}"));
-    }
-
-    pub fn try_copy_from_host<T>(
-        &self,
-        destination: &mut impl DeviceSliceMut<T>,
-        source: &[T],
-    ) -> Result<()> {
-        self.try_copy_from_host_async(destination, source)?
-            .try_wait()
-            .map(|_| ())
-    }
-
     /// Stages host values in owned pinned storage and enqueues an upload.
-    pub fn try_copy_from_host_async<T>(
+    ///
+    /// # Errors
+    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
+    pub fn copy_from_host<T>(
         &self,
         destination: &mut impl DeviceSliceMut<T>,
         source: &[T],
@@ -469,21 +452,27 @@ impl Stream {
         let gpu = Gpu {
             device: self.device.clone(),
         };
-        self.try_upload(destination, gpu.try_pin_copy(source)?)
+        self.upload(destination, gpu.try_pin_copy(source)?)
     }
 
     /// Enqueues a direct pinned upload, returning host storage through the completion handle.
-    pub fn try_upload<T>(
+    ///
+    /// # Errors
+    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
+    pub fn upload<T>(
         &self,
         destination: &mut impl DeviceSliceMut<T>,
         source: PinnedBuffer<T>,
     ) -> Result<Transfer<PinnedBuffer<T>>> {
         let len = source.len;
-        self.try_upload_range(destination, source, 0..len)
+        self.upload_range(destination, source, 0..len)
     }
 
     /// Uploads a host sub-range, retaining the entire pinned buffer until completion.
-    pub fn try_upload_range<T>(
+    ///
+    /// # Errors
+    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
+    pub fn upload_range<T>(
         &self,
         destination: &mut impl DeviceSliceMut<T>,
         source: PinnedBuffer<T>,
@@ -517,15 +506,15 @@ impl Stream {
     }
 
     /// Enqueues a download to new pinned storage without synchronizing the stream.
-    pub fn try_download<T>(
-        &self,
-        source: &impl DeviceSlice<T>,
-    ) -> Result<Transfer<PinnedBuffer<T>>> {
+    ///
+    /// # Errors
+    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
+    pub fn download<T>(&self, source: &impl DeviceSlice<T>) -> Result<Transfer<PinnedBuffer<T>>> {
         let gpu = Gpu {
             device: self.device.clone(),
         };
         let host = gpu.try_pinned_uninit::<T>(source.len())?;
-        self.try_download_into(
+        self.download_into(
             source,
             PinnedBuffer {
                 storage: host.storage,
@@ -536,17 +525,23 @@ impl Stream {
     }
 
     /// Enqueues a download into existing pinned storage, returning it on completion.
-    pub fn try_download_into<T>(
+    ///
+    /// # Errors
+    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
+    pub fn download_into<T>(
         &self,
         source: &impl DeviceSlice<T>,
         destination: PinnedBuffer<T>,
     ) -> Result<Transfer<PinnedBuffer<T>>> {
         let len = destination.len;
-        self.try_download_into_range(source, destination, 0..len)
+        self.download_into_range(source, destination, 0..len)
     }
 
     /// Downloads into a host sub-range, preserving values outside that range.
-    pub fn try_download_into_range<T>(
+    ///
+    /// # Errors
+    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
+    pub fn download_into_range<T>(
         &self,
         source: &impl DeviceSlice<T>,
         destination: PinnedBuffer<T>,
@@ -583,36 +578,4 @@ impl Stream {
     }
 }
 
-impl Stream {
-    pub fn copy<T>(
-        &self,
-        destination: &mut impl DeviceSliceMut<T>,
-        source: &impl DeviceSlice<T>,
-    ) -> Transfer<()> {
-        self.try_copy(destination, source)
-            .unwrap_or_else(|error| panic!("{error}"))
-    }
-
-    pub fn upload<T>(
-        &self,
-        destination: &mut impl DeviceSliceMut<T>,
-        source: PinnedBuffer<T>,
-    ) -> Transfer<PinnedBuffer<T>> {
-        self.try_upload(destination, source)
-            .unwrap_or_else(|error| panic!("{error}"))
-    }
-
-    pub fn download<T>(&self, source: &impl DeviceSlice<T>) -> Transfer<PinnedBuffer<T>> {
-        self.try_download(source)
-            .unwrap_or_else(|error| panic!("{error}"))
-    }
-
-    pub fn download_into<T>(
-        &self,
-        source: &impl DeviceSlice<T>,
-        destination: PinnedBuffer<T>,
-    ) -> Transfer<PinnedBuffer<T>> {
-        self.try_download_into(source, destination)
-            .unwrap_or_else(|error| panic!("{error}"))
-    }
-}
+impl Stream {}

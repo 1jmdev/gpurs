@@ -1,4 +1,4 @@
-use std::{ffi::c_void, rc::Rc, time::Duration};
+use std::{ffi::c_void, mem, rc::Rc, time::Duration};
 
 use gpurs_driver as driver;
 
@@ -16,7 +16,7 @@ impl ExternalAccess {
         let span = storage.span();
         Self(Access::read(
             span.allocation,
-            span.start..span.start + span.len * size_of::<T>(),
+            span.start..span.start + span.len * mem::size_of::<T>(),
         ))
     }
 
@@ -51,16 +51,15 @@ pub struct Event {
 }
 
 impl Event {
-    pub fn as_raw(&self) -> *mut c_void {
+    pub(crate) fn as_raw(&self) -> *mut c_void {
         self.raw.as_raw()
     }
 
-    pub fn is_complete(&self) -> bool {
-        self.try_is_complete()
-            .unwrap_or_else(|error| panic!("{error}"))
-    }
-
-    pub fn try_is_complete(&self) -> Result<bool> {
+    /// Queries completion without exposing device contents before their dependencies finish.
+    ///
+    /// # Errors
+    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
+    pub fn is_complete(&self) -> Result<bool> {
         let _context = self.device.context.try_enter()?;
         if !self.raw.try_is_complete()? {
             return Ok(false);
@@ -72,12 +71,11 @@ impl Event {
         Ok(true)
     }
 
-    pub fn synchronize(&self) {
-        self.try_synchronize()
-            .unwrap_or_else(|error| panic!("{error}"));
-    }
-
-    pub fn try_synchronize(&self) -> Result<()> {
+    /// Waits for submitted work and reports CUDA or instrumented kernel failures.
+    ///
+    /// # Errors
+    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
+    pub fn synchronize(&self) -> Result<()> {
         let _context = self.device.context.try_enter()?;
         self.raw.try_synchronize()?;
         self.stream
@@ -101,35 +99,28 @@ impl Stream {
         self.raw.priority()
     }
 
-    /// Reports completion and observes failures when the stream is idle.
-    pub fn is_complete(&self) -> bool {
-        self.try_is_complete()
-            .unwrap_or_else(|error| panic!("{error}"))
-    }
-
-    pub fn try_is_complete(&self) -> Result<bool> {
+    /// Queries completion without exposing device contents before their dependencies finish.
+    ///
+    /// # Errors
+    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
+    pub fn is_complete(&self) -> Result<bool> {
         let _context = self.device.context.try_enter()?;
         if !self.raw.try_is_complete()? {
             return Ok(false);
         }
-        self.try_synchronize()?;
+        self.synchronize()?;
         Ok(true)
     }
 
-    pub fn record(&self) -> Event {
+    /// Records stream completion and retains the instrumented statuses needed for observation.
+    ///
+    /// # Errors
+    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
+    pub fn record(&self) -> Result<Event> {
         self.record_statuses(self.statuses())
     }
 
-    pub(crate) fn record_statuses(&self, statuses: Vec<Rc<Status>>) -> Event {
-        self.try_record_statuses(statuses)
-            .unwrap_or_else(|error| panic!("{error}"))
-    }
-
-    pub fn try_record(&self) -> Result<Event> {
-        self.try_record_statuses(self.statuses())
-    }
-
-    pub(crate) fn try_record_statuses(&self, statuses: Vec<Rc<Status>>) -> Result<Event> {
+    pub(crate) fn record_statuses(&self, statuses: Vec<Rc<Status>>) -> Result<Event> {
         Ok(Event {
             raw: self.raw.try_event()?,
             device: self.device.clone(),
@@ -139,11 +130,11 @@ impl Stream {
         })
     }
 
-    pub fn record_timed(&self) -> Event {
-        self.record_event(self.raw.record_timed())
-    }
-
-    pub fn try_record_timed(&self) -> Result<Event> {
+    /// Records a timed completion event after previously submitted stream operations.
+    ///
+    /// # Errors
+    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
+    pub fn record_timed(&self) -> Result<Event> {
         Ok(self.record_event(self.raw.try_record_timed()?))
     }
 
@@ -157,12 +148,11 @@ impl Stream {
         }
     }
 
-    pub fn wait(&self, event: &Event) {
-        self.try_wait(event)
-            .unwrap_or_else(|error| panic!("{error}"));
-    }
-
-    pub fn try_wait(&self, event: &Event) -> Result<()> {
+    /// Waits for completion while preserving tracked dependencies and reporting queued failures.
+    ///
+    /// # Errors
+    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
+    pub fn wait(&self, event: &Event) -> Result<()> {
         if !Rc::ptr_eq(&self.device, &event.device) {
             return Err(Error::InvalidOperation("event contexts differ".to_owned()));
         }
@@ -173,34 +163,13 @@ impl Stream {
         Ok(())
     }
 
-    /// Orders external work after declared dependencies, then records its effects.
-    /// The closure runs with this stream's context current. Its CUDA calls must enqueue
-    /// all work on the supplied stream before returning and must not panic.
     ///
-    /// # Safety
-    /// Declare every accessed allocation and its complete byte range and write effect.
-    /// Work must respect Rust value validity, initialization, and aliasing, and must not
-    /// retain host argument pointers after returning. Retain other resources until stream
-    /// completion. Do not submit gpurs operations or begin capture inside the closure.
-    /// External accesses through other handles must obey this same ordering protocol.
-    pub unsafe fn submit_external(
-        &self,
-        accesses: &[ExternalAccess],
-        submit: impl FnOnce(*mut c_void),
-    ) -> Event {
-        unsafe {
-            self.try_submit_external(accesses, |stream| {
-                submit(stream);
-                Ok(())
-            })
-        }
-        .unwrap_or_else(|error| panic!("{error}"))
-    }
-
+    /// # Errors
+    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
     /// # Safety
     /// The submission contract is identical to `submit_external`. An error may follow a
     /// submitted prefix; every declared range remains a dependency in that case.
-    pub unsafe fn try_submit_external(
+    pub unsafe fn submit_external(
         &self,
         accesses: &[ExternalAccess],
         submit: impl FnOnce(*mut c_void) -> Result<()>,
@@ -223,7 +192,7 @@ impl Stream {
         }
         tracking::complete(&self.raw, &accesses, &statuses);
         self.retain_statuses(&statuses);
-        self.try_record_statuses(statuses)
+        self.record_statuses(statuses)
     }
 
     pub(crate) fn check_external(&self, accesses: &[Access]) -> Result<()> {

@@ -1,6 +1,6 @@
 //! Matrices in GPU memory that pipelines copy tiles from.
 
-use std::marker::PhantomData;
+use std::{marker::PhantomData, mem};
 
 /// A row-major matrix in a slice, copied into [`Pipeline`](super::Pipeline) tiles. Rows the
 /// slice cannot hold are absent.
@@ -36,7 +36,7 @@ impl<'a, T> Matrix<'a, T> {
 
 /// A TMA descriptor of a row-major matrix in GPU memory, copied in 128-byte swizzled
 /// `ROWS`x`COLUMNS` boxes into [`TensorPipeline`](super::TensorPipeline) tiles of the same
-/// shape. Created on the host by [`Gpu::tensor_map`](crate::Gpu::tensor_map) and passed to
+/// shape. Created on the host by [`DeviceTensorMap::new`](crate::DeviceTensorMap::new) and passed to
 /// kernels as `&TensorMap`; every launch taking it reads the matrix it describes.
 #[repr(C, align(64))]
 pub struct TensorMap<T, const ROWS: usize, const COLUMNS: usize> {
@@ -49,7 +49,7 @@ impl<T, const ROWS: usize, const COLUMNS: usize> TensorMap<T, ROWS, COLUMNS> {
     /// a stage on the 1024-byte boundary its swizzle pattern repeats at.
     pub(crate) const fn validate() {
         assert!(
-            COLUMNS * size_of::<T>() == 128 && ROWS >= 8 && ROWS <= 256 && ROWS % 8 == 0,
+            COLUMNS * mem::size_of::<T>() == 128 && ROWS >= 8 && ROWS <= 256 && ROWS % 8 == 0,
             "TMA boxes are 128-byte rows, 8 to 256 of them in multiples of eight"
         );
     }

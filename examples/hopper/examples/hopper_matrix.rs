@@ -3,9 +3,9 @@
 // 128x256 f32 tile.
 
 use gpurs::{
-    Gpu, Half, LaunchConfig, gpu,
+    DeviceSlice, DeviceTensorMap, Gpu, LaunchConfig, gpu,
     gpu::{
-        Block,
+        Block, Half,
         tensor::{Hopper, Output, SharedTile, TensorMap, TensorPipeline, WarpgroupAccumulator},
     },
 };
@@ -67,29 +67,30 @@ fn multiply(
     }
 }
 
-fn main() {
-    let gpu = Gpu::new(0);
-    let stream = gpu.stream();
+fn main() -> gpurs::Result<()> {
+    let gpu = Gpu::new(0)?;
+    let stream = gpu.stream()?;
 
     let (left_host, right_host) = matrix_benchmark::inputs(SIZE);
-    let left = gpu.upload(&left_host);
-    let right_transposed = gpu.upload(&right_host);
-    let left_map = gpu.tensor_map(&left, SIZE, SIZE);
-    let right_map = gpu.tensor_map(&right_transposed, SIZE, SIZE);
-    let mut output = gpu.zeros::<f32>(SIZE * SIZE);
-    let configured = stream.with_launch(LaunchConfig {
+    let left = gpu.upload(&left_host)?;
+    let right_transposed = gpu.upload(&right_host)?;
+    let left_map = DeviceTensorMap::new(&stream, &left, SIZE, SIZE)?;
+    let right_map = DeviceTensorMap::new(&stream, &right_transposed, SIZE, SIZE)?;
+    let mut output = gpu.zeros::<f32>(SIZE * SIZE)?;
+    let configured = stream.launch(LaunchConfig {
         grid: [SIZE / TILE_COLUMNS, SIZE / TILE_ROWS, 1],
         block: [THREADS, 1, 1],
         shared_bytes: 0,
     });
     let seconds = matrix_benchmark::measure(&stream, || {
-        multiply(&configured, &left_map, &right_map, &mut output);
-    });
+        multiply(&configured, &left_map, &right_map, &mut output)
+    })?;
     matrix_benchmark::report(
         [SIZE, SIZE],
         seconds,
         &left_host,
         &right_host,
-        &output.download(),
+        &output.download()?,
     );
+    Ok(())
 }

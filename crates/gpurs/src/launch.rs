@@ -4,19 +4,18 @@ use std::{
     any,
     cell::RefCell,
     mem::{self, MaybeUninit},
+    ptr,
     rc::{Rc, Weak},
-    slice,
 };
 
 use gpurs_artifact::{
-    Access as Effect, Clause, Extent, Parameter, RESULT_OFFSET, STATUS_OFFSET, TransferType,
-    Variable,
+    Clause, Extent, Parameter, RESULT_OFFSET, STATUS_OFFSET, TransferType, Variable,
 };
 use gpurs_driver as driver;
 
 use crate::{
-    DeviceReference, DeviceReferenceMut, Error, Result,
-    buffer::{Buffer, DeviceSlice, DeviceSliceMut, Span},
+    Error, Result,
+    buffer::Buffer,
     device::{Device, KernelKey, LoadedKernel},
     graph::{CapturedKernel, CapturedOperation},
     stream::{Launch, LaunchConfig},
@@ -25,12 +24,12 @@ use crate::{
 
 /// Arguments of one kernel launch, collected in parameter order.
 pub struct KernelLaunch<'a, S: Launch> {
-    stream: &'a S,
-    kernel: Rc<LoadedKernel>,
-    arguments: Vec<MaybeUninit<u8>>,
-    position: usize,
-    lengths: Vec<u64>,
-    accesses: Vec<Access>,
+    pub(crate) stream: &'a S,
+    pub(crate) kernel: Rc<LoadedKernel>,
+    pub(crate) arguments: Vec<MaybeUninit<u8>>,
+    pub(crate) position: usize,
+    pub(crate) lengths: Vec<u64>,
+    pub(crate) accesses: Vec<Access>,
 }
 
 pub(crate) struct ValidatedLaunch {
@@ -67,8 +66,8 @@ pub fn kernel<'a, S: Launch, G>(
     let generics = any::type_name::<G>();
     let mut loaded = cache.loaded.borrow_mut();
     let kernel = if let Some(((previous_module, previous_tail, previous), owner, kernel)) = &*loaded
-        && std::ptr::eq(*previous_module, module)
-        && std::ptr::eq(*previous_tail, tail)
+        && ptr::eq(*previous_module, module)
+        && ptr::eq(*previous_tail, tail)
         && *previous == generics
         && owner.as_ptr() == Rc::as_ptr(device)
     {
@@ -97,151 +96,8 @@ pub fn kernel<'a, S: Launch, G>(
 }
 
 impl<S: Launch> KernelLaunch<'_, S> {
-    /// # Safety
-    /// `T` and this argument position match the compiled kernel's immutable slice parameter.
-    pub unsafe fn slice<T>(&mut self, argument: &impl DeviceSlice<T>) -> Result<()> {
-        self.slice_argument::<T>(argument.span(), false)
-    }
-
-    /// # Safety
-    /// `T` and this argument position match the compiled kernel's mutable slice parameter.
-    pub unsafe fn slice_mut<T>(&mut self, argument: &mut impl DeviceSliceMut<T>) -> Result<()> {
-        self.slice_argument::<T>(argument.span(), true)
-    }
-
-    /// # Safety
-    /// `T` and this argument position match the compiled kernel's immutable reference parameter.
-    pub unsafe fn reference<T>(&mut self, argument: &impl DeviceReference<T>) -> Result<()> {
-        self.reference_argument(argument, false)
-    }
-
     #[track_caller]
-    /// # Safety
-    /// `T` and this argument position match the compiled kernel's mutable reference parameter.
-    pub unsafe fn reference_mut<T>(
-        &mut self,
-        argument: &mut impl DeviceReferenceMut<T>,
-    ) -> Result<()> {
-        self.reference_argument(argument, true)
-    }
-
-    /// # Safety
-    /// `T` and this argument position match the compiled kernel's value parameter.
-    pub unsafe fn value<T>(&mut self, argument: &T) {
-        let offset = self.next() as usize;
-        // SAFETY: kernel parameter types are verified transfer types, so their bytes may be
-        // copied as `MaybeUninit<u8>`.
-        let bytes = unsafe {
-            slice::from_raw_parts(
-                (argument as *const T).cast::<MaybeUninit<u8>>(),
-                size_of::<T>(),
-            )
-        };
-        self.arguments[offset..offset + bytes.len()].copy_from_slice(bytes);
-    }
-
-    #[track_caller]
-    /// # Safety
-    /// Every parameter was supplied with its compiled type, and the kernel returns unit.
-    pub unsafe fn finish_unit(self) -> Result<()> {
-        self.submit::<()>().map(|_| ())
-    }
-
-    #[track_caller]
-    /// # Safety
-    /// Every parameter was supplied with its compiled type, and `R` is the compiled return type.
-    pub unsafe fn finish<R>(self) -> Result<Buffer<R>> {
-        let buffer = self
-            .submit::<R>()?
-            .expect("value-returning kernels have a result");
-        Ok(buffer)
-    }
-
-    fn slice_argument<T>(&mut self, span: Span<'_>, mutable: bool) -> Result<()> {
-        if !Rc::ptr_eq(&self.stream.stream().device, &span.allocation.device) {
-            return Err(Error::InvalidOperation(
-                "kernel argument belongs to another GPU".to_owned(),
-            ));
-        }
-        let effect = self.effect(mutable);
-        let offset = self.next() as usize;
-        let pointer = span.allocation.pointer + span.start as u64;
-        self.write_word(offset, pointer);
-        self.write_word(offset + 8, span.len as u64);
-        self.lengths[self.position - 1] = span.len as u64;
-        self.accesses.push(Access {
-            allocation: span.allocation.clone(),
-            range: span.bytes::<T>(),
-            write: effect,
-            recovers: false,
-        });
-        Ok(())
-    }
-
-    fn reference_argument<T>(
-        &mut self,
-        value: &impl DeviceReference<T>,
-        mutable: bool,
-    ) -> Result<()> {
-        if !Rc::ptr_eq(
-            &self.stream.stream().device,
-            &value.buffer().allocation.device,
-        ) {
-            return Err(Error::InvalidOperation(
-                "kernel argument belongs to another GPU".to_owned(),
-            ));
-        }
-        let effect = self.effect(mutable);
-        let offset = self.next() as usize;
-        self.write_word(
-            offset,
-            value.buffer().allocation.pointer + value.buffer().offset as u64,
-        );
-        self.accesses.push(Access {
-            allocation: value.buffer().allocation.clone(),
-            range: value.buffer().offset..value.buffer().offset + size_of::<T>(),
-            write: effect,
-            recovers: false,
-        });
-        if let Some(source) = value.source() {
-            self.accesses
-                .push(Access::read(source.allocation, source.bytes::<u8>()));
-        }
-        for access in value.dependencies() {
-            if !Rc::ptr_eq(&self.stream.stream().device, &access.0.allocation.device) {
-                return Err(Error::InvalidOperation(
-                    "descriptor storage belongs to another GPU".to_owned(),
-                ));
-            }
-            self.accesses.push(access.0.clone());
-        }
-        Ok(())
-    }
-
-    fn effect(&self, mutable: bool) -> bool {
-        mutable
-            || matches!(
-                self.kernel.metadata.parameters[self.position],
-                Parameter::Slice {
-                    access: Effect::Write
-                } | Parameter::Reference {
-                    access: Effect::Write
-                }
-            )
-    }
-
-    fn next(&mut self) -> u64 {
-        self.position += 1;
-        self.kernel.offsets[self.position - 1]
-    }
-
-    fn write_word(&mut self, offset: usize, word: u64) {
-        let bytes = word.to_ne_bytes().map(MaybeUninit::new);
-        self.arguments[offset..offset + 8].copy_from_slice(&bytes);
-    }
-
-    #[track_caller]
-    fn submit<R>(mut self) -> Result<Option<Buffer<R>>> {
+    pub(crate) fn submit<R>(mut self) -> Result<Option<Buffer<R>>> {
         let stream = self.stream.stream();
         let device = &stream.device;
         let _context = device.context.try_enter()?;
@@ -371,12 +227,12 @@ impl<S: Launch> KernelLaunch<'_, S> {
             .map(|value| {
                 assert_eq!(
                     value.size,
-                    size_of::<R>() as u64,
+                    mem::size_of::<R>() as u64,
                     "result layout of `{}` changed",
                     metadata.name
                 );
                 let count = if explicit.is_some() { threads } else { 1 };
-                let bytes = count.checked_mul(size_of::<R>()).ok_or_else(|| {
+                let bytes = count.checked_mul(mem::size_of::<R>()).ok_or_else(|| {
                     Error::InvalidOperation(
                         "GPU result size exceeds the addressable byte count".to_owned(),
                     )
@@ -430,7 +286,7 @@ impl<S: Launch> KernelLaunch<'_, S> {
                 .borrow_mut()
                 .push(CapturedOperation::kernel(CapturedKernel {
                     function: *function,
-                    config: crate::LaunchConfig {
+                    config: LaunchConfig {
                         shared_bytes: config
                             .shared_bytes
                             .max(metadata.shared.dynamic_bytes as usize),
@@ -530,7 +386,8 @@ pub(crate) fn try_verified<T>(device: &Device) -> Result<&TransferType> {
         .iter()
         .find(|descriptor| descriptor.name == name)
         .filter(|descriptor| {
-            descriptor.size == size_of::<T>() as u64 && descriptor.align == align_of::<T>() as u64
+            descriptor.size == mem::size_of::<T>() as u64
+                && descriptor.align == mem::align_of::<T>() as u64
         })
         .ok_or_else(|| {
             Error::InvalidOperation(format!(

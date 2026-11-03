@@ -1,6 +1,9 @@
 use gpurs_macros::primitive;
 
-use super::{Block, shared, thread, warp, warp::Shuffle};
+use super::{
+    Block, shared, thread,
+    warp::{self, Shuffle},
+};
 
 /// Integer keys ordered numerically by block radix operations.
 pub trait RadixKey: Copy {

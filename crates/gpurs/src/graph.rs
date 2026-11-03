@@ -3,31 +3,31 @@ use std::{
     cell::RefCell,
     ffi::c_void,
     mem::{self, MaybeUninit},
-    ptr,
     rc::Rc,
+    slice,
 };
 
-use gpurs_driver as driver;
+use gpurs_driver::{self as driver, Function};
 
 use crate::{
-    Buffer, DeviceSlice, DeviceSliceMut, Error, Event, ExternalAccess, Launch, LaunchConfig,
-    Ownership, Result, Stream,
+    DeviceSlice, DeviceSliceMut, Error, Event, ExternalAccess, Launch, LaunchConfig, Ownership,
+    Result, Stream,
     device::Device,
-    stream::{FallibleStream, sealed},
+    sealed_launch::Sealed,
     tracking::{self, Access, Status},
 };
 
 pub struct CapturedKernel {
-    pub(crate) function: driver::Function,
+    pub(crate) function: Function,
     pub(crate) config: LaunchConfig,
     pub(crate) arguments: Vec<MaybeUninit<u8>>,
     pub(crate) accesses: Vec<Access>,
     pub(crate) status: Option<Rc<Status>>,
 }
 
-pub struct CapturedOperation(Operation);
+pub struct CapturedOperation(pub(crate) Operation);
 
-enum Operation {
+pub(crate) enum Operation {
     Kernel(CapturedKernel),
     Fill { access: Access, value: u8 },
     Copy { accesses: [Access; 2] },
@@ -86,68 +86,58 @@ impl CapturedOperation {
         Ok(())
     }
 
-    fn accesses(&self) -> &[Access] {
+    pub(crate) fn accesses(&self) -> &[Access] {
         match &self.0 {
             Operation::Kernel(kernel) => &kernel.accesses,
-            Operation::Fill { access, .. } => std::slice::from_ref(access),
+            Operation::Fill { access, .. } => slice::from_ref(access),
             Operation::Copy { accesses } => accesses,
         }
     }
 }
 
 /// A capture queue for verified kernels writing into existing allocations.
-pub struct CaptureStream<'a> {
-    stream: &'a Stream,
-    config: Option<LaunchConfig>,
-    kernels: &'a RefCell<Vec<CapturedOperation>>,
+pub struct Capture<'a> {
+    pub(crate) stream: &'a Stream,
+    pub(crate) config: Option<LaunchConfig>,
+    pub(crate) kernels: Option<&'a RefCell<Vec<CapturedOperation>>>,
 }
 
 /// A reusable CUDA graph retaining device storage, modules, and fixed kernel arguments.
 #[derive(Clone)]
-pub struct Graph(Rc<GraphInner>);
+pub struct Graph(pub(crate) Rc<GraphInner>);
 
-struct GraphInner {
-    raw: driver::Graph,
-    device: Rc<Device>,
-    accesses: Vec<Access>,
-    statuses: Vec<Rc<Status>>,
-    nodes: Vec<*mut c_void>,
-    _resources: Box<dyn Any>,
-    pending: RefCell<Option<Event>>,
+pub(crate) struct GraphInner {
+    pub(crate) raw: driver::Graph,
+    pub(crate) device: Rc<Device>,
+    pub(crate) accesses: Vec<Access>,
+    pub(crate) statuses: Vec<Rc<Status>>,
+    pub(crate) nodes: Vec<*mut c_void>,
+    pub(crate) _resources: Box<dyn Any>,
+    pub(crate) pending: RefCell<Option<Event>>,
 }
 
 /// An executable graph. Replays order status reuse through stream dependencies.
 pub struct GraphExec {
-    raw: driver::GraphExec,
-    graph: Graph,
-    origin: Graph,
-    pending: RefCell<Option<Event>>,
-    replacements: Vec<Option<Vec<Access>>>,
-    accesses: Vec<Access>,
+    pub(crate) raw: driver::GraphExec,
+    pub(crate) graph: Graph,
+    pub(crate) origin: Graph,
+    pub(crate) pending: RefCell<Option<Event>>,
+    pub(crate) replacements: Vec<Option<Vec<Access>>>,
+    pub(crate) accesses: Vec<Access>,
 }
 
 impl Stream {
-    /// Captures verified kernel calls without executing them. Only calls using the supplied
-    /// capture queue are captured. Kernels must write existing storage and return `()`;
-    /// allocations, transfers, and host side effects in the closure run immediately.
-    pub fn capture(&self, record: impl FnOnce(&CaptureStream<'_>)) -> Graph {
-        self.try_capture(|stream| {
-            record(stream);
-            Ok(())
-        })
-        .unwrap_or_else(|error| panic!("{error}"))
-    }
-
-    pub fn try_capture(
-        &self,
-        record: impl FnOnce(&CaptureStream<'_>) -> Result<()>,
-    ) -> Result<Graph> {
+    /// Records verified submissions into a graph while retaining their allocation dependencies.
+    ///
+    /// # Errors
+    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
+    pub fn capture(&self, record: impl FnOnce(&Capture<'_>) -> Result<()>) -> Result<Graph> {
         let _context = self.device.context.try_enter()?;
         let kernels = RefCell::new(Vec::new());
-        record(&CaptureStream {
+        record(&Capture {
             stream: self,
             config: None,
-            kernels: &kernels,
+            kernels: Some(&kernels),
         })?;
         let mut kernels = kernels.into_inner();
         let mut accesses = kernels
@@ -242,27 +232,37 @@ impl Stream {
     }
 }
 
-impl CaptureStream<'_> {
-    pub fn try_fill(&self, destination: &mut impl DeviceSliceMut<u8>, value: u8) -> Result<()> {
+impl Capture<'_> {
+    /// Updates retained device state while preserving tracked allocation dependencies.
+    ///
+    /// # Errors
+    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
+    pub fn fill(&self, destination: &mut impl DeviceSliceMut<u8>, value: u8) -> Result<()> {
+        if self.kernels.is_none() {
+            return destination.fill(self.stream, value);
+        }
         let span = destination.span();
         let access = Access::recovering(span.allocation, span.bytes::<u8>());
-        self.stream.check_external(std::slice::from_ref(&access))?;
+        self.stream.check_external(slice::from_ref(&access))?;
         self.kernels
+            .expect("capture queue is present")
             .borrow_mut()
             .push(CapturedOperation::fill(access, value));
         Ok(())
     }
 
-    pub fn fill(&self, destination: &mut impl DeviceSliceMut<u8>, value: u8) {
-        self.try_fill(destination, value)
-            .unwrap_or_else(|error| panic!("{error}"));
-    }
-
-    pub fn try_copy<T>(
+    /// Copies nonoverlapping device ranges with equal element counts in stream order.
+    ///
+    /// # Errors
+    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
+    pub fn copy<T>(
         &self,
         destination: &mut impl DeviceSliceMut<T>,
         source: &impl DeviceSlice<T>,
     ) -> Result<()> {
+        if self.kernels.is_none() {
+            return self.stream.copy(destination, source).map(|_| ());
+        }
         let destination = destination.span();
         let source = source.span();
         let accesses = [
@@ -279,26 +279,14 @@ impl CaptureStream<'_> {
         }
         self.stream.check_external(&accesses)?;
         self.kernels
+            .expect("capture queue is present")
             .borrow_mut()
             .push(CapturedOperation::copy(accesses));
         Ok(())
     }
 
-    pub fn copy<T>(&self, destination: &mut impl DeviceSliceMut<T>, source: &impl DeviceSlice<T>) {
-        self.try_copy(destination, source)
-            .unwrap_or_else(|error| panic!("{error}"));
-    }
-
-    pub fn fallible(&self) -> FallibleStream<'_> {
-        FallibleStream {
-            stream: self.stream,
-            config: self.config,
-            capture: Some(self.kernels),
-        }
-    }
-
-    pub fn with_launch(&self, config: LaunchConfig) -> CaptureStream<'_> {
-        CaptureStream {
+    pub fn launch(&self, config: LaunchConfig) -> Capture<'_> {
+        Capture {
             stream: self.stream,
             config: Some(config),
             kernels: self.kernels,
@@ -306,21 +294,9 @@ impl CaptureStream<'_> {
     }
 }
 
-impl Launch for CaptureStream<'_> {
-    type Output<T> = Buffer<T>;
+impl Launch for Capture<'_> {}
 
-    type Unit = ();
-
-    fn output<T>(buffer: Result<Buffer<T>>) -> Buffer<T> {
-        buffer.unwrap_or_else(|error| panic!("{error}"))
-    }
-
-    fn unit(result: Result<()>) {
-        result.unwrap_or_else(|error| panic!("{error}"));
-    }
-}
-
-impl sealed::Sealed for CaptureStream<'_> {
+impl Sealed for Capture<'_> {
     fn stream(&self) -> &Stream {
         self.stream
     }
@@ -330,22 +306,21 @@ impl sealed::Sealed for CaptureStream<'_> {
     }
 
     fn capture(&self) -> Option<&RefCell<Vec<CapturedOperation>>> {
-        Some(self.kernels)
+        self.kernels
     }
 }
 
 impl Graph {
     /// Exports a borrowed graph handle. External code must not mutate or destroy it.
-    pub fn as_raw(&self) -> *mut c_void {
+    pub(crate) fn as_raw(&self) -> *mut c_void {
         self.0.raw.as_raw()
     }
 
-    pub fn instantiate(&self) -> GraphExec {
-        self.try_instantiate()
-            .unwrap_or_else(|error| panic!("{error}"))
-    }
-
-    pub fn try_instantiate(&self) -> Result<GraphExec> {
+    /// Creates a reusable executable retaining this graph and its allocation dependencies.
+    ///
+    /// # Errors
+    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
+    pub fn instantiate(&self) -> Result<GraphExec> {
         self.0.device.context.try_trim_pool(0)?;
         Ok(GraphExec {
             raw: self.0.raw.try_instantiate()?,
@@ -357,281 +332,12 @@ impl Graph {
         })
     }
 
-    /// Native kernel nodes; CUDA does not guarantee enumeration order.
-    pub fn kernel_nodes(&self) -> Vec<*mut c_void> {
-        self.try_kernel_nodes()
-            .unwrap_or_else(|error| panic!("{error}"))
-    }
-
-    pub fn try_kernel_nodes(&self) -> Result<Vec<*mut c_void>> {
-        Ok(self.0.raw.try_kernel_nodes()?)
-    }
-}
-
-impl GraphExec {
-    pub fn upload(&self, stream: &Stream) -> Event {
-        self.try_upload(stream)
-            .unwrap_or_else(|error| panic!("{error}"))
-    }
-
-    pub fn try_upload(&self, stream: &Stream) -> Result<Event> {
-        if !Rc::ptr_eq(&self.graph.0.device, &stream.device) {
-            return Err(Error::InvalidOperation(
-                "graph and stream contexts differ".to_owned(),
-            ));
-        }
-        self.try_finish()?;
-        let _context = stream.device.context.try_enter()?;
-        self.raw.try_upload(&stream.raw)?;
-        let event = match stream.try_record() {
-            Ok(event) => event,
-            Err(error) => {
-                stream.raw.try_synchronize()?;
-                return Err(error);
-            }
-        };
-        *self.pending.borrow_mut() = Some(event.clone());
-        *self.graph.0.pending.borrow_mut() = Some(event.clone());
-        Ok(event)
-    }
-
-    /// Exports a borrowed executable handle for inspection. Use `launch` for tracked replay;
-    /// native replay or mutation must uphold all resource and failure-status contracts.
-    pub fn as_raw(&self) -> *mut c_void {
-        self.raw.as_raw()
-    }
-
-    /// Orders declared dependencies and launches without waiting for prior replays.
-    pub fn launch(&self, stream: &Stream) -> Event {
-        self.try_launch(stream)
-            .unwrap_or_else(|error| panic!("{error}"))
-    }
-
-    pub fn try_launch(&self, stream: &Stream) -> Result<Event> {
-        if !Rc::ptr_eq(&self.graph.0.device, &stream.device) {
-            return Err(Error::InvalidOperation(
-                "graph and stream contexts differ".to_owned(),
-            ));
-        }
-        stream.maintain()?;
-        let _context = stream.device.context.try_enter()?;
-        for pending in [&self.graph.0.pending, &self.pending] {
-            if let Some(event) = pending.borrow().as_ref() {
-                stream.raw.try_wait(&event.raw)?;
-            }
-        }
-        let mut statuses = tracking::try_order(&stream.raw, &self.accesses)?;
-        let snapshots = self
-            .graph
-            .0
-            .statuses
-            .iter()
-            .map(|status| stream.device.status(&status.kernel))
-            .collect::<Result<Vec<_>>>()?;
-        unsafe { self.raw.try_launch(&stream.raw)? };
-        for (source, destination) in self.graph.0.statuses.iter().zip(&snapshots) {
-            if let Err(error) = unsafe {
-                driver::try_copy_device_async(destination.pointer, source.pointer, 4, &stream.raw)
-            } {
-                stream.raw.try_synchronize()?;
-                return Err(error.into());
-            }
-        }
-        statuses.extend(snapshots);
-        tracking::complete(&stream.raw, &self.accesses, &statuses);
-        stream.retain_statuses(&statuses);
-        let event = match stream.try_record_statuses(statuses.clone()) {
-            Ok(event) => event,
-            Err(error) => {
-                stream.raw.try_synchronize()?;
-                tracking::read_statuses(&statuses)?;
-                return Err(error);
-            }
-        };
-        *self.pending.borrow_mut() = Some(event.clone());
-        *self.graph.0.pending.borrow_mut() = Some(event.clone());
-        Ok(event)
-    }
-
-    /// Recapture with new verified arguments, then update compatible graph topology.
-    /// Returns CUDA's update result; zero means success. Failure preserves this executable.
-    pub fn update(&mut self, graph: &Graph) -> i32 {
-        self.try_update(graph)
-            .unwrap_or_else(|error| panic!("{error}"))
-    }
-
-    pub fn try_update(&mut self, graph: &Graph) -> Result<i32> {
-        self.try_finish()?;
-        if !Rc::ptr_eq(&self.graph.0.device, &graph.0.device) {
-            return Err(Error::InvalidOperation("graph contexts differ".to_owned()));
-        }
-        let result = self.raw.try_update(&graph.0.raw)?;
-        if result == 0 {
-            self.graph = graph.clone();
-            self.replacements = (0..graph.0.nodes.len()).map(|_| None).collect();
-            self.accesses = graph.0.accesses.clone();
-        }
-        Ok(result)
-    }
-
-    /// Replaces one kernel's verified arguments and geometry without CUDA recapture or waiting.
-    /// `index` counts kernel calls in capture order. Record exactly one call to the same
-    /// kernel entry point; its ordinary launcher rechecks all verifier preconditions.
-    /// Queued replays keep their original arguments, and future replays track new storage.
-    pub fn try_update_kernel(
-        &mut self,
-        index: usize,
-        stream: &Stream,
-        record: impl FnOnce(&CaptureStream<'_>) -> Result<()>,
-    ) -> Result<()> {
-        if !Rc::ptr_eq(&self.graph.0.device, &stream.device) {
-            return Err(Error::InvalidOperation(
-                "graph and stream contexts differ".to_owned(),
-            ));
-        }
-        let operations = self
-            .graph
-            .0
-            ._resources
-            .downcast_ref::<Vec<CapturedOperation>>();
-        let original = operations
-            .and_then(|operations| {
-                self.origin.0.nodes.get(index)?;
-                operations
-                    .iter()
-                    .filter_map(|operation| match &operation.0 {
-                        Operation::Kernel(kernel) => Some(kernel),
-                        _ => None,
-                    })
-                    .nth(index)
-            })
-            .ok_or_else(|| Error::InvalidOperation("graph kernel index is invalid".to_owned()))?;
-        let kernels = RefCell::new(Vec::new());
-        record(&CaptureStream {
-            stream,
-            config: None,
-            kernels: &kernels,
-        })?;
-        let mut kernels = kernels.into_inner();
-        if kernels.len() != 1 {
-            return Err(Error::InvalidOperation(
-                "graph update requires exactly one kernel".to_owned(),
-            ));
-        }
-        let Operation::Kernel(mut kernel) = kernels.pop().expect("one operation was recorded").0
-        else {
-            return Err(Error::InvalidOperation(
-                "graph update requires a kernel call".to_owned(),
-            ));
-        };
-        if kernel.function.as_raw() != original.function.as_raw() {
-            return Err(Error::InvalidOperation(
-                "graph update must preserve the kernel entry point".to_owned(),
-            ));
-        }
-        if let Some(status) = &original.status {
-            kernel.arguments[..8]
-                .copy_from_slice(&status.pointer.to_ne_bytes().map(MaybeUninit::new));
-        }
-        let mut parameters = [kernel.arguments.as_mut_ptr().cast()];
-        let _context = stream.device.context.try_enter()?;
-        // SAFETY: the ordinary launcher verified this call, resources are retained below,
-        // and the original status pointer still belongs to the captured reset and snapshot.
-        unsafe {
-            self.raw.try_set_kernel(
-                self.origin.0.nodes[index],
-                &driver::KernelNodeParameters {
-                    function: kernel.function.as_raw(),
-                    grid: kernel.config.grid.map(|value| value as u32),
-                    block: kernel.config.block.map(|value| value as u32),
-                    shared_bytes: kernel.config.shared_bytes as u32,
-                    parameters: parameters.as_mut_ptr(),
-                    extra: ptr::null_mut(),
-                },
-            )?;
-        }
-        self.replacements[index] = Some(kernel.accesses);
-        let mut kernel_index = 0;
-        self.accesses = operations
-            .expect("verified graph retains its operations")
-            .iter()
-            .flat_map(|operation| {
-                if matches!(&operation.0, Operation::Kernel(_)) {
-                    let accesses = self.replacements[kernel_index]
-                        .as_deref()
-                        .unwrap_or_else(|| operation.accesses());
-                    kernel_index += 1;
-                    accesses
-                } else {
-                    operation.accesses()
-                }
-            })
-            .cloned()
-            .collect();
-        tracking::deduplicate(&mut self.accesses);
-        Ok(())
-    }
-
-    /// Updates future launches of a native kernel node without waiting for queued work.
+    /// Returns the CUDA nodes corresponding to kernels retained by this graph.
     ///
-    /// # Safety
-    /// The node must belong to this graph. New arguments must satisfy the original verifier
-    /// obligations and ABI. All resources must already be retained and all memory effects
-    /// must fit the existing access declarations. Status pointers must remain unchanged.
-    /// Prefer verified recapture and `update` when changing gpurs kernel arguments.
-    pub unsafe fn set_kernel(
-        &mut self,
-        node: *mut c_void,
-        parameters: &driver::KernelNodeParameters,
-    ) {
-        unsafe { self.try_set_kernel(node, parameters) }.unwrap_or_else(|error| panic!("{error}"));
-    }
-
-    /// # Safety
-    /// The node, parameter ABI, resources, effects, and status pointers obey `set_kernel`.
-    pub unsafe fn try_set_kernel(
-        &mut self,
-        node: *mut c_void,
-        parameters: &driver::KernelNodeParameters,
-    ) -> Result<()> {
-        let _context = self.graph.0.device.context.try_enter()?;
-        unsafe { self.raw.try_set_kernel(node, parameters)? };
-        Ok(())
-    }
-
-    fn try_finish(&self) -> Result<()> {
-        let _context = self.graph.0.device.context.try_enter()?;
-        for pending in [&self.graph.0.pending, &self.pending] {
-            if let Some(event) = pending.borrow().as_ref() {
-                event.raw.try_synchronize()?;
-                event
-                    .stream
-                    .completed
-                    .set(event.stream.completed.get().max(event.sequence));
-                tracking::read_statuses(&event.statuses)?;
-            }
-        }
-        let mut result = Ok(());
-        for pending in [&self.graph.0.pending, &self.pending] {
-            if let Some(event) = pending.take() {
-                result = result.and(
-                    event
-                        .statuses
-                        .iter()
-                        .filter(|status| !status.reported.get())
-                        .try_for_each(|status| status.failure()),
-                );
-            }
-        }
-        result
-    }
-}
-
-impl Drop for GraphExec {
-    fn drop(&mut self) {
-        if let Some(event) = self.pending.get_mut().take() {
-            let _ = event.raw.try_synchronize();
-        }
+    /// # Errors
+    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
+    pub fn kernel_nodes(&self) -> Result<Vec<*mut c_void>> {
+        Ok(self.0.raw.try_kernel_nodes()?)
     }
 }
 

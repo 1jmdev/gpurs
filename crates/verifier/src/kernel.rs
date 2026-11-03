@@ -153,8 +153,7 @@ pub fn kernel(
         sess.error_help(
             span,
             "GPU launch dimensions cannot be inferred",
-            "launch this kernel with stream.with_launch(LaunchConfig { grid, block, shared_bytes \
-             })",
+            "launch this kernel with stream.launch(LaunchConfig { grid, block, shared_bytes })",
         );
     }
     if analysis.failure.is_none() {

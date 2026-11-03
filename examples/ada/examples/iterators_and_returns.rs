@@ -33,7 +33,7 @@ enum DomainError {
 }
 
 #[gpu]
-fn checked_sqrt(value: f32) -> Result<f32, DomainError> {
+fn checked_sqrt(value: f32) -> std::result::Result<f32, DomainError> {
     if value < 0.0 {
         Err(DomainError::NegativeInput)
     } else {
@@ -51,39 +51,45 @@ fn normalized_quotient(value: u32, divisor: u32) -> u32 {
     value / divisor.max(1)
 }
 
-fn main() {
-    let gpu = Gpu::new(0);
-    let stream = gpu.stream();
+fn main() -> gpurs::Result<()> {
+    let gpu = Gpu::new(0)?;
+    let stream = gpu.stream()?;
     for divisor in [0, 1, 7] {
         assert_eq!(
-            normalized_quotient(&stream, 42, divisor).read(),
+            normalized_quotient(&stream, 42, divisor)?
+                .into_value()
+                .read()?,
             42 / divisor.max(1)
         );
     }
 
-    let values = gpu.upload(&[1.0, -2.0, 3.0, -4.0]);
-    let weights = gpu.upload(&[1.0, 2.0, 3.0, 4.0]);
+    let values = gpu.upload(&[1.0, -2.0, 3.0, -4.0])?;
+    let weights = gpu.upload(&[1.0, 2.0, 3.0, 4.0])?;
 
-    let product = dot(&stream, &values, &weights, 0.0);
-    let energy = selected_energy(&stream, &values);
+    let product = dot(&stream, &values, &weights, 0.0)?.into_value();
+    let energy = selected_energy(&stream, &values)?.into_value();
 
-    let integers = gpu.upload(&[1_i32, 2, 3]);
-    let integer_weights = gpu.upload(&[4_i32, 5, 6]);
-    let integer_product = dot(&stream, &integers, &integer_weights, 0);
+    let integers = gpu.upload(&[1_i32, 2, 3])?;
+    let integer_weights = gpu.upload(&[4_i32, 5, 6])?;
+    let integer_product = dot(&stream, &integers, &integer_weights, 0)?.into_value();
 
     let samples = sample(
-        &stream.with_launch(LaunchConfig {
+        &stream.launch(LaunchConfig {
             grid: [2, 1, 1],
             block: [32, 1, 1],
             shared_bytes: 0,
         }),
         1.0,
         0.5,
-    );
+    )?;
 
-    println!("Dot product: {:?}", product.read());
-    println!("Selected energy: {:?}", energy.read());
-    println!("Integer dot product: {:?}", integer_product.read());
-    println!("Samples: {:?}", samples.download());
-    println!("Square root: {:?}", checked_sqrt(&stream, -1.0).read());
+    println!("Dot product: {:?}", product.read()?);
+    println!("Selected energy: {:?}", energy.read()?);
+    println!("Integer dot product: {:?}", integer_product.read()?);
+    println!("Samples: {:?}", samples.download()?);
+    println!(
+        "Square root: {:?}",
+        checked_sqrt(&stream, -1.0)?.into_value().read()?
+    );
+    Ok(())
 }

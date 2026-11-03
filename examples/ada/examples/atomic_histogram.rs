@@ -23,35 +23,36 @@ fn copy_counts(input: &[AtomicU32], output: &[AtomicU32]) {
     }
 }
 
-fn main() {
-    let gpu = Gpu::new(0);
-    let first_stream = gpu.stream();
-    let second_stream = gpu.stream();
+fn main() -> gpurs::Result<()> {
+    let gpu = Gpu::new(0)?;
+    let first_stream = gpu.stream()?;
+    let second_stream = gpu.stream()?;
 
     let data = (0..4096).map(|value| value as u32).collect::<Vec<_>>();
 
-    let input = gpu.upload(&data);
-    let bins = gpu.zeros::<AtomicU32>(BIN_COUNT);
+    let input = gpu.upload(&data)?;
+    let bins = gpu.zeros::<AtomicU32>(BIN_COUNT)?;
 
-    histogram(&first_stream, &input, &bins);
-    histogram(&second_stream, &input, &bins);
+    histogram(&first_stream, &input, &bins)?;
+    histogram(&second_stream, &input, &bins)?;
 
-    let output = gpu.zeros::<AtomicU32>(BIN_COUNT);
+    let output = gpu.zeros::<AtomicU32>(BIN_COUNT)?;
     copy_counts(
-        &first_stream.with_launch(LaunchConfig {
+        &first_stream.launch(LaunchConfig {
             grid: [1, 1, 1],
             block: [32, 1, 1],
             shared_bytes: 0,
         }),
         &bins,
         &output,
-    );
+    )?;
     let counts = output
-        .download()
+        .download()?
         .into_iter()
         .map(|value| value.into_inner())
         .collect::<Vec<_>>();
 
     assert_eq!(counts, vec![512; BIN_COUNT]);
     println!("Histogram: {counts:?}");
+    Ok(())
 }

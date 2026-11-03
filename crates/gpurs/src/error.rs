@@ -1,9 +1,13 @@
-use std::{error, fmt};
+use std::{
+    error,
+    fmt::{self, Display, Formatter},
+};
 
 use gpurs_artifact::Failure;
 use gpurs_driver as driver;
 
-pub type GpuResult<T> = std::result::Result<T, Error>;
+/// A runtime operation result carrying a driver, launch, or kernel failure.
+pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Clone, Debug)]
 #[non_exhaustive]
@@ -20,8 +24,8 @@ pub enum Error {
     InvalidOperation(String),
 }
 
-impl fmt::Display for Error {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for Error {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Driver(error) => error.fmt(formatter),
             Self::Launch { kernel, source } => {

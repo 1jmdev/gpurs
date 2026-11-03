@@ -5,7 +5,10 @@ use std::marker::PhantomData;
 use gpurs_macros::primitive;
 
 use super::{instructions, intrinsics, sealed::Sealed};
-use crate::gpu::{self, BFloat16, E4M3, E5M2, Half, warp, warp::Shuffle};
+use crate::gpu::{
+    self, BFloat16, E4M3, E5M2, Half,
+    warp::{self, Shuffle},
+};
 
 /// An element type of tensor-core operands.
 pub trait Element: Copy + Default + 'static + Sealed {

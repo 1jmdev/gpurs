@@ -167,7 +167,7 @@ fn allowed(sess: Session<'_>, instance: Instance, span: Span) -> bool {
         || attributes::primitive(sess, instance.def.def_id()).is_some()
         || call_graph::leaf(sess, instance)
         || path.starts_with("gpurs::gpu::")
-        || path.starts_with("gpurs::address::")
+        || path.starts_with("gpurs::argument::address::")
         || [
             "core::ops::",
             "core::iter::",

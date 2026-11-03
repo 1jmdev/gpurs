@@ -71,7 +71,7 @@ pub(crate) fn root(
     };
     quote! {
         #[doc(hidden)]
-        pub fn #root(stream: &::gpurs::ConfiguredStream<'_>, #(#inputs),*) {
+        pub fn #root(stream: &::gpurs::Capture<'_>, #(#inputs),*) {
             let _ = #call;
         }
     }
@@ -126,11 +126,11 @@ pub(crate) fn launcher(
                         )
                     }
                     (element, true) => (
-                        quote!(&#lifetime mut impl ::gpurs::DeviceReferenceMut<#element>),
+                        quote!(&#lifetime mut impl ::gpurs::ArgumentMut<#element>),
                         quote!(__launch.reference_mut(#argument)?;),
                     ),
                     (element, false) => (
-                        quote!(&#lifetime impl ::gpurs::DeviceReference<#element>),
+                        quote!(&#lifetime impl ::gpurs::Argument<#element>),
                         quote!(__launch.reference(#argument)?;),
                     ),
                 }
@@ -142,19 +142,13 @@ pub(crate) fn launcher(
     }
     let (output, finish) = match &signature.output {
         ReturnType::Type(_, result) if !is_unit(result) => (
-            quote!(-> <__S as ::gpurs::Launch>::Output<#result>),
+            quote!(-> ::gpurs::Result<::gpurs::Buffer<#result>>),
             quote!(__launch.finish::<#result>()),
         ),
         _ => (
-            quote!(-> <__S as ::gpurs::Launch>::Unit),
+            quote!(-> ::gpurs::Result<()>),
             quote!(__launch.finish_unit()),
         ),
-    };
-    let resolve = match &signature.output {
-        ReturnType::Type(_, result) if !is_unit(result) => {
-            quote!(<__S as ::gpurs::Launch>::output(__result))
-        }
-        _ => quote!(<__S as ::gpurs::Launch>::unit(__result)),
     };
     let artifact = if env::var_os("GPURS_DEVICE_BUILD").is_none()
         && env::var_os("GPURS_LIBRARY_VIEW").is_none()
@@ -194,7 +188,7 @@ pub(crate) fn launcher(
                     #finish
                 }
             })();
-            #resolve
+            __result
         }
     }
 }
