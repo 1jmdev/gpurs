@@ -322,7 +322,9 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                 | RigidTy::Uint(_)
                 | RigidTy::Float(_)
                 | RigidTy::Bool
-                | RigidTy::Char => true,
+                | RigidTy::Char
+                | RigidTy::Ref(..)
+                | RigidTy::RawPtr(..) => true,
                 _ => false,
             }
         }
