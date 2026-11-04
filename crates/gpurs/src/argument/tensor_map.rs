@@ -5,7 +5,7 @@ use gpurs_driver as driver;
 use crate::{
     DeviceSlice, Error, Gpu, PinnedBuffer, Result, Stream, Transfer,
     buffer::Buffer,
-    gpu::tensor::{Element, TensorMap},
+    gpu::tensor::{Element, hopper::TensorMap},
     tracking::Allocation,
 };
 

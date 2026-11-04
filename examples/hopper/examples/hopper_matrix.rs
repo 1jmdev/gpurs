@@ -1,12 +1,15 @@
-// A 4096x4096x4096 f16 matrix product on sm_90a: TMA fills a four-stage pipeline of
-// 128x64 and 256x64 tiles, and two warpgroups multiply them with asynchronous `wgmma` into a
-// 128x256 f32 tile.
+// A 4096x4096x4096 f16 matrix product on sm_90a: a swizzled grid of 128x256 tiles, TMA
+// cursors filling a four-stage ring of 128x64 and 256x64 tiles, and two warpgroups that
+// multiply them with asynchronous `wgmma` into registers.
 
 use gpurs::{
     DeviceSlice, DeviceTensorMap, Gpu, LaunchConfig, gpu,
     gpu::{
         Block, Half,
-        tensor::{Hopper, Output, SharedTile, TensorMap, TensorPipeline, WarpgroupAccumulator},
+        tensor::{
+            Grid, OutputMatrix, SharedTile, Swizzle,
+            hopper::{Hopper, TensorMap, TensorRing, WarpgroupAccumulator},
+        },
     },
 };
 
@@ -25,46 +28,31 @@ type Stage = (
     SharedTile<Half, TILE_COLUMNS, DEPTH>,
 );
 
-#[gpu]
+#[gpu(threads = 256)]
 fn multiply(
     left: &TensorMap<Half, TILE_ROWS, DEPTH>,
     right_transposed: &TensorMap<Half, TILE_COLUMNS, DEPTH>,
     output: &mut [f32],
 ) {
     let block = Block::<THREADS>::new();
-    let mut output =
-        Output::<_, TILE_ROWS, TILE_COLUMNS, 16, TILE_COLUMNS>::new(&block, output, SIZE, SIZE);
-    let (row, column) = (output.row(), output.column());
-    let mut pipeline = TensorPipeline::<Stage, STAGES, Hopper>::new();
-    for depth in 0..STAGES - 1 {
-        pipeline.fill(&block, move |(left_tile, right_tile)| {
-            (
-                left_tile.load(&block, left, row, depth * DEPTH),
-                right_tile.load(&block, right_transposed, column, depth * DEPTH),
-            )
-        });
+    let tile = Grid::<Swizzle<8>>::tile::<TILE_ROWS, TILE_COLUMNS>([SIZE, SIZE]);
+    let mut left = left.cursor(&block, tile.row(), 0..SIZE);
+    let mut right = right_transposed.cursor(&block, tile.column(), 0..SIZE);
+    let mut ring = TensorRing::<Stage, STAGES, Hopper>::new(&block);
+    for _ in 0..STAGES - 1 {
+        ring.issue(|(a, b)| (left.copy(a), right.copy(b)));
     }
 
     let mut accumulator = WarpgroupAccumulator::default();
-    for depth in 0..SIZE / DEPTH {
-        let next = (depth + STAGES - 1) * DEPTH;
-        let (left_tile, right_tile) = if next < SIZE {
-            pipeline.advance(&block, move |(left_next, right_next)| {
-                (
-                    left_next.load(&block, left, row, next),
-                    right_next.load(&block, right_transposed, column, next),
-                )
-            })
-        } else {
-            pipeline.drain(&block)
-        };
-        accumulator.multiply_accumulate(&block, &left_tile, &right_tile);
+    for _ in 0..left.steps() {
+        let stage = ring.advance(|(a, b)| (left.copy(a), right.copy(b)));
+        accumulator.multiply_accumulate(&block, &stage);
     }
 
-    let fragments = accumulator.complete();
-    for column in 0..TILE_COLUMNS / 8 {
-        output.store(&fragments[column], 0, column);
-    }
+    let values = accumulator.complete();
+    OutputMatrix::row_major(output, SIZE, SIZE)
+        .tile(&tile)
+        .store(&tile.warp::<1, 32>(&block), &values);
 }
 
 fn main() -> gpurs::Result<()> {
@@ -78,7 +66,7 @@ fn main() -> gpurs::Result<()> {
     let right_map = DeviceTensorMap::new(&stream, &right_transposed, SIZE, SIZE)?;
     let mut output = gpu.zeros::<f32>(SIZE * SIZE)?;
     let configured = stream.launch(LaunchConfig {
-        grid: [SIZE / TILE_COLUMNS, SIZE / TILE_ROWS, 1],
+        grid: Grid::<Swizzle<8>>::dimensions::<TILE_ROWS, TILE_COLUMNS>([SIZE, SIZE], 1),
         block: [THREADS, 1, 1],
         shared_bytes: 0,
     });

@@ -54,6 +54,38 @@ impl Analysis<'_, '_> {
                 variance,
             ));
         }
+        if let (
+            "core::cmp::Ord::min" | "core::cmp::Ord::max" | "core::cmp::min" | "core::cmp::max",
+            [left, right],
+        ) = (path, arguments)
+            && let Some(kind @ (false, _)) = receiver.and_then(arithmetic::integer_kind)
+            && let (Some(first), Some(_)) = (&left.integer, &right.integer)
+        {
+            // Bounded by the first operand from the side the operation keeps, and varying no
+            // more than its operands.
+            let variance = left.variance.max(right.variance);
+            let maximum = Polynomial::constant(arithmetic::range(kind).1);
+            let (lower, upper) = if path.ends_with("min") {
+                (Polynomial::default(), first.clone())
+            } else {
+                (first.clone(), maximum)
+            };
+            return Some(Value::integer(
+                self.variable(
+                    Vec::new(),
+                    lower,
+                    Some(upper),
+                    left.requirement
+                        .iter()
+                        .chain(&right.requirement)
+                        .cloned()
+                        .collect(),
+                    variance,
+                    "an unsigned minimum or maximum",
+                ),
+                variance,
+            ));
+        }
         let range = receiver.is_some_and(|ty| self.is_range(ty));
         if range && path == "core::iter::traits::collect::IntoIterator::into_iter" {
             return Some(arguments[0].clone());

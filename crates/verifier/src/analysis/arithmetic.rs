@@ -227,6 +227,7 @@ impl Analysis<'_, '_> {
                     if (mask + 1) & mask == 0
                         && let Some(proof) =
                             self.within(&other, mask, true, state, Some(Requirement::new()))
+                        && proof.is_empty()
                     {
                         requirement.extend(proof);
                         return Some(other);

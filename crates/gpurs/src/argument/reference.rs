@@ -3,7 +3,7 @@ use crate::{
     DeviceDescriptor, DeviceIndexed, DeviceScatter, DeviceStrided, DeviceTensorMap, DeviceValue,
     ExternalAccess,
     buffer::{Buffer, Span},
-    gpu::tensor::TensorMap,
+    gpu::tensor::hopper::TensorMap,
 };
 
 /// A retained kernel argument whose allocation dependencies are tracked during submission.

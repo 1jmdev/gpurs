@@ -1,11 +1,17 @@
+//! Blackwell products accumulated in tensor memory.
+
 use std::mem::ManuallyDrop;
 
 use gpurs_macros::primitive;
 
-use super::{
-    Accumulator, Blackwell, Element, Output, OutputElement, TensorTile, instructions, intrinsics,
+use super::{instruction, intrinsics};
+use crate::gpu::{
+    self, Block,
+    tensor::{
+        Accumulator, Element, OutputElement, OutputTile, TensorTile, hopper::Consumer,
+        hopper::intrinsics as hopper_intrinsics, sealed::Sealed,
+    },
 };
-use crate::gpu::{self, Block};
 
 /// The descriptor version and 128-byte swizzle mode of a `tcgen05` matrix descriptor.
 const SWIZZLE: u64 = 1 << 46 | 2 << 61;
@@ -16,8 +22,28 @@ struct Slot {
     address: u32,
 }
 
+/// sm_100a `tcgen05.mma`, issued by one thread through a [`TensorMemoryAccumulator`].
+#[derive(Debug)]
+pub struct Blackwell;
+
+impl Sealed for Blackwell {}
+
+impl Consumer for Blackwell {
+    fn arrivals<const THREADS: usize>() -> u32 {
+        const { assert!(THREADS == 128, "Blackwell pipelines require 128 threads") };
+        1
+    }
+
+    #[inline]
+    unsafe fn release(barrier: u32) {
+        if gpu::thread_id().x == 0 {
+            intrinsics::tensor_commit(barrier);
+        }
+    }
+}
+
 /// A 128x`COLUMNS` f32 product in tensor memory, accumulated by sm_100a `tcgen05.mma` from
-/// [`TensorPipeline`](super::TensorPipeline) stages in blocks of 128 threads. `COLUMNS` is a
+/// [`TensorRing`](super::super::hopper::TensorRing) stages in blocks of 128 threads. `COLUMNS` is a
 /// power of two from 64 to 256. Storage is allocated by the first product and released after
 /// storing or when the accumulator leaves scope. Every thread of the block participates in cleanup.
 #[repr(C)]
@@ -49,8 +75,8 @@ impl<const COLUMNS: usize> TensorMemoryAccumulator<COLUMNS> {
     )]
     pub fn new() -> Self;
 
-    /// Adds `a * bᵀ` for the K-major stage tiles `a` and `b` of a
-    /// [`TensorPipeline`](super::TensorPipeline), whose next call releases them once the
+    /// Adds `a * bᵀ` for the K-major tiles `a` and `b` of a stage of a
+    /// [`TensorRing`](super::super::hopper::TensorRing), whose next call releases them once the
     /// products complete. Every thread of the block takes part, and the first issues the
     /// products.
     #[primitive(
@@ -64,9 +90,12 @@ impl<const COLUMNS: usize> TensorMemoryAccumulator<COLUMNS> {
     pub fn multiply_accumulate<T: Element, const THREADS: usize>(
         &mut self,
         block: &Block<THREADS>,
-        a: &TensorTile<'_, T, 128, 64, Blackwell>,
-        b: &TensorTile<'_, T, COLUMNS, 64, Blackwell>,
+        stage: &(
+            TensorTile<'_, T, 128, 64, Blackwell>,
+            TensorTile<'_, T, COLUMNS, 64, Blackwell>,
+        ),
     ) {
+        let (a, b) = stage;
         const {
             assert!(
                 THREADS == 128,
@@ -124,7 +153,7 @@ impl<const COLUMNS: usize> TensorMemoryAccumulator<COLUMNS> {
         if block.thread() == 0 {
             // SAFETY: storage is managed here; the caller guarantees the operand descriptors.
             unsafe {
-                instructions::tensor_multiply_accumulate_fp8(
+                instruction::tensor_multiply_accumulate_fp8(
                     self.address,
                     a,
                     b,
@@ -143,8 +172,8 @@ impl<const COLUMNS: usize> TensorMemoryAccumulator<COLUMNS> {
             intrinsics::tensor_memory_relinquish();
         }
         if block.thread() == 0 {
-            intrinsics::barrier_initialize(slot, 1);
-            intrinsics::barrier_fence_initialization();
+            hopper_intrinsics::barrier_initialize(slot, 1);
+            hopper_intrinsics::barrier_fence_initialization();
         }
         intrinsics::tensor_fence_before();
         gpu::sync_block();
@@ -159,7 +188,7 @@ impl<const COLUMNS: usize> TensorMemoryAccumulator<COLUMNS> {
         if block.thread() == 0 {
             intrinsics::tensor_commit(barrier);
         }
-        intrinsics::barrier_wait(barrier, 0);
+        hopper_intrinsics::barrier_wait(barrier, 0);
         intrinsics::tensor_fence_after();
     }
 
@@ -190,7 +219,7 @@ impl<const COLUMNS: usize> Drop for TensorMemoryAccumulator<COLUMNS> {
     }
 }
 
-impl<'a, T: OutputElement, const COLUMNS: usize> Output<'a, T, 128, COLUMNS, 32, COLUMNS> {
+impl<T: OutputElement, const COLUMNS: usize> OutputTile<'_, T, 128, COLUMNS> {
     /// Waits for the products of `accumulator`, rounds them into this block's tile, and frees
     /// its tensor memory. Warp `w` stores rows `32 * w..32 * w + 32`. Every thread of the block
     /// takes part.
@@ -214,25 +243,36 @@ impl<'a, T: OutputElement, const COLUMNS: usize> Output<'a, T, 128, COLUMNS, 32,
             )
         };
         let accumulator = ManuallyDrop::new(accumulator);
+        let lane = gpu::warp::lane_id();
+        let row = block.warp() % 4 * 32 + lane / 4;
         if !accumulator.allocated {
             for half in 0..2 {
                 for column in 0..COLUMNS / 8 {
-                    self.store(&Accumulator::default(), half, column);
+                    self.store_fragment(
+                        row + half * 16,
+                        column * 8 + lane % 4 * 2,
+                        &Accumulator::default(),
+                    );
                 }
             }
             return;
         }
         let participants = Block::<128>::new();
         accumulator.complete(&participants);
-        let lane = (block.warp() % 4 * 32) as u32;
+        let lane_base = (block.warp() % 4 * 32) as u32;
         for half in 0..2 {
             for chunk in 0..COLUMNS / 64 {
-                let address =
-                    accumulator.address + ((lane + half as u32 * 16) << 16) + chunk as u32 * 64;
+                let address = accumulator.address
+                    + ((lane_base + half as u32 * 16) << 16)
+                    + chunk as u32 * 64;
                 let fragments = intrinsics::tensor_load_fragments(address);
                 intrinsics::tensor_wait_load();
                 for (index, fragment) in fragments.iter().enumerate() {
-                    self.store(&T::round(fragment), half, chunk * 8 + index);
+                    self.store_fragment(
+                        row + half * 16,
+                        (chunk * 8 + index) * 8 + lane % 4 * 2,
+                        &T::round(fragment),
+                    );
                 }
             }
         }

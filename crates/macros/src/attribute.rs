@@ -1,23 +1,59 @@
 use std::{env, fs};
 
-use proc_macro2::TokenStream as Tokens;
+use proc_macro2::{Span, TokenStream as Tokens};
 use quote::{ToTokens, format_ident, quote};
 use syn::{
-    Attribute, Error, GenericParam, Ident, ImplItem, ItemFn, ItemImpl, Meta, ReceiverKind, Result,
-    Safety, Signature, spanned::Spanned, visit::Visit,
+    Attribute, Error, GenericParam, ImplItem, ItemFn, ItemImpl, LitInt, Meta, ReceiverKind,
+    Result, Safety, Signature, parse::Parser, spanned::Spanned, visit::Visit,
 };
 
 use crate::{launcher, references::References};
 
-pub(crate) fn fast_math(attribute: Tokens) -> Result<bool> {
-    if attribute.is_empty() {
-        return Ok(false);
+/// The options of `#[gpu(...)]`.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Options {
+    pub fast_math: bool,
+    /// The exact threads per block, emitted as `.reqntid`.
+    pub threads: Option<u32>,
+    /// The blocks each multiprocessor must hold, emitted as `.minnctapersm`.
+    pub minimum_blocks: Option<u32>,
+}
+
+impl Options {
+    /// Adds the options of `other`, set on a method inside an annotated implementation.
+    pub fn merge(self, other: Options) -> Options {
+        Options {
+            fast_math: self.fast_math || other.fast_math,
+            threads: other.threads.or(self.threads),
+            minimum_blocks: other.minimum_blocks.or(self.minimum_blocks),
+        }
     }
-    let option: Ident = syn::parse2(attribute)?;
-    match option == "fast_math" {
-        true => Ok(true),
-        false => Err(Error::new(option.span(), "expected `fast_math`")),
+}
+
+pub(crate) fn options(attribute: Tokens) -> Result<Options> {
+    let mut options = Options::default();
+    let parser = syn::meta::parser(|meta| {
+        if meta.path.is_ident("fast_math") {
+            options.fast_math = true;
+        } else if meta.path.is_ident("threads") {
+            options.threads = Some(meta.value()?.parse::<LitInt>()?.base10_parse()?);
+        } else if meta.path.is_ident("minimum_blocks") {
+            options.minimum_blocks = Some(meta.value()?.parse::<LitInt>()?.base10_parse()?);
+        } else {
+            return Err(meta.error(
+                "expected `fast_math`, `threads = N`, or `minimum_blocks = N`",
+            ));
+        }
+        Ok(())
+    });
+    Parser::parse2(parser, attribute)?;
+    if options.minimum_blocks.is_some() && options.threads.is_none() {
+        return Err(Error::new(
+            Span::call_site(),
+            "`minimum_blocks` requires `threads`",
+        ));
     }
+    Ok(options)
 }
 
 pub(crate) fn expand_function(function: ItemFn) -> Tokens {
@@ -89,7 +125,7 @@ pub(crate) fn expand_implementation(mut implementation: ItemImpl, host_only: boo
             if !attribute.path().is_ident("gpu") {
                 return true;
             }
-            match attribute_fast_math(attribute) {
+            match attribute_options(attribute) {
                 Ok(_) => {}
                 Err(failure) => error = Some(failure),
             }
@@ -178,13 +214,13 @@ pub(crate) fn expand_implementation(mut implementation: ItemImpl, host_only: boo
     }
 }
 
-fn attribute_fast_math(attribute: &Attribute) -> Result<bool> {
+pub(crate) fn attribute_options(attribute: &Attribute) -> Result<Options> {
     match &attribute.meta {
-        Meta::Path(_) => Ok(false),
-        Meta::List(list) => fast_math(list.tokens.clone()),
+        Meta::Path(_) => Ok(Options::default()),
+        Meta::List(list) => options(list.tokens.clone()),
         meta => Err(Error::new(
             meta.span(),
-            "expected #[gpu] or #[gpu(fast_math)]",
+            "expected #[gpu] or #[gpu(option, ...)]",
         )),
     }
 }

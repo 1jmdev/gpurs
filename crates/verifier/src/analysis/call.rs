@@ -7,6 +7,33 @@ use crate::{policy, symbolic::Polynomial};
 
 const DEPTH: usize = 48;
 
+/// Integer intrinsics whose result depends only on their operands, so it varies across
+/// threads no more than they do.
+const PURE: &[&str] = &[
+    "wrapping_add",
+    "wrapping_sub",
+    "wrapping_mul",
+    "saturating_add",
+    "saturating_sub",
+    "unchecked_add",
+    "unchecked_sub",
+    "unchecked_mul",
+    "unchecked_div",
+    "unchecked_rem",
+    "unchecked_shl",
+    "unchecked_shr",
+    "exact_div",
+    "ctpop",
+    "ctlz",
+    "cttz",
+    "bswap",
+    "bitreverse",
+    "rotate_left",
+    "rotate_right",
+    "three_way_compare",
+    "disjoint_bitor",
+];
+
 impl Analysis<'_, '_> {
     /// Applies the call ending the current block; `false` when it never returns.
     pub fn call(
@@ -68,9 +95,15 @@ impl Analysis<'_, '_> {
                 })
             })
             .or_else(|| {
-                (callee.intrinsic.as_deref() == Some("arith_offset")).then(|| {
-                    Value::varying(values.iter().map(|value| value.variance).max().unwrap_or(0))
-                })
+                callee
+                    .intrinsic
+                    .as_deref()
+                    .is_some_and(|name| name == "arith_offset" || PURE.contains(&name))
+                    .then(|| {
+                        Value::varying(
+                            values.iter().map(|value| value.variance).max().unwrap_or(0),
+                        )
+                    })
             });
         let model = match &callee.primitive {
             Some(primitive) => Some(self.primitive(primitive, instance, &values, state)),

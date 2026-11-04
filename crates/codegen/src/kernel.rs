@@ -5,7 +5,7 @@ use gpurs_artifact::{
     SharedMemory,
 };
 use gpurs_ir::{Access, Binary, Conversion, Flags, Type, Value as IRValue};
-use gpurs_rustc::Session;
+use gpurs_rustc::{CrateDef, Session, attributes};
 use gpurs_verifier::KernelPlan;
 
 use super::{function::FunctionBuilder, intrinsic::GEOMETRY, module::ModuleBuilder, place::Place};
@@ -163,6 +163,12 @@ impl<'sess> ModuleBuilder<'sess> {
         }
         function.ir.ret(None);
         function.ir.annotations.push(("kernel", 1));
+        if let Some((threads, blocks)) =
+            attributes::launch_bounds(function.module.sess, plan.instance.def.def_id())
+        {
+            function.ir.annotations.push(("reqntidx", threads));
+            function.ir.annotations.extend((blocks > 0).then_some(("minctasm", blocks)));
+        }
         let FunctionBuilder { module, ir, .. } = function;
         module.ir.define(ir);
     }

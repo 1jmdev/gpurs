@@ -13,6 +13,14 @@ pub fn is_fast_math(sess: Session<'_>, def: DefId) -> bool {
     sess.tool_attr(sess.typeck_root(def), "fast_math").is_some()
 }
 
+/// The exact threads per block and minimum resident blocks per multiprocessor (zero when
+/// unstated) declared by `#[gpu(threads = N, minimum_blocks = M)]`.
+pub fn launch_bounds(sess: Session<'_>, def: DefId) -> Option<(u32, u32)> {
+    let text = sess.tool_attr(sess.typeck_root(def), "launch_bounds")?;
+    let (threads, blocks) = text.split_once(' ')?;
+    Some((threads.parse().ok()?, blocks.parse().ok()?))
+}
+
 /// The `#[gpurs::primitive]` definition of `def`, or of the trait item it implements.
 pub fn primitive(sess: Session<'_>, def: DefId) -> Option<Rc<Primitive>> {
     if let Some(text) = sess.tool_attr(def, "unsafe_primitive") {

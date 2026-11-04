@@ -9,7 +9,7 @@ pub fn opaque_descriptor(sess: Session<'_>, ty: Ty) -> bool {
     matches!(
         adt_path(sess, ty).as_deref(),
         Some(
-            "gpurs::gpu::tensor::source::TensorMap"
+            "gpurs::gpu::tensor::hopper::tensor_map::TensorMap"
                 | "gpurs::gpu::strided::Strided"
                 | "gpurs::gpu::indexed::Indexed"
                 | "gpurs::gpu::scatter::Scatter"
@@ -28,7 +28,7 @@ fn adt_path(sess: Session<'_>, ty: Ty) -> Option<Rc<str>> {
 pub fn check(sess: Session<'_>, ty: Ty) -> Result<(), String> {
     match adt_path(sess, ty).as_deref() {
         Some(
-            "gpurs::gpu::tensor::source::TensorMap"
+            "gpurs::gpu::tensor::hopper::tensor_map::TensorMap"
             | "gpurs::gpu::strided::Strided"
             | "gpurs::gpu::indexed::Indexed"
             | "gpurs::gpu::scatter::Scatter",
@@ -39,10 +39,15 @@ pub fn check(sess: Session<'_>, ty: Ty) -> Result<(), String> {
                 sess.type_name(ty)
             ));
         }
-        Some("gpurs::gpu::tensor::tile::SharedTile") => {
+        Some("gpurs::gpu::tensor::shared::tile::SharedTile") => {
             return Err("block-shared tiles are created only by GPU pipelines".to_owned());
         }
-        Some("gpurs::gpu::thread::Block" | "gpurs::gpu::tensor::stage::Initialized") => {
+        Some(
+            "gpurs::gpu::thread::Block"
+            | "gpurs::gpu::tensor::shared::stage::Initialized"
+            | "gpurs::gpu::tensor::schedule::Tile"
+            | "gpurs::gpu::tensor::warp::region::WarpRegion",
+        ) => {
             return Err("GPU execution proofs cannot be transferred from the host".to_owned());
         }
         _ => {}

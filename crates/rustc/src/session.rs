@@ -185,7 +185,7 @@ impl<'tcx> Session<'tcx> {
                         .instance_mir(internal.def)
                         .stable_hash(context, &mut hasher);
                 }
-                for name in ["device", "fast_math", "primitive"] {
+                for name in ["device", "fast_math", "launch_bounds", "primitive"] {
                     self.tool_attr(instance.def.def_id(), name)
                         .stable_hash(context, &mut hasher);
                 }

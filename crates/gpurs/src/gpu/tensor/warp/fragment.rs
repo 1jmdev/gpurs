@@ -1,113 +1,14 @@
-//! Register operands of the warp-wide `mma.sync.m16n8k16` instruction.
+//! Register operands and accumulators of the warp-wide `mma.sync.m16n8k16` instruction.
 
 use std::marker::PhantomData;
 
 use gpurs_macros::primitive;
 
-use super::{instructions, intrinsics, sealed::Sealed};
+use super::super::element;
 use crate::gpu::{
-    self, BFloat16, E4M3, E5M2, Half,
+    self, BFloat16, Half,
     warp::{self, Shuffle},
 };
-
-/// An element type of tensor-core operands.
-pub trait Element: Copy + Default + 'static + Sealed {
-    const DEPTH: usize = 16;
-    /// The `CUtensorMapDataType` of the element.
-    #[doc(hidden)]
-    const TENSOR_MAP_TYPE: i32;
-    /// The operand format of `tcgen05.mma.kind::f16`.
-    #[doc(hidden)]
-    const FORMAT: u32;
-
-    #[doc(hidden)]
-    fn multiply_accumulate(a: [u32; 4], b: [u32; 2], c: [f32; 4]) -> [f32; 4];
-
-    #[doc(hidden)]
-    /// # Safety
-    /// The descriptors name live, aligned shared tiles whose reads finish before storage is reused.
-    unsafe fn warpgroup_multiply_accumulate(
-        a: u64,
-        b: u64,
-        d: [Accumulator<f32>; 32],
-    ) -> [Accumulator<f32>; 32];
-}
-
-impl Element for Half {
-    const TENSOR_MAP_TYPE: i32 = 6;
-    const FORMAT: u32 = 0;
-
-    #[inline]
-    fn multiply_accumulate(a: [u32; 4], b: [u32; 2], c: [f32; 4]) -> [f32; 4] {
-        gpu::intrinsics::multiply_accumulate_f16(a, b, c)
-    }
-
-    #[inline]
-    unsafe fn warpgroup_multiply_accumulate(
-        a: u64,
-        b: u64,
-        d: [Accumulator<f32>; 32],
-    ) -> [Accumulator<f32>; 32] {
-        intrinsics::warpgroup_multiply_accumulate_f16(a, b, d)
-    }
-}
-
-impl Element for BFloat16 {
-    const TENSOR_MAP_TYPE: i32 = 9;
-    const FORMAT: u32 = 1;
-
-    #[inline]
-    fn multiply_accumulate(a: [u32; 4], b: [u32; 2], c: [f32; 4]) -> [f32; 4] {
-        gpu::intrinsics::multiply_accumulate_bf16(a, b, c)
-    }
-
-    #[inline]
-    unsafe fn warpgroup_multiply_accumulate(
-        a: u64,
-        b: u64,
-        d: [Accumulator<f32>; 32],
-    ) -> [Accumulator<f32>; 32] {
-        intrinsics::warpgroup_multiply_accumulate_bf16(a, b, d)
-    }
-}
-
-impl Sealed for f32 {}
-impl Sealed for Half {}
-impl Sealed for BFloat16 {}
-impl Sealed for E4M3 {}
-impl Sealed for E5M2 {}
-
-macro_rules! fp8_element {
-    ($element:ty, $format:literal, $multiply:ident, $warpgroup:ident) => {
-        impl Element for $element {
-            const DEPTH: usize = 32;
-            const TENSOR_MAP_TYPE: i32 = 0;
-            const FORMAT: u32 = $format;
-
-            #[inline]
-            fn multiply_accumulate(a: [u32; 4], b: [u32; 2], c: [f32; 4]) -> [f32; 4] {
-                instructions::$multiply(
-                    FragmentA::new(a),
-                    FragmentB::new(b),
-                    Accumulator { values: c },
-                )
-                .values
-            }
-
-            #[inline]
-            unsafe fn warpgroup_multiply_accumulate(
-                a: u64,
-                b: u64,
-                d: [Accumulator<f32>; 32],
-            ) -> [Accumulator<f32>; 32] {
-                unsafe { instructions::$warpgroup(a, b, d) }
-            }
-        }
-    };
-}
-
-fp8_element!(E4M3, 0, multiply_accumulate_e4m3_e4m3, warpgroup_e4m3_e4m3);
-fp8_element!(E5M2, 1, multiply_accumulate_e5m2_e5m2, warpgroup_e5m2_e5m2);
 
 /// A warp's 16x16 `A` operand, as four registers of element pairs per lane.
 #[derive(Clone, Copy, Debug, Default)]
@@ -131,6 +32,10 @@ impl<T> FragmentA<T> {
             element: PhantomData,
         }
     }
+
+    pub fn registers(&self) -> [u32; 4] {
+        self.registers
+    }
 }
 
 impl<T> FragmentB<T> {
@@ -140,6 +45,10 @@ impl<T> FragmentB<T> {
             registers,
             element: PhantomData,
         }
+    }
+
+    pub fn registers(&self) -> [u32; 2] {
+        self.registers
     }
 }
 
@@ -152,7 +61,7 @@ pub struct Accumulator<T> {
 }
 
 impl<T> Accumulator<T> {
-    /// Tile-relative coordinates of `values[index]`, with `index` taken modulo four.
+    /// Fragment-relative coordinates of `values[index]`, with `index` taken modulo four.
     pub fn coordinates(index: usize) -> (usize, usize) {
         let lane = warp::lane_id();
         (lane / 4 + index % 4 / 2 * 8, lane % 4 * 2 + index % 2)
@@ -171,15 +80,22 @@ impl<T: Shuffle> Accumulator<T> {
     )]
     pub fn reduce_rows<F: Fn(T, T) -> T>(&self, operation: F) -> [T; 2] {
         let [a, b, c, d] = self.values;
-        let upper = operation(a, b);
-        let lower = operation(c, d);
-        let upper = operation(upper, warp::shuffle_xor(upper, 1));
-        let lower = operation(lower, warp::shuffle_xor(lower, 1));
-        [
-            operation(upper, warp::shuffle_xor(upper, 2)),
-            operation(lower, warp::shuffle_xor(lower, 2)),
-        ]
+        reduce_quad([operation(a, b), operation(c, d)], operation)
     }
+}
+
+/// Reduces each value across the four lanes holding one row of a fragment.
+#[inline]
+pub(in crate::gpu::tensor) fn reduce_quad<T: Shuffle, F: Fn(T, T) -> T>(
+    [upper, lower]: [T; 2],
+    operation: F,
+) -> [T; 2] {
+    let upper = operation(upper, warp::shuffle_xor(upper, 1));
+    let lower = operation(lower, warp::shuffle_xor(lower, 1));
+    [
+        operation(upper, warp::shuffle_xor(upper, 2)),
+        operation(lower, warp::shuffle_xor(lower, 2)),
+    ]
 }
 
 macro_rules! operand_conversion {
@@ -243,16 +159,10 @@ macro_rules! operand_conversion {
 operand_conversion!(Half, BFloat16);
 
 impl Accumulator<f32> {
-    /// Adds `a * b` with f32 accumulation. Every lane of the warp takes part.
-    #[inline]
-    pub fn multiply_accumulate<T: Element>(&mut self, a: &FragmentA<T>, b: &FragmentB<T>) {
-        self.values = T::multiply_accumulate(a.registers, b.registers, self.values);
-    }
-
     /// The values rounded to nearest f16.
     pub fn to_half(&self) -> Accumulator<Half> {
         let [a, b, c, d] = self.values;
-        let [a, b, c, d] = unpack([
+        let [a, b, c, d] = element::unpack([
             gpu::intrinsics::pack_half(a, b),
             gpu::intrinsics::pack_half(c, d),
         ]);
@@ -264,7 +174,7 @@ impl Accumulator<f32> {
     /// The values rounded to nearest bf16.
     pub fn to_bfloat16(&self) -> Accumulator<BFloat16> {
         let [a, b, c, d] = self.values;
-        let [a, b, c, d] = unpack([
+        let [a, b, c, d] = element::unpack([
             gpu::intrinsics::pack_bfloat16(a, b),
             gpu::intrinsics::pack_bfloat16(c, d),
         ]);
@@ -272,33 +182,4 @@ impl Accumulator<f32> {
             values: [BFloat16(a), BFloat16(b), BFloat16(c), BFloat16(d)],
         }
     }
-}
-
-impl Accumulator<Half> {
-    /// Adds `a * b` with f16 accumulation, which GeForce GPUs run at twice the f32 rate. Every
-    /// lane of the warp takes part.
-    #[inline]
-    pub fn multiply_accumulate(&mut self, a: &FragmentA<Half>, b: &FragmentB<Half>) {
-        let [w, x, y, z] = self.values;
-        let packed = [
-            w.0 as u32 | (x.0 as u32) << 16,
-            y.0 as u32 | (z.0 as u32) << 16,
-        ];
-        let [w, x, y, z] = unpack(gpu::intrinsics::multiply_accumulate_f16_f16(
-            a.registers,
-            b.registers,
-            packed,
-        ));
-        self.values = [Half(w), Half(x), Half(y), Half(z)];
-    }
-}
-
-#[inline]
-fn unpack([low, high]: [u32; 2]) -> [u16; 4] {
-    [
-        low as u16,
-        (low >> 16) as u16,
-        high as u16,
-        (high >> 16) as u16,
-    ]
 }

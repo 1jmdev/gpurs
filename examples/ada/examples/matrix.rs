@@ -1,8 +1,11 @@
+// A 4096x4096x4096 f16 matrix product on sm_80 and later: a swizzled grid of 128x128 tiles,
+// a two-stage `cp.async` ring of 32-deep slices, and four warps of 64x64 regions.
+
 use gpurs::{
-    Buffer, DeviceSlice, Gpu, LaunchConfig, gpu,
+    DeviceSlice, Gpu, LaunchConfig, gpu,
     gpu::{
         Block, Half,
-        tensor::{Accumulator, FragmentA, FragmentB, Matrix, Output, Pipeline, SharedTile},
+        tensor::{AccumulatorTile, GlobalMatrix, Grid, GroupRing, OutputMatrix, SharedTile, Swizzle},
     },
 };
 
@@ -11,68 +14,44 @@ mod matrix_benchmark;
 
 const THREADS: usize = 128;
 const SIZE: usize = 4096;
-const PANEL_COLUMNS: usize = 1024;
 const TILE_ROWS: usize = 128;
 const TILE_COLUMNS: usize = 128;
 const DEPTH: usize = 32;
-const FRAGMENT_ROWS: usize = 4;
-const FRAGMENT_COLUMNS: usize = 8;
+const STAGES: usize = 2;
 
 type Stage = (
     SharedTile<Half, TILE_ROWS, DEPTH>,
     SharedTile<Half, TILE_COLUMNS, DEPTH>,
 );
 
-#[gpu]
+#[gpu(threads = 128, minimum_blocks = 2)]
 fn multiply(left: &[Half], right_transposed: &[Half], output: &mut [f32]) {
     let block = Block::<THREADS>::new();
-    let left = Matrix::new(left, SIZE, SIZE);
-    let right = Matrix::new(right_transposed, PANEL_COLUMNS, SIZE);
-    let mut output =
-        Output::<_, TILE_ROWS, TILE_COLUMNS, 64, 64>::new(&block, output, SIZE, PANEL_COLUMNS);
-    let (row, column) = (output.row(), output.column());
-    let mut pipeline = Pipeline::<Stage, 2>::new();
-    pipeline.fill(move |(left_tile, right_tile)| {
-        (
-            left_tile.load(&block, &left, row, 0),
-            right_tile.load(&block, &right, column, 0),
-        )
-    });
+    let tile = Grid::<Swizzle<8>>::tile::<TILE_ROWS, TILE_COLUMNS>([SIZE, SIZE]);
+    let warp = tile.warp::<4, 8>(&block);
+    let mut left =
+        GlobalMatrix::depth_major(left, SIZE, SIZE).cursor(&block, tile.row(), 0..SIZE);
+    let mut right = GlobalMatrix::depth_major(right_transposed, SIZE, SIZE).cursor(
+        &block,
+        tile.column(),
+        0..SIZE,
+    );
+    let mut ring = GroupRing::<Stage, STAGES>::new();
+    for _ in 0..STAGES - 1 {
+        ring.issue(|(a, b)| (left.copy(a), right.copy(b)));
+    }
 
-    let mut accumulators = [[Accumulator::<f32>::default(); FRAGMENT_COLUMNS]; FRAGMENT_ROWS];
-    for depth in 0..SIZE / DEPTH {
-        let (left_tile, right_tile) = pipeline.advance(move |(left_next, right_next)| {
-            (
-                left_next.load(&block, &left, row, (depth + 1) * DEPTH),
-                right_next.load(&block, &right, column, (depth + 1) * DEPTH),
-            )
-        });
-
+    let mut accumulators = AccumulatorTile::<f32, 4, 8>::new();
+    for _ in 0..left.steps() {
+        let stage = ring.advance(|(a, b)| (left.copy(a), right.copy(b)));
         for slice in 0..DEPTH / 16 {
-            let mut left = [FragmentA::default(); FRAGMENT_ROWS];
-            for row in 0..FRAGMENT_ROWS {
-                left[row] = left_tile.load_a(output.warp_row() + row * 16, slice * 16);
-            }
-            let mut right = [FragmentB::default(); FRAGMENT_COLUMNS];
-            for column in 0..FRAGMENT_COLUMNS / 2 {
-                let [first, second] =
-                    right_tile.load_b_transposed(output.warp_column() + column * 16, slice * 16);
-                right[column * 2] = first;
-                right[column * 2 + 1] = second;
-            }
-            for row in 0..FRAGMENT_ROWS {
-                for column in 0..FRAGMENT_COLUMNS {
-                    accumulators[row][column].multiply_accumulate(&left[row], &right[column]);
-                }
-            }
+            accumulators.multiply_accumulate(&warp.operands(stage, slice));
         }
     }
 
-    for row in 0..FRAGMENT_ROWS {
-        for column in 0..FRAGMENT_COLUMNS {
-            output.store(&accumulators[row][column], row, column);
-        }
-    }
+    OutputMatrix::row_major(output, SIZE, SIZE)
+        .tile(&tile)
+        .store(&warp, &accumulators);
 }
 
 fn main() -> gpurs::Result<()> {
@@ -84,26 +63,15 @@ fn main() -> gpurs::Result<()> {
     let right_transposed = gpu.upload(&right_host)?;
     let mut output = gpu.zeros::<f32>(SIZE * SIZE)?;
     let configured = stream.launch(LaunchConfig {
-        grid: [PANEL_COLUMNS / TILE_COLUMNS, SIZE / TILE_ROWS, 1],
+        grid: Grid::<Swizzle<8>>::dimensions::<TILE_ROWS, TILE_COLUMNS>([SIZE, SIZE], 1),
         block: [THREADS, 1, 1],
         shared_bytes: 0,
     });
-    let run = |output: &mut Buffer<f32>| -> gpurs::Result<()> {
-        for panel in 0..SIZE / PANEL_COLUMNS {
-            let start = panel * SIZE * PANEL_COLUMNS;
-            let end = start + SIZE * PANEL_COLUMNS;
-            multiply(
-                &configured,
-                &left,
-                &right_transposed.view(start..end),
-                &mut output.view_mut(start..end),
-            )?;
-        }
-        Ok(())
-    };
-    let seconds = matrix_benchmark::measure(&stream, || run(&mut output))?;
+    let seconds = matrix_benchmark::measure(&stream, || {
+        multiply(&configured, &left, &right_transposed, &mut output)
+    })?;
     matrix_benchmark::report(
-        [SIZE, PANEL_COLUMNS],
+        [SIZE, SIZE],
         seconds,
         &left_host,
         &right_host,

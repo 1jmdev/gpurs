@@ -148,6 +148,11 @@ impl Analysis<'_, '_> {
                     )
                 })
                 .collect()
+        } else if left.variant != right.variant && left.fields.is_empty() {
+            // Fields are read only under the variant holding them, such as `Some` met by `None`.
+            right.fields.clone()
+        } else if left.variant != right.variant && right.fields.is_empty() {
+            left.fields.clone()
         } else {
             Vec::new()
         };

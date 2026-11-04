@@ -25,7 +25,7 @@ pub fn bit_pattern(item: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn gpu(attribute: TokenStream, item: TokenStream) -> TokenStream {
     let host_only = attribute.to_string() == "__gpurs_host";
-    match attribute::fast_math(if host_only {
+    match attribute::options(if host_only {
         proc_macro2::TokenStream::new()
     } else {
         attribute.into()
@@ -54,8 +54,8 @@ pub fn compilation(item: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn device(attribute: TokenStream, item: TokenStream) -> TokenStream {
     let item = parse_macro_input!(item as Item);
-    attribute::fast_math(attribute.into())
-        .and_then(|fast_math| compilation::device_item(item, fast_math))
+    attribute::options(attribute.into())
+        .and_then(|options| compilation::device_item(item, options))
         .unwrap_or_else(Error::into_compile_error)
         .into()
 }

@@ -130,7 +130,14 @@ impl Analysis<'_, '_> {
                     .iter()
                     .map(|operand| self.operand(operand, state))
                     .collect();
-                let variance = fields.iter().map(|field| field.variance).max().unwrap_or(0);
+                // Fields of structs, tuples, and enum variants are only read at known
+                // positions, so each keeps its own variance, and a constructed variant is known;
+                // arrays, read at unknown indices too, vary as their most varying element.
+                let variance = match kind {
+                    AggregateKind::Tuple => 0,
+                    AggregateKind::Adt(definition, ..) if definition.kind() != AdtKind::Union => 0,
+                    _ => fields.iter().map(|field| field.variance).max().unwrap_or(0),
+                };
                 match kind {
                     AggregateKind::RawPtr(..) => Value::from(ValueData {
                         pointer: fields[0].pointer.clone(),

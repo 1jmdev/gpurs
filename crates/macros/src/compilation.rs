@@ -2,7 +2,7 @@ use proc_macro2::{Delimiter, Group, TokenStream as Tokens, TokenTree};
 use quote::quote;
 use syn::{File, ImplItem, Item, Meta, Result, Visibility, parse_quote, visit_mut::VisitMut};
 
-use crate::attribute;
+use crate::attribute::{self, Options};
 
 struct DevicePaths;
 
@@ -139,10 +139,7 @@ pub(crate) fn expand(mut file: File) -> Result<Tokens> {
             continue;
         };
         let annotation = attributes.remove(position);
-        let fast_math = match &annotation.meta {
-            Meta::List(list) => attribute::fast_math(list.tokens.clone())?,
-            _ => false,
-        };
+        let options = attribute::attribute_options(&annotation)?;
         let mut launcher = item.clone();
         let path = annotation.path();
         let annotation = parse_quote!(#[#path(__gpurs_host)]);
@@ -152,7 +149,7 @@ pub(crate) fn expand(mut file: File) -> Result<Tokens> {
             _ => unreachable!(),
         }
         host.push(quote!(#launcher));
-        device.push(device_item(item, fast_math)?);
+        device.push(device_item(item, options)?);
     }
     let attributes = std::mem::take(&mut file.attrs);
     Ok(quote! {
@@ -205,7 +202,7 @@ fn device_macro(tokens: Tokens, device: bool) -> (Tokens, bool) {
     (output, found)
 }
 
-pub(crate) fn device_item(item: Item, fast_math: bool) -> Result<Tokens> {
+pub(crate) fn device_item(item: Item, options: Options) -> Result<Tokens> {
     match item {
         Item::Fn(mut function) => {
             let tail = function.sig.ident.to_string();
@@ -213,10 +210,7 @@ pub(crate) fn device_item(item: Item, fast_math: bool) -> Result<Tokens> {
                 .attrs
                 .push(parse_quote!(#[gpurs_tool::device = #tail]));
             function.attrs.push(marker("device", &tail));
-            if fast_math {
-                function.attrs.push(parse_quote!(#[gpurs_tool::fast_math]));
-                function.attrs.push(marker("fast_math", ""));
-            }
+            annotate(&mut function.attrs, options);
             function.vis = parse_quote!(pub(crate));
             DevicePaths.visit_item_fn_mut(&mut function);
             Ok(quote!(#function))
@@ -229,12 +223,11 @@ pub(crate) fn device_item(item: Item, fast_math: bool) -> Result<Tokens> {
             };
             for item in &mut implementation.items {
                 let ImplItem::Fn(method) = item else { continue };
-                let mut method_fast_math = fast_math;
+                let mut method_options = options;
                 for annotation in &method.attrs {
-                    if annotation.path().is_ident("gpu")
-                        && let Meta::List(list) = &annotation.meta
-                    {
-                        method_fast_math |= attribute::fast_math(list.tokens.clone())?;
+                    if annotation.path().is_ident("gpu") {
+                        method_options =
+                            method_options.merge(attribute::attribute_options(annotation)?);
                     }
                 }
                 method
@@ -245,10 +238,7 @@ pub(crate) fn device_item(item: Item, fast_math: bool) -> Result<Tokens> {
                     .attrs
                     .push(parse_quote!(#[gpurs_tool::device = #tail]));
                 method.attrs.push(marker("device", &tail));
-                if method_fast_math {
-                    method.attrs.push(parse_quote!(#[gpurs_tool::fast_math]));
-                    method.attrs.push(marker("fast_math", ""));
-                }
+                annotate(&mut method.attrs, method_options);
                 if implementation.trait_.is_none() && matches!(method.vis, Visibility::Inherited) {
                     method.vis = parse_quote!(pub(super));
                 }
@@ -261,6 +251,19 @@ pub(crate) fn device_item(item: Item, fast_math: bool) -> Result<Tokens> {
 }
 
 /// The documentation form of a tool attribute, which dependency metadata always retains.
+/// Records the options the compiler reads back from a device function.
+fn annotate(attributes: &mut Vec<syn::Attribute>, options: Options) {
+    if options.fast_math {
+        attributes.push(parse_quote!(#[gpurs_tool::fast_math]));
+        attributes.push(marker("fast_math", ""));
+    }
+    if let Some(threads) = options.threads {
+        let bounds = format!("{threads} {}", options.minimum_blocks.unwrap_or(0));
+        attributes.push(parse_quote!(#[gpurs_tool::launch_bounds = #bounds]));
+        attributes.push(marker("launch_bounds", &bounds));
+    }
+}
+
 fn marker(name: &str, value: &str) -> syn::Attribute {
     let text = format!("<!-- gpurs::{name}={value} -->");
     parse_quote!(#[doc = #text])

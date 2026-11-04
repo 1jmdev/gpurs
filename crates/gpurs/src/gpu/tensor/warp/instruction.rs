@@ -1,5 +1,12 @@
-//! Register-level warp MMA for explicit TF32, packed INT8 and FP8. All lanes of a complete
-//! warp execute the same instruction in convergence. TF32 uses m16n8k8; INT8/FP8 use m16n8k32.
+//! Raw warp-level tensor-core instructions: `mma.sync` and `ldmatrix`. All lanes of a complete
+//! warp execute each instruction in convergence.
+//!
+//! F16 and BF16 products use m16n8k16 with the [`Accumulator`] layout, and `ldmatrix` loads one,
+//! two, or four 8x8 matrices of 16-bit elements whose rows lanes `8 * i..8 * i + 8` address for
+//! matrix `i`; lane `l` receives row `l / 4`, elements `2 * (l % 4)` and `2 * (l % 4) + 1` of each
+//! matrix, transposed with `.trans`. Lanes beyond the matrices loaded supply no address.
+//!
+//! Explicit TF32, packed INT8 and FP8 products use m16n8k8 and m16n8k32.
 //! A is row-major, B column-major. For lane l, g=l/4 and t=l%4. TF32 A registers correspond
 //! to (g,t), (g+8,t), (g,t+4), (g+8,t+4); B to (t,g), (t+4,g).
 //! For INT8/FP8, each register holds four bytes in low-to-high order. A registers start at
@@ -12,7 +19,7 @@
 use gpurs_macros::primitive;
 
 use super::{Accumulator, FragmentA, FragmentB};
-use crate::gpu::{E4M3, E5M2, Tf32};
+use crate::gpu::{BFloat16, E4M3, E5M2, Half, Tf32};
 
 macro_rules! multiply_accumulate {
     ($name:ident, $architecture:literal, $left:ty, $right:ty, $result:ty,
@@ -30,6 +37,71 @@ macro_rules! multiply_accumulate {
             c: Accumulator<$result>,
         ) -> Accumulator<$result>;
     };
+}
+
+multiply_accumulate!(
+    multiply_accumulate_f16,
+    80,
+    Half,
+    Half,
+    f32,
+    "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {$0, $1, $2, $3}, {$4, $5, $6, $7}, {$8, \
+     $9}, {$10, $11, $12, $13};",
+    "=f,=f,=f,=f,r,r,r,r,r,r,f,f,f,f"
+);
+
+multiply_accumulate!(
+    multiply_accumulate_bf16,
+    80,
+    BFloat16,
+    BFloat16,
+    f32,
+    "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {$0, $1, $2, $3}, {$4, $5, $6, $7}, {$8, \
+     $9}, {$10, $11, $12, $13};",
+    "=f,=f,=f,=f,r,r,r,r,r,r,f,f,f,f"
+);
+
+/// An f16 product with f16 accumulation; `c` and the result hold the accumulator's values as
+/// packed pairs.
+#[primitive(
+    lowering = Assembly {
+        text: "mma.sync.aligned.m16n8k16.row.col.f16.f16.f16.f16 {$0, $1}, {$2, $3, $4, $5}, {$6, \
+               $7}, {$8, $9};",
+        constraints: "=r,=r,r,r,r,r,r,r,r,r",
+    },
+    architecture = 80,
+    convergence = Warp,
+    memory = None,
+    proof = Varying
+)]
+pub fn multiply_accumulate_f16_f16(a: FragmentA<Half>, b: FragmentB<Half>, c: [u32; 2]) -> [u32; 2];
+
+macro_rules! load_matrices {
+    ($($name:ident $result:ty, $text:literal, $constraints:literal;)*) => {
+        $(
+            #[primitive(
+                lowering = Assembly { text: $text, constraints: $constraints },
+                architecture = 75,
+                convergence = Warp,
+                memory = None,
+                proof = Varying
+            )]
+            pub fn $name(address: u32) -> $result;
+        )*
+    };
+}
+
+load_matrices! {
+    load_matrices_1 u32, "ldmatrix.sync.aligned.m8n8.x1.shared.b16 {$0}, [$1];", "=r,r";
+    load_matrices_2 [u32; 2], "ldmatrix.sync.aligned.m8n8.x2.shared.b16 {$0, $1}, [$2];", "=r,=r,r";
+    load_matrices_4 [u32; 4],
+        "ldmatrix.sync.aligned.m8n8.x4.shared.b16 {$0, $1, $2, $3}, [$4];", "=r,=r,=r,=r,r";
+    load_matrices_transposed_1 u32,
+        "ldmatrix.sync.aligned.m8n8.x1.trans.shared.b16 {$0}, [$1];", "=r,r";
+    load_matrices_transposed_2 [u32; 2],
+        "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16 {$0, $1}, [$2];", "=r,=r,r";
+    load_matrices_transposed_4 [u32; 4],
+        "ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {$0, $1, $2, $3}, [$4];", "=r,=r,=r,=r,r";
 }
 
 multiply_accumulate!(
@@ -173,64 +245,4 @@ multiply_accumulate!(
     "mma.sync.aligned.m16n8k32.row.col.f32.e5m2.e5m2.f32 {$0, $1, $2, $3}, {$4, $5, $6, $7}, {$8, \
      $9}, {$10, $11, $12, $13};",
     "=f,=f,=f,=f,r,r,r,r,r,r,f,f,f,f"
-);
-
-macro_rules! warpgroup {
-    ($name:ident, $format:literal) => {
-        /// Synchronous m64n256k32 FP8 warpgroup MMA, f32 accumulation.
-        /// # Safety
-        /// Every thread in a complete 128-thread warpgroup participates. Descriptors name
-        /// live K-major shared `A[64,32]`/`B[256,32]` tiles using the PTX matrix descriptor layout
-        /// and its alignment/swizzle constraints. Publish writes with the async-proxy fence
-        /// and synchronize producers before entry. Registers follow PTX m64n256 accumulator
-        /// layout, represented as 32 consecutive four-register fragments. This waits for all
-        /// this warpgroup's previously committed WGMMA operations too.
-        #[primitive(
-            lowering = Assembly {
-                text: concat!("{ .reg .pred p; setp.ne.b32 p, 1, 0; wgmma.fence.sync.aligned; wgmma.mma_async.sync.aligned.m64n256k32.f32.", $format, " {$0, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83, $84, $85, $86, $87, $88, $89, $90, $91, $92, $93, $94, $95, $96, $97, $98, $99, $100, $101, $102, $103, $104, $105, $106, $107, $108, $109, $110, $111, $112, $113, $114, $115, $116, $117, $118, $119, $120, $121, $122, $123, $124, $125, $126, $127}, $128, $129, p, 1, 1; wgmma.commit_group.sync.aligned; wgmma.wait_group.sync.aligned 0; }"),
-                constraints: "=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,=f,l,l,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,123,124,125,126,127",
-            },
-            architecture = 90,
-            compatibility = Architecture,
-            convergence = Block,
-            memory = Encapsulated,
-            proof = Varying
-        )]
-        pub unsafe fn $name(
-            a: u64,
-            b: u64,
-            c: [Accumulator<f32>; 32],
-        ) -> [Accumulator<f32>; 32];
-    };
-}
-
-warpgroup!(warpgroup_e4m3_e4m3, "e4m3.e4m3");
-warpgroup!(warpgroup_e4m3_e5m2, "e4m3.e5m2");
-warpgroup!(warpgroup_e5m2_e4m3, "e5m2.e4m3");
-warpgroup!(warpgroup_e5m2_e5m2, "e5m2.e5m2");
-
-/// Issues a Blackwell FP8 MMA using the PTX kind::f8f6f4 instruction descriptor.
-/// # Safety
-/// One elected thread issues this instruction for its CTA. Tensor memory must be allocated,
-/// and A/B must be live shared matrix descriptors satisfying the instruction descriptor's
-/// tile shape, formats, layout and scale fields. Use tcgen05 commit/mbarrier completion and
-/// the tensor-memory fences before consuming, reusing or freeing any operands or results.
-/// `accumulate` is 0 or 1. This operation does not wait. Requires sm_100a, not consumer Ada.
-#[primitive(
-    lowering = Assembly {
-        text: "{ .reg .pred p; setp.ne.b32 p, $4, 0; tcgen05.mma.cta_group::1.kind::f8f6f4 [$0], $1, $2, $3, p; }",
-        constraints: "r,l,l,r,r,~{memory}",
-    },
-    architecture = 100,
-    compatibility = Architecture,
-    convergence = None,
-    memory = Encapsulated,
-    proof = Varying
-)]
-pub unsafe fn tensor_multiply_accumulate_fp8(
-    destination: u32,
-    a: u64,
-    b: u64,
-    instruction: u32,
-    accumulate: u32,
 );
