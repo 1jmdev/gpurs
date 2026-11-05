@@ -1,6 +1,6 @@
 use gpurs_ir::{Access, Binary, Conversion, Flags, Transfer, Type, Value as IRValue};
 use gpurs_rustc::{
-    AdtKind, FieldsShape, FloatTy, MachineSize, ProjectionElem, RigidTy, Scalar, Ty, TyKind,
+    AdtKind, FieldsShape, MachineSize, ProjectionElem, RigidTy, Scalar, Ty, TyKind,
     ValueRepr, VariantIdx, session,
 };
 
@@ -8,6 +8,10 @@ use super::{
     function::FunctionBuilder,
     layout::{self, Shape},
 };
+
+/// The most scalar leaves of an aggregate copied leaf by leaf: enough for the operand
+/// fragments and accumulator tiles of a warp, which a byte copy would leave in local memory.
+const LEAVES: usize = 256;
 
 /// A value in registers or, for aggregates, behind a pointer to read-only memory.
 #[derive(Clone, Debug)]
@@ -278,27 +282,13 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                     self.store_scalar(to, value, scalar, to_align);
                 }
             }
-            (Value::Memory(source, align), _) => {
-                let mut shape = operand.shape.clone();
-                while let RigidTy::Adt(definition, _) = session::rigid(shape.ty)
-                    && definition.kind() == AdtKind::Struct
-                    && shape.count() == 1
-                    && shape.offset(0).bytes() == 0
-                    && shape.field(self.sess, 0).size() == shape.size()
-                {
-                    shape = shape.field(self.sess, 0);
-                }
-                let typed = matches!(session::rigid(shape.ty), RigidTy::Array(element, _)
-                    if matches!(session::rigid(element), RigidTy::Float(FloatTy::F32 | FloatTy::F64) | RigidTy::Int(_) | RigidTy::Uint(_)));
-                self.copy(
-                    place.pointer.clone(),
-                    source.clone(),
-                    operand.shape.size(),
-                    place.align,
-                    *align,
-                    typed,
-                );
-            }
+            (Value::Memory(source, align), _) => self.copy(
+                place.pointer.clone(),
+                source.clone(),
+                operand.shape.size(),
+                place.align,
+                *align,
+            ),
             (value, repr) => panic!(
                 "cannot store {value:?} as {repr:?} into {:?} from {:?}",
                 place.shape.ty.kind(),
@@ -307,8 +297,9 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
         }
     }
 
-    /// The scalar leaves of a small aggregate of structs, tuples, and arrays, which is copied
-    /// leaf by leaf with its own types, so that LLVM splits it into registers.
+    /// The scalar leaves of an aggregate of structs, tuples, and arrays up to [`LEAVES`]
+    /// scalars, which is copied leaf by leaf with its own types, so that LLVM splits it into
+    /// registers.
     fn leaves(&self, shape: &Shape) -> Option<Vec<(u64, Scalar)>> {
         fn plain(builder: &FunctionBuilder<'_, '_>, shape: &Shape) -> bool {
             match session::rigid(shape.ty) {
@@ -332,7 +323,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
             return None;
         }
         let leaves = self.scalars(shape);
-        (leaves.len() <= 16).then_some(leaves)
+        (leaves.len() <= LEAVES).then_some(leaves)
     }
 
     pub fn load_scalar(&mut self, pointer: IRValue, scalar: Scalar, align: u64) -> IRValue {
@@ -359,19 +350,21 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
         size: MachineSize,
         destination_align: u64,
         source_align: u64,
-        typed: bool,
     ) {
         let bytes = size.bytes() as u64;
-        if typed
-            && bytes > 0
-            && bytes.is_multiple_of(4)
-            && destination_align >= 4
-            && source_align >= 4
-        {
-            let ty = Type::Vector(bytes / 4, Box::new(Type::I32));
-            let value = self.ir.load(ty, source, source_align, Access::Plain);
-            self.ir
-                .store(value, destination, destination_align, Access::Plain);
+        let width = destination_align.min(source_align).clamp(1, 8);
+        if bytes > 0 && bytes.is_multiple_of(width) && bytes / width <= LEAVES as u64 {
+            for offset in (0..bytes).step_by(width as usize) {
+                let pointer = self.offset(source.clone(), offset);
+                let value = self.ir.load(
+                    Type::Integer(width as u32 * 8),
+                    pointer,
+                    width,
+                    Access::Plain,
+                );
+                let pointer = self.offset(destination.clone(), offset);
+                self.ir.store(value, pointer, width, Access::Plain);
+            }
         } else if bytes > 0 {
             self.ir.transfer(
                 Transfer::Copy,

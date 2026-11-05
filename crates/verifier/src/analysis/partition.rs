@@ -1,6 +1,6 @@
 use std::slice;
 
-use gpurs_rustc::Instance;
+use gpurs_rustc::{Instance, RigidTy, TyKind};
 
 use super::{Access, Analysis, Origin, Pointer, State, Value, state};
 use crate::symbolic::{self, Atom, Polynomial, Predicate, Relation};
@@ -89,10 +89,19 @@ impl Analysis<'_, '_> {
             },
             write,
             atomic: false,
-            partition: Some((format!("{:?}", instance.args()), layout)),
+            partition: Some((partition_type(self.sess.body(instance).arg_locals()[0].ty), layout)),
             block: self.kernel_block(),
             facts: state.facts.clone(),
             span: self.span,
         });
+    }
+}
+
+/// The type of the partitioned matrix behind the receiver `ty`, which identifies the partition
+/// whichever method of it accesses the elements.
+fn partition_type(ty: gpurs_rustc::Ty) -> String {
+    match ty.kind() {
+        TyKind::RigidTy(RigidTy::Ref(_, pointee, _)) => format!("{pointee:?}"),
+        _ => format!("{ty:?}"),
     }
 }

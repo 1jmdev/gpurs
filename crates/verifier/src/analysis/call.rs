@@ -47,6 +47,14 @@ impl Analysis<'_, '_> {
             .iter()
             .map(|argument| self.operand(argument, state))
             .collect();
+        let base = self.frame().base;
+        for argument in arguments {
+            if let Operand::Move(place) = argument
+                && place.projection.is_empty()
+            {
+                state.slots.make_mut()[base + place.local] = Value::varying(0);
+            }
+        }
         let frame = self.frame();
         let key = (self.program.contexts[frame.context].instance, frame.block);
         if !self.program.calls.contains_key(&key) {
@@ -88,7 +96,7 @@ impl Analysis<'_, '_> {
             .map(|name| {
                 Value::from(ValueData {
                     integer: Some(Polynomial::constant(
-                        policy::intrinsic_check(self.sess, name) as i128,
+                        policy::intrinsic_check(name) as i128,
                     )),
                     domain: Some(2),
                     ..ValueData::default()

@@ -218,7 +218,7 @@ impl Analysis<'_, '_> {
             }
             Operand::RuntimeChecks(checks) => Value::from(ValueData {
                 integer: Some(Polynomial::constant(
-                    policy::runtime_check(self.sess, checks) as i128,
+                    policy::runtime_check(checks) as i128,
                 )),
                 domain: Some(2),
                 ..ValueData::default()

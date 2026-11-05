@@ -2,7 +2,10 @@
 
 use std::{marker::PhantomData, mem, ops::Range};
 
-use super::{GatheredMatrix, TileCursor};
+use super::{
+    GatheredMatrix, TileCursor,
+    cursor::{Chunks, Steps},
+};
 use crate::gpu::tensor::{DepthMajor, Element, ExtentMajor, Layout, ThreadGroup};
 
 /// An `extent`x`depth` operand in a slice: `A` is M x K and `B` is N x K. Its lines, the rows
@@ -105,18 +108,12 @@ impl<'a, T, L: Layout> GlobalMatrix<'a, T, L> {
         let begin = depth.start.min(end);
         let length = end.saturating_sub(begin);
         let tile_depth = if L::DEPTH_MAJOR { C } else { R };
-        let lanes = 16 / mem::size_of::<T>().max(1);
-        // Branch-free, so the alignment of the address does not make later values per-thread.
-        let aligned = (self.data.as_ptr() as usize).is_multiple_of(16)
-            & self.stride.is_multiple_of(lanes)
-            & self.offset.is_multiple_of(lanes);
-        let (base, limit, aligned) = if L::DEPTH_MAJOR {
+        let (base, limit) = if L::DEPTH_MAJOR {
             (
                 self.offset
                     .wrapping_add(first.wrapping_mul(self.stride))
                     .wrapping_add(begin),
                 lines.saturating_sub(first),
-                aligned & begin.is_multiple_of(lanes) & end.is_multiple_of(lanes),
             )
         } else {
             (
@@ -124,20 +121,14 @@ impl<'a, T, L: Layout> GlobalMatrix<'a, T, L> {
                     .wrapping_add(first)
                     .wrapping_add(begin.wrapping_mul(self.stride)),
                 self.extent.saturating_sub(first),
-                aligned & first.is_multiple_of(lanes),
             )
         };
+        let chunks =
+            Chunks::strided::<T, R, C, L, G>(self.data, group.thread(), [base, self.stride, limit]);
+        let line = if L::DEPTH_MAJOR { 1 } else { self.stride };
         TileCursor::new(
-            self.data,
-            self.stride,
-            base,
-            limit,
-            [
-                length.div_ceil(tile_depth),
-                (length.saturating_sub(1) % tile_depth + 1).min(length),
-            ],
-            aligned,
-            *group,
+            Steps::new(length, tile_depth, line.wrapping_mul(mem::size_of::<T>())),
+            chunks,
         )
     }
 
@@ -148,7 +139,11 @@ impl<'a, T, L: Layout> GlobalMatrix<'a, T, L> {
         } else {
             (self.depth, self.extent)
         };
-        match self.data.len().checked_sub(self.offset.saturating_add(length)) {
+        match self
+            .data
+            .len()
+            .checked_sub(self.offset.saturating_add(length))
+        {
             Some(spare) => spare
                 .checked_div(self.stride)
                 .map_or(count, |lines| lines.saturating_add(1).min(count)),

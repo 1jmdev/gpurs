@@ -59,14 +59,15 @@ impl Analysis<'_, '_> {
             [left, right],
         ) = (path, arguments)
             && let Some(kind @ (false, _)) = receiver.and_then(arithmetic::integer_kind)
-            && let (Some(first), Some(_)) = (&left.integer, &right.integer)
+            && let (Some(first), Some(second)) = (&left.integer, &right.integer)
         {
             // Bounded by the first operand from the side the operation keeps, and varying no
             // more than its operands.
             let variance = left.variance.max(right.variance);
             let maximum = Polynomial::constant(arithmetic::range(kind).1);
             let (lower, upper) = if path.ends_with("min") {
-                (Polynomial::default(), first.clone())
+                let bound = if second.value().is_some() { second } else { first };
+                (Polynomial::default(), bound.clone())
             } else {
                 (first.clone(), maximum)
             };
@@ -86,9 +87,17 @@ impl Analysis<'_, '_> {
                 variance,
             ));
         }
-        let range = receiver.is_some_and(|ty| self.is_range(ty));
+        let reversed = receiver.is_some_and(|ty| self.is_reversed_range(ty));
+        let range = reversed || receiver.is_some_and(|ty| self.is_range(ty));
         if range && path == "core::iter::traits::collect::IntoIterator::into_iter" {
             return Some(arguments[0].clone());
+        }
+        if range && !reversed && path == "core::iter::traits::iterator::Iterator::rev" {
+            return Some(Value::from(ValueData {
+                fields: vec![arguments[0].clone()],
+                variance: arguments[0].variance,
+                ..ValueData::default()
+            }));
         }
         if range && path == "core::iter::traits::iterator::Iterator::next" {
             // `next` yields a value in `start..end`. The model keeps the iterator at its initial
@@ -97,6 +106,11 @@ impl Analysis<'_, '_> {
                 return None;
             };
             let iterator = state::get(&state.slots[slot], &path);
+            let iterator = if reversed {
+                iterator.fields.first()?.clone()
+            } else {
+                iterator
+            };
             let start = iterator
                 .fields
                 .first()
@@ -150,6 +164,16 @@ impl Analysis<'_, '_> {
             return Some(Value::varying(2));
         }
         None
+    }
+
+    fn is_reversed_range(&self, ty: Ty) -> bool {
+        matches!(
+            ty.kind(),
+            TyKind::RigidTy(RigidTy::Adt(definition, arguments))
+                if self.sess.is(definition.def_id(), "core::iter::adapters::rev::Rev")
+                    && arguments.0.first().and_then(|argument| argument.ty())
+                        .is_some_and(|inner| self.is_range(*inner))
+        )
     }
 
     /// `Range<unsigned>`.

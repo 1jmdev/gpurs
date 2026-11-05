@@ -21,31 +21,39 @@ impl Grouped {
     ) -> Option<Tile<BM, BN>> {
         let block = gpu::block_id();
         let width = tiles::<BM, BN>([0, columns])[1];
-        let mut remaining = block.y;
-        let mut begin = 0;
-        for group in 1..offsets.len() {
-            let start = if group == 1 {
-                offsets[0] as usize
-            } else {
-                begin
-            };
-            let end = start.max(offsets[group] as usize);
-            let count = end.wrapping_sub(start).div_ceil(BM);
-            if remaining < count {
-                return Some(Tile {
-                    group: group - 1,
-                    ..Tile::new(
-                        start.wrapping_add(remaining.wrapping_mul(BM)),
-                        block.x.wrapping_mul(BN),
-                        block.y.wrapping_mul(width).wrapping_add(block.x),
-                        end,
-                    )
-                });
-            }
-            remaining = remaining.wrapping_sub(count);
-            begin = end;
+        if offsets.is_empty() {
+            return None;
         }
-        None
+        let target = block.y as u32;
+        let (mut end, mut tiles) = (offsets[0], 0u32);
+        let (mut group, mut first, mut passed, mut limit) = (0u32, end, 0u32, end);
+        for &offset in &offsets[1..] {
+            let start = end;
+            end = end.max(offset);
+            if tiles <= target {
+                limit = end;
+            }
+            tiles = tiles.wrapping_add(end.wrapping_sub(start).div_ceil(BM as u32));
+            if tiles <= target {
+                group += 1;
+                first = end;
+                passed = tiles;
+            }
+        }
+        let group = group as usize;
+        if group + 1 >= offsets.len() {
+            return None;
+        }
+        let row = first.wrapping_add(target.wrapping_sub(passed).wrapping_mul(BM as u32));
+        Some(Tile {
+            group,
+            ..Tile::new(
+                row as usize,
+                block.x.wrapping_mul(BN),
+                block.y.wrapping_mul(width).wrapping_add(block.x),
+                limit as usize,
+            )
+        })
     }
 
     /// The grid that covers `groups` groups spanning at most `rows` rows in total.

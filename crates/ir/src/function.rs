@@ -138,7 +138,11 @@ impl Function {
 
     /// A stack slot of `size` bytes at the top of the entry block, as `i8*`.
     pub fn alloca(&mut self, size: u64, align: u64) -> Value {
-        let ty = Type::bytes(size);
+        let width = [8, 4, 2, 1]
+            .into_iter()
+            .find(|&width| width <= align && size.is_multiple_of(width))
+            .unwrap();
+        let ty = Type::Array(size / width, Box::new(Type::Integer(width as u32 * 8)));
         let slot = self.register(ty.clone().pointer());
         let pointer = self.register(Type::byte_pointer());
         let Kind::Register(register) = slot.kind else {

@@ -8,9 +8,7 @@ use crate::gpu::{
     self, Block,
     atomic::AtomicU32,
     synchronization,
-    tensor::{
-        AccumulatorTile, Depth, OutputElement, Partial, SharedLease, Tile, WarpRegion,
-    },
+    tensor::{AccumulatorTile, Depth, OutputElement, Partial, SharedLease, Tile, WarpRegion},
 };
 
 /// Words that order the slices of each output tile, one per tile in the order of
@@ -47,10 +45,11 @@ impl<'a> TileLock<'a> {
         tile: &Tile<BM, BN, Partial>,
         output: &'o mut OutputMatrix<'_, T>,
     ) -> Option<LockedTile<'o, 'a, T, BM, BN>> {
-        if tile.index() >= self.words.len() || tile.split() >= tile.splits() {
+        let words = self.words.len();
+        if words == 0 || tile.index() >= words || tile.split() >= tile.splits() {
             return None;
         }
-        let word = &self.words[tile.index()];
+        let word = &self.words[tile.index() % words];
         wait(block, word, tile.split() as u32);
         Some(LockedTile {
             tile: output.region(tile),
@@ -129,6 +128,22 @@ fn wait<const THREADS: usize>(block: &Block<THREADS>, word: &AtomicU32, ticket: 
     gpu::sync_block();
 }
 
+impl<T: OutputElement> OutputMatrix<'_, T> {
+    /// The part of the output that the last depth slice of `tile` writes once it holds the
+    /// complete sums, such as after acquiring a [`TileLock`] on a workspace of partial sums;
+    /// `None` for every earlier slice. No other block holds the tile of that slice.
+    pub fn last_slice<const BM: usize, const BN: usize>(
+        &mut self,
+        tile: &Tile<BM, BN, Partial>,
+    ) -> Option<OutputTile<'_, T, BM, BN>> {
+        if tile.split() + 1 == tile.splits() {
+            Some(self.region(tile))
+        } else {
+            None
+        }
+    }
+}
+
 impl OutputMatrix<'_, f32> {
     /// Adds this lane's elements of `values`, the product of `warp`'s region of `tile`, with
     /// atomic reductions, so any number of slices may accumulate into the same tile at once.
@@ -139,7 +154,13 @@ impl OutputMatrix<'_, f32> {
         memory = PartitionWrite,
         proof = Uniform
     )]
-    pub fn accumulate<const BM: usize, const BN: usize, const FM: usize, const FN: usize, D: Depth>(
+    pub fn accumulate<
+        const BM: usize,
+        const BN: usize,
+        const FM: usize,
+        const FN: usize,
+        D: Depth,
+    >(
         &mut self,
         tile: &Tile<BM, BN, D>,
         warp: &WarpRegion<BM, BN, FM, FN>,

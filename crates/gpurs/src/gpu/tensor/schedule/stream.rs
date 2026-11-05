@@ -8,7 +8,10 @@ use crate::gpu;
 /// of iterations, which may end one tile's depth and begin the next, so the last wave never
 /// leaves multiprocessors idle. Each run within a tile is one [`Partial`] slice, ordered by the
 /// block that multiplies it; slices are combined through a [`TileLock`](super::super::TileLock),
-/// which needs every block of the grid resident at once.
+/// which needs every block of the grid resident at once; a grid of one block per tile
+/// multiplies whole tiles without them. A block walks its run from the end,
+/// so the slice that begins a tile, which the next block waits for, is its first, and the
+/// slice that waits for the previous block is its last.
 #[derive(Debug)]
 pub struct StreamK;
 
@@ -30,23 +33,42 @@ impl StreamK {
         let total = rows.wrapping_mul(columns).wrapping_mul(iterations);
         let blocks = gpu::grid_dim().x.max(1);
         let block = gpu::block_id().x;
-        let end = share(block.wrapping_add(1), total, blocks);
-        let mut position = share(block, total, blocks);
-        while position < end {
-            let tile = position / iterations;
+        let whole = blocks == rows.wrapping_mul(columns);
+        let (begin, mut position) = if whole {
+            (
+                block.wrapping_mul(iterations),
+                block.wrapping_add(1).wrapping_mul(iterations),
+            )
+        } else {
+            (
+                share(block, total, blocks),
+                share(block.wrapping_add(1), total, blocks),
+            )
+        };
+        while position > begin {
+            let tile = if whole {
+                block
+            } else {
+                position.wrapping_sub(1) / iterations
+            };
             let first = tile.wrapping_mul(iterations);
-            let stop = first.wrapping_add(iterations).min(end);
-            let first_owner = owner(first, total, blocks);
+            let start = first.max(begin);
+            let (first_owner, last_owner) = if whole {
+                (block, block)
+            } else {
+                (
+                    owner(first, total, blocks),
+                    owner(first.wrapping_add(iterations - 1), total, blocks),
+                )
+            };
             let [row, column] = RowMajor::position(tile, [rows, columns]);
             body(Tile {
                 depth: [
+                    start.wrapping_sub(first).wrapping_mul(BK).min(depth),
                     position.wrapping_sub(first).wrapping_mul(BK).min(depth),
-                    stop.wrapping_sub(first).wrapping_mul(BK).min(depth),
                 ],
                 split: block.wrapping_sub(first_owner),
-                splits: owner(first.wrapping_add(iterations - 1), total, blocks)
-                    .wrapping_sub(first_owner)
-                    .wrapping_add(1),
+                splits: last_owner.wrapping_sub(first_owner).wrapping_add(1),
                 ..Tile::new(
                     row.wrapping_mul(BM),
                     column.wrapping_mul(BN),
@@ -54,7 +76,7 @@ impl StreamK {
                     extent[0],
                 )
             });
-            position = stop;
+            position = start;
         }
     }
 

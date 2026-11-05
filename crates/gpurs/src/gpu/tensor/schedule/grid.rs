@@ -29,6 +29,12 @@ impl<const GROUP: usize> Swizzle<GROUP> {
     )]
     pub(super) fn position(index: usize, [rows, columns]: [usize; 2]) -> [usize; 2] {
         const { assert!(GROUP > 0, "swizzle groups hold at least one tile row") };
+        if GROUP == 1 {
+            return [
+                index.checked_div(columns).unwrap_or(0),
+                index.checked_rem(columns).unwrap_or(0),
+            ];
+        }
         let span = GROUP.wrapping_mul(columns);
         let first = index.checked_div(span).unwrap_or(0).wrapping_mul(GROUP);
         let height = rows.wrapping_sub(first).min(GROUP);

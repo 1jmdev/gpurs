@@ -32,7 +32,10 @@ impl<'sess> ModuleBuilder<'sess> {
     pub fn kernel(&mut self, plan: KernelPlan) -> Kernel {
         let mut hasher = DefaultHasher::new();
         plan.key.hash(&mut hasher);
-        let symbol = format!("{SYMBOL}_{:016x}", hasher.finish());
+        let name = plan.instance.name();
+        let function = name.split('<').next().unwrap_or_default();
+        let function = function.trim_end_matches("::").rsplit("::").next().unwrap_or_default();
+        let symbol = format!("{SYMBOL}_{function}_{:016x}", hasher.finish());
         let certified = plan.certificate.clone().map(|certificate| {
             let root = self.function(plan.instance, Some(certificate.clone()), false);
             self.entry(&plan, &symbol, root, false, plan.status);
@@ -174,5 +177,6 @@ impl<'sess> ModuleBuilder<'sess> {
     }
 }
 
-/// Prefix of the entry points; a hash of the kernel key keeps them unique in a linked module.
+/// Prefix of the entry points, which name the kernel function for profilers; a hash of the
+/// kernel key keeps them unique in a linked module.
 const SYMBOL: &str = "gpurs_kernel";

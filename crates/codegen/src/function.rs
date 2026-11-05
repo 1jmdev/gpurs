@@ -671,7 +671,7 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
             }
             MirOperand::Constant(constant) => self.constant(constant),
             MirOperand::RuntimeChecks(checks) => {
-                let value = policy::runtime_check(self.sess, checks);
+                let value = policy::runtime_check(checks);
                 Operand::immediate(IRValue::bool(value), self.shape_of(Ty::bool_ty()))
             }
         }

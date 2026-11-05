@@ -61,10 +61,20 @@ assembly! {
 }
 
 assembly! {
-    /// The shared-window address of the generic address `address`.
-    None 20 "cvta.to.shared.u64 $0, $1;" "=l,l"
-    fn shared_window(address: u64) -> u64;
+    /// `value`, held in a register that the code generator keeps rather than recomputes.
+    None 20 "mov.b32 $0, $1;" "=r,r"
+    fn pin_register(value: u32) -> u32;
 }
+
+/// The shared-window address of the generic address `address`.
+#[primitive(
+    lowering = SharedWindow,
+    architecture = 20,
+    convergence = None,
+    memory = None,
+    proof = Varying
+)]
+pub fn shared_window(address: u64) -> u64;
 
 #[primitive(
     lowering = Assembly {
@@ -77,6 +87,19 @@ assembly! {
     proof = Uniform
 )]
 pub fn copy_asynchronously(destination: u32, source: u64, bytes: u32);
+
+/// Copies the 16 bytes at `source` to `destination`, or zeros when `absent` is nonzero.
+#[primitive(
+    lowering = Assembly {
+        text: "{ .reg .pred p; setp.ne.b32 p, $2, 0; cp.async.cg.shared.global.L2::128B [$0], [$1], 16, p; }",
+        constraints: "r,l,r",
+    },
+    architecture = 80,
+    convergence = None,
+    memory = Encapsulated,
+    proof = Uniform
+)]
+pub fn copy_chunk_asynchronously(destination: u32, source: u64, absent: u32);
 
 macro_rules! asynchronous {
     ($($name:ident $text:literal;)*) => {

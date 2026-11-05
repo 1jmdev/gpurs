@@ -106,7 +106,7 @@ fn visit(
                 }
                 let primitive = attributes::primitive(sess, callee.def.def_id());
                 effects.asynchronous |= primitive.as_ref().is_some_and(|primitive| {
-                    matches!(&primitive.lowering, Lowering::Assembly { text, .. } if text.starts_with("cp.async."))
+                    matches!(&primitive.lowering, Lowering::Assembly { text, .. } if text.contains("cp.async."))
                 });
                 effects.tensor |= primitive.as_ref().is_some_and(|primitive| {
                     matches!(&primitive.lowering, Lowering::Assembly { text, .. }

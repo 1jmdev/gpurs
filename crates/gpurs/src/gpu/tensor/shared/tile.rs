@@ -62,7 +62,7 @@ impl<T: Element, const ROWS: usize, const COLUMNS: usize, L> SharedTile<T, ROWS,
         } else {
             (row.wrapping_add(lane % 16), column / Self::LANES + lane / 16)
         };
-        self.address() + Self::offset(row, chunk)
+        self.address() + gpu::intrinsics::pin_register(Self::offset(row, chunk))
     }
 
     /// The fields of a 128-byte swizzled, K-major shared-memory matrix descriptor that `wgmma`

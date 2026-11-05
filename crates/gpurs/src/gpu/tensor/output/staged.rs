@@ -117,7 +117,7 @@ impl<T: OutputElement, const BM: usize, const BN: usize> OutputTile<'_, T, BM, B
 
     /// Writes `chunk` to the tile positions from (`row`, `column`) along `direction`, as one
     /// vector store when it lies wholly in the output at an aligned index and element by
-    /// element otherwise.
+    /// element otherwise; positions past an absent first one are absent too.
     fn write_chunk(
         &mut self,
         chunk: Vector4,
@@ -133,6 +133,7 @@ impl<T: OutputElement, const BM: usize, const BN: usize> OutputTile<'_, T, BM, B
         ) {
             // SAFETY: both ends of a chunk along the contiguous dimension are present, so the
             // whole chunk is, and its index is a multiple of the chunk's elements.
+            (None, _) => {}
             (Some(index), Some(_)) if index.is_multiple_of(lanes) => unsafe {
                 pointer.add(index).cast::<Vector4>().write(chunk)
             },

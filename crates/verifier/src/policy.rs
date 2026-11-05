@@ -7,7 +7,7 @@
 
 use std::{env, sync::LazyLock};
 
-use gpurs_rustc::{AssertMessage, RuntimeChecks, Session};
+use gpurs_rustc::{AssertMessage, RuntimeChecks};
 
 /// Whether unchecked arithmetic is instrumented. `GPURS_OVERFLOW_CHECKS` overrides the profile.
 pub fn overflow_checks() -> bool {
@@ -27,24 +27,20 @@ pub fn unchecked_overflow(message: &AssertMessage) -> bool {
 
 /// The value of a `RuntimeChecks` operand. Library `unsafe` preconditions are checked only in
 /// a debug build of the calling crate, as on the host.
-pub fn runtime_check(sess: Session<'_>, checks: &RuntimeChecks) -> bool {
+pub fn runtime_check(checks: &RuntimeChecks) -> bool {
     match checks {
-        RuntimeChecks::OverflowChecks => sess.overflow_checks(),
-        RuntimeChecks::UbChecks => overflow_checks(),
+        RuntimeChecks::OverflowChecks | RuntimeChecks::UbChecks => overflow_checks(),
         RuntimeChecks::ContractChecks => false,
     }
 }
 
 /// The value of the `ub_checks`, `contract_checks`, or `overflow_checks` intrinsic.
-pub fn intrinsic_check(sess: Session<'_>, name: &str) -> bool {
-    runtime_check(
-        sess,
-        &match name {
-            "ub_checks" => RuntimeChecks::UbChecks,
-            "contract_checks" => RuntimeChecks::ContractChecks,
-            _ => RuntimeChecks::OverflowChecks,
-        },
-    )
+pub fn intrinsic_check(name: &str) -> bool {
+    runtime_check(&match name {
+        "ub_checks" => RuntimeChecks::UbChecks,
+        "contract_checks" => RuntimeChecks::ContractChecks,
+        _ => RuntimeChecks::OverflowChecks,
+    })
 }
 
 /// How the compiler treats a kernel whose memory-safety or panic obligations are not all

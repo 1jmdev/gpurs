@@ -271,6 +271,21 @@ impl Analysis<'_, '_> {
         });
         if value.integer.is_none() {
             value.requirement.clear();
+            let bound = match (operation, right_value.integer.as_ref().and_then(Polynomial::value)) {
+                (BinOp::Rem, Some(divisor)) if divisor > 0 => Some(divisor - 1),
+                (BinOp::BitAnd, Some(mask)) if mask >= 0 => Some(mask),
+                _ => None,
+            };
+            if let (Some(bound), Some((false, _))) = (bound, kind) {
+                value.integer = Some(self.variable(
+                    vec![0],
+                    Polynomial::default(),
+                    Some(Polynomial::constant(bound)),
+                    Requirement::new(),
+                    variance,
+                    "a bounded remainder",
+                ));
+            }
         }
         if let Some(ty) = self.operand_type(left) {
             self.opaque(

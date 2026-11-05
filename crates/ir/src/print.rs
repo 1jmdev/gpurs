@@ -167,6 +167,9 @@ impl Function {
                     || matches!(callee, Callee::Symbol(name) if name.starts_with("llvm.nvvm.barrier"))
                 {
                     write!(f, " convergent")?;
+                } else if matches!(callee, Callee::Assembly(_, constraints, false) if !constraints.contains("~{memory}"))
+                {
+                    write!(f, " nounwind readnone")?;
                 }
                 Ok(())
             }

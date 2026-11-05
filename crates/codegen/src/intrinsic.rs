@@ -59,7 +59,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                 return true;
             }
             "ub_checks" | "contract_checks" | "overflow_checks" => {
-                Value::Scalar(IRValue::bool(policy::intrinsic_check(self.sess, name)))
+                Value::Scalar(IRValue::bool(policy::intrinsic_check(name)))
             }
             "black_box" | "likely" | "unlikely" => arguments[0].value.clone(),
             "read_via_copy" => {
@@ -370,6 +370,17 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                 let field = self.field_place(destination, 1);
                 self.assign(&field, Value::Scalar(length));
                 return;
+            }
+            Lowering::SharedWindow => {
+                let pointer = self.ir.cast(
+                    Conversion::IntToPtr,
+                    arguments[0].scalar(),
+                    Type::byte_pointer(),
+                );
+                let shared = self
+                    .ir
+                    .cast(Conversion::AddrSpaceCast, pointer, Type::I8.pointer_in(3));
+                self.ir.cast(Conversion::PtrToInt, shared, Type::I64)
             }
             Lowering::Call { symbol, operands } => {
                 let operands = operands

@@ -46,6 +46,8 @@ pub enum Lowering {
     Barrier,
     SharedArray,
     DynamicShared,
+    /// The shared-window address of a generic address, as an address-space cast.
+    SharedWindow,
     /// Compiled from its Rust body; the definition still governs verification.
     Body,
 }
