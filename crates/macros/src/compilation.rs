@@ -1,5 +1,6 @@
+use gpurs_artifact::Annotation;
 use proc_macro2::{Delimiter, Group, TokenStream as Tokens, TokenTree};
-use quote::quote;
+use quote::{format_ident, quote};
 use syn::{File, ImplItem, Item, Meta, Result, Visibility, parse_quote, visit_mut::VisitMut};
 
 use crate::attribute::{self, Options};
@@ -205,12 +206,11 @@ fn device_macro(tokens: Tokens, device: bool) -> (Tokens, bool) {
 pub(crate) fn device_item(item: Item, options: Options) -> Result<Tokens> {
     match item {
         Item::Fn(mut function) => {
-            let tail = function.sig.ident.to_string();
-            function
-                .attrs
-                .push(parse_quote!(#[gpurs_tool::device = #tail]));
-            function.attrs.push(marker("device", &tail));
-            annotate(&mut function.attrs, options);
+            annotate(
+                &mut function.attrs,
+                Annotation::Device(function.sig.ident.to_string()),
+            );
+            annotate_options(&mut function.attrs, options);
             function.vis = parse_quote!(pub(crate));
             DevicePaths.visit_item_fn_mut(&mut function);
             Ok(quote!(#function))
@@ -234,11 +234,8 @@ pub(crate) fn device_item(item: Item, options: Options) -> Result<Tokens> {
                     .attrs
                     .retain(|attribute| !attribute.path().is_ident("gpu"));
                 let tail = format!("{prefix}::{}", method.sig.ident);
-                method
-                    .attrs
-                    .push(parse_quote!(#[gpurs_tool::device = #tail]));
-                method.attrs.push(marker("device", &tail));
-                annotate(&mut method.attrs, method_options);
+                annotate(&mut method.attrs, Annotation::Device(tail));
+                annotate_options(&mut method.attrs, method_options);
                 if implementation.trait_.is_none() && matches!(method.vis, Visibility::Inherited) {
                     method.vis = parse_quote!(pub(super));
                 }
@@ -250,21 +247,32 @@ pub(crate) fn device_item(item: Item, options: Options) -> Result<Tokens> {
     }
 }
 
-/// The documentation form of a tool attribute, which dependency metadata always retains.
-/// Records the options the compiler reads back from a device function.
-fn annotate(attributes: &mut Vec<syn::Attribute>, options: Options) {
+fn annotate_options(attributes: &mut Vec<syn::Attribute>, options: Options) {
     if options.fast_math {
-        attributes.push(parse_quote!(#[gpurs_tool::fast_math]));
-        attributes.push(marker("fast_math", ""));
+        annotate(attributes, Annotation::FastMath);
     }
     if let Some(threads) = options.threads {
-        let bounds = format!("{threads} {}", options.minimum_blocks.unwrap_or(0));
-        attributes.push(parse_quote!(#[gpurs_tool::launch_bounds = #bounds]));
-        attributes.push(marker("launch_bounds", &bounds));
+        annotate(
+            attributes,
+            Annotation::LaunchBounds {
+                threads,
+                minimum_blocks: options.minimum_blocks.unwrap_or(0),
+            },
+        );
     }
 }
 
-fn marker(name: &str, value: &str) -> syn::Attribute {
-    let text = format!("<!-- gpurs::{name}={value} -->");
-    parse_quote!(#[doc = #text])
+fn annotate(attributes: &mut Vec<syn::Attribute>, annotation: Annotation) {
+    let meta = tool_meta(&annotation);
+    let documentation = annotation.documentation();
+    attributes.push(parse_quote!(#[#meta]));
+    attributes.push(parse_quote!(#[doc = #documentation]));
+}
+
+pub(crate) fn tool_meta(annotation: &Annotation) -> Tokens {
+    let name = format_ident!("{}", annotation.kind().name());
+    match annotation.value() {
+        Some(value) => quote!(gpurs_tool::#name = #value),
+        None => quote!(gpurs_tool::#name),
+    }
 }

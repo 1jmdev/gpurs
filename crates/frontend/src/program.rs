@@ -1,4 +1,4 @@
-use gpurs_artifact::TransferType;
+use gpurs_artifact::{Annotation, AnnotationKind, TransferType};
 use gpurs_rustc::{
     CrateDef, CrateItem, GenericArgKind, GenericArgs, Instance, RigidTy, Session, Ty, TyKind,
 };
@@ -25,10 +25,12 @@ pub fn analyze(sess: Session<'_>) -> Program {
     let definitions: Vec<_> = sess
         .local_items()
         .into_iter()
-        .filter_map(|item| {
-            sess.tool_attr(item.def_id(), "device")
-                .map(|tail| (item, tail))
-        })
+        .filter_map(
+            |item| match sess.annotation(item.def_id(), AnnotationKind::Device) {
+                Some(Annotation::Device(tail)) => Some((item, tail)),
+                _ => None,
+            },
+        )
         .collect();
     let mut kernels = Vec::new();
     for launch in host.launches {

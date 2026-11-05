@@ -114,14 +114,6 @@ pub enum Proof {
 }
 
 impl Primitive {
-    pub fn encode(&self) -> String {
-        serde_json::to_string(self).unwrap()
-    }
-
-    pub fn decode(text: &str) -> Self {
-        serde_json::from_str(text).unwrap()
-    }
-
     /// Lowered directly by codegen instead of compiling a Rust body.
     pub fn leaf(&self) -> bool {
         self.lowering != Lowering::Body

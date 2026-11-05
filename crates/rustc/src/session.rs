@@ -6,7 +6,7 @@
 
 use std::{cell::RefCell, fs, iter, ops::ControlFlow, rc::Rc};
 
-use gpurs_artifact::{CONFIGURATION, Primitive, Reference, Target};
+use gpurs_artifact::{Annotation, AnnotationKind, CONFIGURATION, Primitive, Reference, Target};
 use rustc_abi::{self, FieldIdx};
 #[cfg(gpurs_api_value_repr)]
 use rustc_ast::attr::AttributeExt;
@@ -184,8 +184,14 @@ impl<'tcx> Session<'tcx> {
                         .instance_mir(internal.def)
                         .stable_hash(context, &mut hasher);
                 }
-                for name in ["device", "fast_math", "launch_bounds", "primitive"] {
-                    self.tool_attr(instance.def.def_id(), name)
+                for kind in [
+                    AnnotationKind::Device,
+                    AnnotationKind::FastMath,
+                    AnnotationKind::LaunchBounds,
+                    AnnotationKind::Primitive,
+                ] {
+                    self.annotation(instance.def.def_id(), kind)
+                        .map(|annotation| annotation.value().unwrap_or_default())
                         .stable_hash(context, &mut hasher);
                 }
                 while let Some(ty) = inputs.types.pop() {
@@ -318,7 +324,10 @@ impl<'tcx> Session<'tcx> {
         for def in tcx.hir_body_owners() {
             if tcx.def_kind(def) != DefKind::Fn
                 || self
-                    .tool_attr(rustc_internal::stable(def.to_def_id()), "device")
+                    .annotation(
+                        rustc_internal::stable(def.to_def_id()),
+                        AnnotationKind::Device,
+                    )
                     .is_none()
             {
                 continue;
@@ -536,11 +545,15 @@ impl<'tcx> Session<'tcx> {
             .filter(|child| child.ident.as_str() == tail)
             .filter_map(|child| child.res.opt_def_id())
             .map(rustc_internal::stable)
-            .find(|definition| self.tool_attr(*definition, "device").as_deref() == Some(tail))
+            .find(|definition| {
+                matches!(
+                    self.annotation(*definition, AnnotationKind::Device),
+                    Some(Annotation::Device(found)) if found == tail
+                )
+            })
     }
 
-    /// The value of a registered `#[gpurs_tool::name = "..."]` attribute on `def`.
-    pub fn tool_attr(&self, def: DefId, name: &str) -> Option<String> {
+    pub fn annotation(&self, def: DefId, kind: AnnotationKind) -> Option<Annotation> {
         let internal = self.internal_def(def);
         let attributes = match internal.as_local() {
             Some(local) => self.tcx.hir_attrs(self.tcx.local_def_id_to_hir_id(local)),
@@ -549,21 +562,14 @@ impl<'tcx> Session<'tcx> {
         attributes
             .iter()
             .find(|attribute| {
-                attribute.path_matches(&[Symbol::intern("gpurs_tool"), Symbol::intern(name)])
+                attribute.path_matches(&[Symbol::intern("gpurs_tool"), Symbol::intern(kind.name())])
             })
             .map(|attribute| {
-                attribute
-                    .value_str()
-                    .map_or_else(String::new, |value| value.to_string())
+                Annotation::decode(kind, attribute.value_str().as_ref().map(Symbol::as_str))
             })
             .or_else(|| {
                 attributes.iter().find_map(|attribute| {
-                    attribute
-                        .doc_str()?
-                        .as_str()
-                        .strip_suffix(" -->")?
-                        .strip_prefix(&format!("<!-- gpurs::{name}="))
-                        .map(str::to_owned)
+                    Annotation::from_documentation(kind, attribute.doc_str()?.as_str())
                 })
             })
     }

@@ -1,36 +1,42 @@
 use std::rc::Rc;
 
-use gpurs_artifact::{Lowering, Memory, Primitive, Proof};
+use gpurs_artifact::{Annotation, AnnotationKind, Lowering, Memory, Primitive, Proof};
 
 use crate::{DefId, Session, session::QUERIES};
 
 pub fn is_device(sess: Session<'_>, def: DefId) -> bool {
-    sess.tool_attr(def, "device").is_some()
+    sess.annotation(def, AnnotationKind::Device).is_some()
         || (sess.is_closure_like(def) && is_device(sess, sess.typeck_root(def)))
 }
 
 pub fn is_fast_math(sess: Session<'_>, def: DefId) -> bool {
-    sess.tool_attr(sess.typeck_root(def), "fast_math").is_some()
+    sess.annotation(sess.typeck_root(def), AnnotationKind::FastMath)
+        .is_some()
 }
 
 /// The exact threads per block and minimum resident blocks per multiprocessor (zero when
 /// unstated) declared by `#[gpu(threads = N, minimum_blocks = M)]`.
 pub fn launch_bounds(sess: Session<'_>, def: DefId) -> Option<(u32, u32)> {
-    let text = sess.tool_attr(sess.typeck_root(def), "launch_bounds")?;
-    let (threads, blocks) = text.split_once(' ')?;
-    Some((threads.parse().ok()?, blocks.parse().ok()?))
+    match sess.annotation(sess.typeck_root(def), AnnotationKind::LaunchBounds)? {
+        Annotation::LaunchBounds {
+            threads,
+            minimum_blocks,
+        } => Some((threads, minimum_blocks)),
+        _ => None,
+    }
 }
 
 /// The `#[gpurs::primitive]` definition of `def`, or of the trait item it implements.
 pub fn primitive(sess: Session<'_>, def: DefId) -> Option<Rc<Primitive>> {
-    if let Some(text) = sess.tool_attr(def, "unsafe_primitive") {
+    if let Some(Annotation::UnsafePrimitive(primitive)) =
+        sess.annotation(def, AnnotationKind::UnsafePrimitive)
+    {
         return QUERIES.with(|queries| {
             queries
                 .primitives
                 .borrow_mut()
                 .entry(def)
                 .or_insert_with(|| {
-                    let primitive = Primitive::decode(&text);
                     if !sess.is_unsafe_function(def)
                         || !matches!(primitive.lowering, Lowering::Assembly { .. })
                         || primitive.proof != Proof::Varying
@@ -63,9 +69,11 @@ pub fn primitive(sess: Session<'_>, def: DefId) -> Option<Rc<Primitive>> {
             .borrow_mut()
             .entry(def)
             .or_insert_with(|| {
-                sess.tool_attr(sess.trait_item_of(def).unwrap_or(def), "primitive")
-                    .or_else(|| sess.tool_attr(def, "primitive"))
-                    .map(|text| Rc::new(Primitive::decode(&text)))
+                let primitive = |def| match sess.annotation(def, AnnotationKind::Primitive)? {
+                    Annotation::Primitive(primitive) => Some(Rc::new(primitive)),
+                    _ => None,
+                };
+                primitive(sess.trait_item_of(def).unwrap_or(def)).or_else(|| primitive(def))
             })
             .clone()
     })

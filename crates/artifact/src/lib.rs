@@ -1,5 +1,6 @@
 //! Kernel artifact format shared by the gpurs compiler and runtime.
 
+mod annotation;
 mod configuration;
 mod fragment;
 mod image;
@@ -7,6 +8,7 @@ mod kernel;
 mod primitive;
 mod target;
 
+pub use annotation::{Annotation, AnnotationKind};
 pub use configuration::{
     BuildConfiguration, CONFIGURATION, CONFIGURATION_VARIABLE, DEVICE_FLAGS, Libraries, Reference,
     Stage, Strictness,

@@ -1,4 +1,4 @@
-use gpurs_artifact::{Lowering, Memory, Primitive, Proof};
+use gpurs_artifact::{Annotation, Lowering, Memory, Primitive, Proof};
 use proc_macro2::TokenStream as Tokens;
 use quote::quote;
 use serde_json::{Map, Value};
@@ -10,7 +10,7 @@ use syn::{
     spanned::Spanned,
 };
 
-use crate::launcher;
+use crate::{compilation, launcher};
 
 pub(crate) fn expand(attribute: Tokens, item: Tokens) -> Result<Tokens> {
     declaration(attribute, item, false)
@@ -93,14 +93,17 @@ fn declaration(attribute: Tokens, item: Tokens, extension: bool) -> Result<Token
             })
         }
     };
-    let encoded = primitive.encode();
-    let documentation = format!("<!-- gpurs::primitive={encoded} -->");
-    let attribute = if extension && launcher::device_build() {
-        quote!(#[gpurs_tool::unsafe_primitive = #encoded])
-    } else if extension {
-        quote!(#[cfg_attr(gpurs_device, gpurs_tool::unsafe_primitive = #encoded)])
+    let annotation = if extension {
+        Annotation::UnsafePrimitive(primitive)
     } else {
-        quote!(#[cfg_attr(gpurs_device, gpurs_tool::primitive = #encoded)])
+        Annotation::Primitive(primitive)
+    };
+    let documentation = annotation.documentation();
+    let meta = compilation::tool_meta(&annotation);
+    let attribute = if extension && launcher::device_build() {
+        quote!(#[#meta])
+    } else {
+        quote!(#[cfg_attr(gpurs_device, #meta)])
     };
     Ok(quote! {
         #(#attributes)*
