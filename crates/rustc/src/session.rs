@@ -27,7 +27,7 @@ use rustc_middle::{
     ty::{
         self, GenericArgKind, TyCtxt, TypingEnv,
         layout::ValidityRequirement,
-        print::{with_crate_prefix, with_no_trimmed_paths},
+        print::{CratePrefixGuard, NoTrimmedGuard},
     },
 };
 use rustc_public::{
@@ -462,7 +462,9 @@ impl<'tcx> Session<'tcx> {
             return None;
         }
         let (parent, own) = args.split_at(tcx.generics_of(item).parent_count);
-        with_no_trimmed_paths!(with_crate_prefix!({
+        let _trimmed_guard = NoTrimmedGuard::new();
+        let _prefix_guard = CratePrefixGuard::new();
+        {
             let qualified = match tcx.trait_of_assoc(item) {
                 Some(trait_def) => {
                     ty::TraitRef::new(tcx, trait_def, parent.iter().copied()).to_string()
@@ -488,7 +490,7 @@ impl<'tcx> Session<'tcx> {
                 "let _ = {qualified}::{}{arguments};",
                 tcx.item_name(item)
             ))
-        }))
+        }
     }
 
     pub fn is(&self, def: DefId, expected: &str) -> bool {
