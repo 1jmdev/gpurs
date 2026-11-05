@@ -6,10 +6,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
-[package.metadata.rust-analyzer]
-rustc_private = true
-
 [dependencies]
 bitflags.workspace = true
 gpurs-artifact.workspace = true
-gpurs-rustc.workspace = true
+rustc-hash.workspace = true

@@ -7,10 +7,11 @@
 
 use std::collections::hash_map::Entry;
 
-use gpurs_rustc::{FxHashMap, FxHashSet, Graph};
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
     Access, Block, Conversion, Function, Type, Value,
+    dominators::Dominators,
     instruction::{Callee, Instruction, Terminator},
     value::Kind,
 };
@@ -22,24 +23,22 @@ impl Function {
         if types.is_empty() {
             return;
         }
-        let graph = Graph::new(
-            0,
-            (0..self.blocks.len())
-                .map(|block| self.successors(block))
-                .collect(),
-        );
-        let order = graph.reverse_postorder();
-        let dominators = graph.dominators();
-        let frontiers = graph.frontiers(&dominators);
-
+        let successors: Vec<_> = (0..self.blocks.len())
+            .map(|block| self.successors(block))
+            .collect();
         let mut predecessors = vec![Vec::new(); self.blocks.len()];
+        for (block, targets) in successors.iter().enumerate() {
+            for &target in targets {
+                predecessors[target].push(block);
+            }
+        }
+        let dominators = Dominators::new(&successors, &predecessors);
+        let frontiers = dominators.frontiers(&predecessors);
+
         let mut definitions = vec![FxHashSet::default(); self.blocks.len()];
         let mut live = vec![FxHashSet::default(); self.blocks.len()];
         let mut stores: FxHashMap<u32, Vec<usize>> = FxHashMap::default();
         for block in 0..self.blocks.len() {
-            for successor in self.successors(block) {
-                predecessors[successor].push(block);
-            }
             for (_, instruction) in &self.blocks[block].instructions {
                 match instruction {
                     Instruction::Load(pointer, ..) => {
@@ -93,7 +92,7 @@ impl Function {
 
         let mut replacements: FxHashMap<u32, Value> = FxHashMap::default();
         let mut exits: FxHashMap<usize, FxHashMap<u32, Value>> = FxHashMap::default();
-        for &block in &order {
+        for &block in &dominators.order {
             let mut current = dominators
                 .immediate_dominator(block)
                 .and_then(|dominator| exits.get(&dominator))
@@ -286,7 +285,7 @@ impl Function {
                         promoted(pointer)
                     }
                     _ => {
-                        return !lifetime(instruction).and_then(promoted).is_some();
+                        return lifetime(instruction).and_then(promoted).is_none();
                     }
                 };
                 let Some(slot) = slot else {

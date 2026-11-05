@@ -136,7 +136,7 @@ version = "0.1.0"
 dependencies = [
  "bitflags",
  "gpurs-artifact",
- "gpurs-rustc",
+ "rustc-hash",
 ]
 
 [[package]]
