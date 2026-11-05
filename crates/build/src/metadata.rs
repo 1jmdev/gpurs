@@ -4,10 +4,10 @@ use std::{
     path::PathBuf,
 };
 
-use gpurs_artifact::Crate;
+use gpurs_artifact::{self as artifact, Crate};
 use serde::Deserialize;
 
-use crate::{build::Result, wrapper};
+use crate::build::Result;
 
 #[derive(Deserialize)]
 struct Metadata {
@@ -84,7 +84,7 @@ impl Dependency {
 }
 
 pub(crate) fn select() -> Result<Selection> {
-    let output = wrapper::cargo()
+    let output = artifact::cargo()
         .args(["metadata", "--format-version=1"])
         .output()?;
     if !output.status.success() {

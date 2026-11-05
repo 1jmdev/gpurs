@@ -14,4 +14,7 @@ postcard.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
+[build-dependencies]
+gpurs-artifact.workspace = true
+
 [lints]

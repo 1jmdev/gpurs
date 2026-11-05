@@ -1,25 +1,23 @@
 use std::{
     cmp::Reverse,
-    env, fs,
-    path::Path,
-    process,
+    fs, process,
     sync::atomic::{AtomicUsize, Ordering},
     thread,
 };
 
-use gpurs_artifact::{self as artifact, Artifact, Fragment, Kernel, LoweredTarget, Module};
+use gpurs_artifact::{
+    self as artifact, Artifact, Fragment, Kernel, Key, Kind, LoweredTarget, Module, Store,
+};
 use gpurs_nvvm::Toolkit;
 
-use crate::{
-    build::Result,
-    cache::{content_hash, write_atomically},
-};
+use crate::build::Result;
 
 pub(crate) fn link(
     lowered: &[&LoweredTarget],
     compiler: &str,
     architecture: &str,
-    cache: &Path,
+    registers: Option<&str>,
+    store: &Store,
 ) -> Result<Artifact> {
     let mut kernels: Vec<Kernel> = Vec::new();
     let mut fragments = Vec::new();
@@ -49,44 +47,48 @@ pub(crate) fn link(
     let toolkit = Toolkit::discover()?;
     let fingerprint = toolkit.fingerprint()?;
     let compiler = toolkit.compiler()?;
-    let registers = env::var("GPURS_MAX_REGISTERS").unwrap_or_default();
     let mut work: Vec<_> = fragments.iter().enumerate().collect();
     work.sort_by_cached_key(|(_, fragment)| {
         Reverse(
-            fs::metadata(cache.join(format!("{fragment}.fragment")))
+            fs::metadata(store.path(Kind::Fragment, fragment))
                 .unwrap()
                 .len(),
         )
     });
     let next = AtomicUsize::new(0);
     let assemble = |index: usize, fragment: &str| -> Result<Module> {
-        let path = cache.join(format!(
-            "{}.ptx",
-            content_hash(format!("{fingerprint}\n{architecture}\n{fragment}"))
-        ));
-        let ptx = match fs::read_to_string(&path) {
-            Ok(ptx) => ptx,
-            Err(_) => {
-                let fragment = fs::read(cache.join(format!("{fragment}.fragment")))?;
-                let fragment = postcard::from_bytes::<Fragment>(&fragment)?;
-                let ptx = compiler.ptx(&artifact::link([&fragment]), architecture)?;
-                write_atomically(&path, ptx.as_bytes())?;
-                ptx
-            }
-        };
-        let hash = content_hash(format!("{fingerprint}\n{architecture}\n{registers}\n{ptx}"));
-        let path = cache.join(format!("{hash}.cubin"));
-        let cubin = match fs::read(&path) {
-            Ok(cubin) => cubin,
-            Err(_) => {
-                let scratch = cache.join(format!("{hash}.{}.{index}.ptxas", process::id()));
-                fs::create_dir_all(&scratch)?;
-                let cubin = toolkit.assemble(&ptx, architecture, &scratch)?;
-                fs::remove_dir_all(scratch)?;
-                write_atomically(&path, &cubin)?;
-                cubin
-            }
-        };
+        let digest = Key::Ptx {
+            toolkit: &fingerprint,
+            architecture,
+            fragment,
+        }
+        .digest();
+        let ptx = store.get_or_insert(Kind::Ptx, &digest, || -> Result<_> {
+            let fragment = store
+                .get(Kind::Fragment, fragment)
+                .ok_or("missing fragment")?;
+            let fragment = postcard::from_bytes::<Fragment>(&fragment)?;
+            Ok(compiler
+                .ptx(&artifact::link([&fragment]), architecture)?
+                .into_bytes())
+        })?;
+        let ptx = String::from_utf8(ptx)?;
+        let digest = Key::Cubin {
+            toolkit: &fingerprint,
+            architecture,
+            registers,
+            ptx: &ptx,
+        }
+        .digest();
+        let cubin = store.get_or_insert(Kind::Cubin, &digest, || -> Result<_> {
+            let scratch = store
+                .path(Kind::Cubin, &digest)
+                .with_added_extension(format!("{}.{index}.ptxas", process::id()));
+            fs::create_dir_all(&scratch)?;
+            let cubin = toolkit.assemble(&ptx, architecture, registers, &scratch)?;
+            fs::remove_dir_all(scratch)?;
+            Ok(cubin)
+        })?;
         Ok(Module {
             cubin,
             ptx,

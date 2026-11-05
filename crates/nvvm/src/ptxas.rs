@@ -1,4 +1,4 @@
-use std::{env, fs, io, path::Path, process::Command};
+use std::{fs, io, path::Path, process::Command};
 
 use crate::{Toolkit, toolkit::PTXAS};
 
@@ -7,12 +7,18 @@ impl Toolkit {
     ///
     /// # Errors
     /// Returns an error on file operations or a failed ptxas invocation.
-    pub fn assemble(&self, ptx: &str, architecture: &str, directory: &Path) -> io::Result<Vec<u8>> {
+    pub fn assemble(
+        &self,
+        ptx: &str,
+        architecture: &str,
+        registers: Option<&str>,
+        directory: &Path,
+    ) -> io::Result<Vec<u8>> {
         let source = directory.join("kernels.ptx");
         let output = directory.join("kernels.cubin");
         fs::write(&source, ptx)?;
         let mut command = Command::new(self.root.join(PTXAS));
-        if let Ok(registers) = env::var("GPURS_MAX_REGISTERS") {
+        if let Some(registers) = registers {
             command.arg(format!("--maxrregcount={registers}"));
         }
         let result = command

@@ -1,10 +1,6 @@
-use std::{
-    fs,
-    hash::{DefaultHasher, Hash, Hasher},
-    path::PathBuf,
-};
+use std::io;
 
-use gpurs_artifact::{BuildConfiguration, Kernel};
+use gpurs_artifact::{BuildConfiguration, Kernel, Key, Kind, Store};
 use gpurs_codegen::{self as codegen, GeneratedKernel};
 use gpurs_rustc::{FxHashMap, FxHashSet, Instance, Session, call_graph, driver};
 use gpurs_verifier::{self as verifier, Verification, Warning};
@@ -18,37 +14,21 @@ struct Lowered {
     warnings: Vec<Warning>,
 }
 
-pub struct Cache {
-    directory: PathBuf,
-    identity: String,
+pub struct Cache<'a> {
+    store: Store,
+    configuration: &'a BuildConfiguration,
     dependencies: FxHashMap<Instance, (String, Vec<Instance>)>,
 }
 
-impl Cache {
-    pub fn new(configuration: &BuildConfiguration) -> Result<Self, String> {
-        fs::create_dir_all(&configuration.cache).map_err(|error| error.to_string())?;
-        let identity = format!(
-            "{:?}",
-            (
-                &configuration.architectures,
-                configuration.overflow_checks,
-                configuration.strictness,
-                configuration.instrumented,
-                &configuration.compiler,
-            )
-        );
+impl<'a> Cache<'a> {
+    pub fn new(configuration: &'a BuildConfiguration) -> Result<Self, String> {
         Ok(Self {
-            directory: configuration.cache.clone(),
-            identity: format!(
-                "{}\n{}\n{identity}",
-                env!("CARGO_PKG_VERSION"),
-                driver::version()
-            ),
+            store: Store::new(&configuration.cache).map_err(|error| error.to_string())?,
+            configuration,
             dependencies: FxHashMap::default(),
         })
     }
 
-    /// Whether the kernel's lowering is already cached, so no compilation is required.
     pub fn contains(
         &mut self,
         sess: Session<'_>,
@@ -57,8 +37,8 @@ impl Cache {
         key: &str,
         architecture: &str,
     ) -> bool {
-        let (_, input) = self.locate(sess, root, configured, key, architecture);
-        self.entry(input.as_bytes(), "kernel").path.exists()
+        let (_, digest) = self.locate(sess, root, configured, key, architecture);
+        self.store.path(Kind::Kernel, &digest).exists()
     }
 
     pub fn kernel(
@@ -69,24 +49,8 @@ impl Cache {
         key: &str,
         architecture: &str,
     ) -> Result<(Kernel, String, String), String> {
-        let (functions, input) = self.locate(sess, root, configured, key, architecture);
-        let entry = self.entry(input.as_bytes(), "kernel");
-        let fragment = entry
-            .path
-            .file_stem()
-            .unwrap()
-            .to_string_lossy()
-            .into_owned();
-        let lowered = if let Some(lowered) = entry
-            .read()
-            .and_then(|bytes| postcard::from_bytes::<Lowered>(&bytes).ok())
-        {
-            for warning in &lowered.warnings {
-                warning.emit(sess, &functions);
-            }
-            sess.abort_if_errors();
-            lowered
-        } else {
+        let (functions, digest) = self.locate(sess, root, configured, key, architecture);
+        let bytes = self.store.get_or_insert(Kind::Kernel, &digest, || {
             let verification = verifier::kernel(sess, root, configured, key.to_owned());
             sess.abort_if_errors();
             let Verification {
@@ -94,33 +58,31 @@ impl Cache {
                 summary,
                 warnings,
             } = verification.expect("verification without errors produces a plan");
-            for warning in &warnings {
-                warning.emit(sess, &functions);
-            }
-            sess.abort_if_errors();
             let GeneratedKernel {
-                kernel,
-                fragment: generated,
-                ..
+                kernel, fragment, ..
             } = codegen::generate(sess, plan);
             // The fragment precedes its entry, so a cached kernel always has a fragment.
-            Entry {
-                path: entry.path.with_extension("fragment"),
-                prefix: Vec::new(),
-            }
-            .write(&postcard::to_allocvec(&generated).map_err(|error| error.to_string())?)?;
-            let lowered = Lowered {
+            self.store.insert(
+                Kind::Fragment,
+                &digest,
+                &postcard::to_allocvec(&fragment).map_err(io::Error::other)?,
+            )?;
+            postcard::to_allocvec(&Lowered {
                 kernel,
                 summary,
                 warnings,
-            };
-            entry.write(&postcard::to_allocvec(&lowered).map_err(|error| error.to_string())?)?;
-            lowered
-        };
-        Ok((lowered.kernel, fragment, lowered.summary))
+            })
+            .map_err(io::Error::other)
+        });
+        let lowered = postcard::from_bytes::<Lowered>(&bytes.map_err(|error| error.to_string())?)
+            .map_err(|error| error.to_string())?;
+        for warning in &lowered.warnings {
+            warning.emit(sess, &functions);
+        }
+        sess.abort_if_errors();
+        Ok((lowered.kernel, digest, lowered.summary))
     }
 
-    /// The kernel's reachable functions and the description of its MIR and configuration.
     fn locate(
         &mut self,
         sess: Session<'_>,
@@ -152,58 +114,20 @@ impl Cache {
             .map(|instance| self.dependencies[instance].0.as_str())
             .collect::<Vec<_>>();
         fingerprints.sort_unstable();
-        let input = format!(
-            "{}\n{architecture}\n{key}\n{configured}\n{}",
-            self.identity,
-            fingerprints.join("\n")
-        );
-        (functions, input)
-    }
-
-    /// The entry named by a 128-bit hash of `input`, which also names its generated fragment.
-    fn entry(&self, input: &[u8], extension: &str) -> Entry {
-        let [first, second] = [0u8, 1].map(|seed| {
-            let mut hash = DefaultHasher::new();
-            (seed, input).hash(&mut hash);
-            hash.finish()
-        });
-        let mut prefix = (input.len() as u64).to_le_bytes().to_vec();
-        prefix.extend_from_slice(input);
-        Entry {
-            path: self
-                .directory
-                .join(format!("{first:016x}{second:016x}.{extension}")),
-            prefix,
+        let configuration = self.configuration;
+        let digest = Key::Kernel {
+            driver: driver::version(),
+            compiler: &configuration.compiler,
+            architectures: &configuration.architectures,
+            overflow_checks: configuration.overflow_checks,
+            strictness: configuration.strictness,
+            instrumented: configuration.instrumented,
+            architecture,
+            kernel: key,
+            configured,
+            functions: &fingerprints,
         }
-    }
-}
-
-struct Entry {
-    path: PathBuf,
-    prefix: Vec<u8>,
-}
-
-impl Entry {
-    fn read(&self) -> Option<Vec<u8>> {
-        let bytes = fs::read(&self.path).ok()?;
-        let (contents, checksum) = bytes
-            .strip_prefix(self.prefix.as_slice())?
-            .split_last_chunk::<8>()?;
-        let mut hash = DefaultHasher::new();
-        contents.hash(&mut hash);
-        (hash.finish().to_le_bytes() == *checksum).then(|| contents.to_vec())
-    }
-
-    fn write(&self, bytes: &[u8]) -> Result<(), String> {
-        let temporary = self
-            .path
-            .with_added_extension(format!("{}.tmp", std::process::id()));
-        let mut contents = self.prefix.clone();
-        contents.extend_from_slice(bytes);
-        let mut hash = DefaultHasher::new();
-        bytes.hash(&mut hash);
-        contents.extend_from_slice(&hash.finish().to_le_bytes());
-        fs::write(&temporary, contents).map_err(|error| error.to_string())?;
-        fs::rename(temporary, &self.path).map_err(|error| error.to_string())
+        .digest();
+        (functions, digest)
     }
 }

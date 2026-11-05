@@ -1,10 +1,11 @@
 use std::{env, ffi::OsString, path::Path, process::Command};
 
-use gpurs_artifact::{BuildConfiguration, CONFIGURATION, CONFIGURATION_VARIABLE, Stage};
+use gpurs_artifact::{
+    self as artifact, BuildConfiguration, CONFIGURATION, CONFIGURATION_VARIABLE, Stage,
+};
 
 use crate::{
     build::{self, Result},
-    cache,
     metadata::Selection,
     wrapper,
 };
@@ -39,7 +40,7 @@ pub(crate) fn compile(arguments: &[OsString]) -> i32 {
         stage: Stage::Device {
             output: configuration.artifacts.join(format!(
                 "{}-{test}.bin",
-                cache::source_identity(&env::current_dir().unwrap().join(source))
+                artifact::digest(env::current_dir().unwrap().join(source))
             )),
         },
         ..configuration.clone()

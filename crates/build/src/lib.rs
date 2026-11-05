@@ -5,7 +5,6 @@
 //! ```
 
 mod build;
-mod cache;
 mod discovery;
 mod library;
 mod link;

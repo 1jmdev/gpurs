@@ -2,6 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     env,
     path::PathBuf,
+    process::Command,
     sync::LazyLock,
 };
 
@@ -56,7 +57,7 @@ pub enum Stage {
     Shard { architecture: String },
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum Strictness {
     #[default]
     Warn,
@@ -74,4 +75,21 @@ impl BuildConfiguration {
     pub fn encode(&self) -> String {
         serde_json::to_string(self).expect("the configuration serializes")
     }
+}
+
+/// A Cargo command isolated from the variables Cargo sets for the running build.
+pub fn cargo() -> Command {
+    let mut command = Command::new(env::var_os("CARGO").unwrap());
+    for (name, _) in env::vars_os() {
+        let name = name.to_string_lossy();
+        if (name.starts_with("CARGO_") && name != "CARGO_HOME")
+            || name.starts_with("RUSTC")
+            || name.starts_with("RUSTDOC")
+            || name.starts_with("__CARGO")
+            || name == "RUSTFLAGS"
+        {
+            command.env_remove(&*name);
+        }
+    }
+    command
 }

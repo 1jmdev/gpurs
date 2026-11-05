@@ -9,13 +9,13 @@ use std::{
 };
 
 use gpurs_artifact::{
-    BuildConfiguration, CONFIGURATION, CONFIGURATION_VARIABLE, Crate, Libraries, LoweredCrate,
-    Stage, Strictness, Target,
+    self as artifact, BuildConfiguration, CONFIGURATION, CONFIGURATION_VARIABLE, Crate, Key,
+    Libraries, LoweredCrate, Stage, Store, Strictness, Target,
 };
 use gpurs_nvvm::TOOLKIT_ENVIRONMENT;
 
 use crate::{
-    cache, discovery, library, link, metadata,
+    discovery, library, link, metadata,
     wrapper::{self, COMPILER_LIBRARY},
 };
 
@@ -106,7 +106,7 @@ fn build(architectures: &[&str]) -> Result<()> {
     fs::create_dir_all(&artifacts)?;
     let compiler = Path::new(COMPILER_LIBRARY).parent().unwrap();
     let cache = compiler.join("cache");
-    fs::create_dir_all(&cache)?;
+    let store = Store::new(&cache)?;
     let selection = metadata::select()?;
     let mut configuration = BuildConfiguration {
         stage: Stage::LibraryView,
@@ -118,7 +118,7 @@ fn build(architectures: &[&str]) -> Result<()> {
             _ => Strictness::Warn,
         },
         instrumented: env::var("GPURS_INSTRUMENTED").is_ok_and(|value| value == "1"),
-        compiler: cache::content_hash(fs::read(COMPILER_LIBRARY)?),
+        compiler: artifact::digest(fs::read(COMPILER_LIBRARY)?),
         artifacts: artifacts.clone(),
         cache: cache.clone(),
         library_view: selection.library_view.clone(),
@@ -128,11 +128,7 @@ fn build(architectures: &[&str]) -> Result<()> {
     configuration.libraries = library::view(&selection, compiler, &configuration)?;
     configuration.stage = Stage::Discovery;
     discovery::discover(&selection, compiler, &configuration)?;
-    let sources: HashSet<_> = selection
-        .roots
-        .iter()
-        .map(|root| cache::source_identity(root))
-        .collect();
+    let sources: HashSet<_> = selection.roots.iter().map(artifact::digest).collect();
     let mut paths: Vec<_> = fs::read_dir(&artifacts)?
         .map(|entry| Ok(entry?.path()))
         .collect::<Result<_>>()?;
@@ -159,7 +155,14 @@ fn build(architectures: &[&str]) -> Result<()> {
     fs::write(&references_path, serde_json::to_vec(&references)?)?;
     let image = directory.join("gpurs_artifact.bin");
     let identity_path = directory.join("gpurs_artifact.identity");
-    let identity = cache::image_identity(&inputs, architectures);
+    let registers = env::var("GPURS_MAX_REGISTERS").ok();
+    let identity = Key::Image {
+        inputs: &inputs,
+        architectures,
+        toolkit: &TOOLKIT_ENVIRONMENT.map(env::var_os),
+        registers: registers.as_deref(),
+    }
+    .digest();
     if !image.exists() || fs::read_to_string(&identity_path).ok() != Some(identity.clone()) {
         let compiler = crates
             .first()
@@ -174,8 +177,10 @@ fn build(architectures: &[&str]) -> Result<()> {
                         .iter()
                         .map(|lowered| &lowered.targets[index])
                         .collect();
-                    let cache = &cache;
-                    scope.spawn(move || link::link(&lowered, compiler, architecture, cache))
+                    let (store, registers) = (&store, registers.as_deref());
+                    scope.spawn(move || {
+                        link::link(&lowered, compiler, architecture, registers, store)
+                    })
                 })
                 .collect::<Vec<_>>()
                 .into_iter()
