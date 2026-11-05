@@ -6,7 +6,7 @@ use crate::{
     DeviceSlice, Error, Gpu, PinnedBuffer, Result, Stream, Transfer,
     buffer::Buffer,
     gpu::tensor::{Element, hopper::TensorMap},
-    tracking::Allocation,
+    host::tracking::Allocation,
 };
 
 /// A reusable device descriptor retaining its source range until queued reads finish.

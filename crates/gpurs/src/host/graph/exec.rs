@@ -4,15 +4,13 @@ use gpurs_driver::{self as driver, KernelNodeParameters};
 
 use crate::{
     Error, Event, Result, Stream,
-    graph::{Capture, CapturedOperation, Graph, GraphExec, Operation},
-    tracking,
+    host::{
+        graph::{Capture, CapturedOperation, Graph, GraphExec, Operation},
+        tracking,
+    },
 };
 
 impl GraphExec {
-    /// Copies host values into device storage while preserving tracked allocation dependencies.
-    ///
-    /// # Errors
-    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
     pub fn upload(&self, stream: &Stream) -> Result<Event> {
         if !Rc::ptr_eq(&self.graph.0.device, &stream.device) {
             return Err(Error::InvalidOperation(
@@ -34,16 +32,10 @@ impl GraphExec {
         Ok(event)
     }
 
-    /// Exports a borrowed executable handle for inspection. Use `launch` for tracked replay;
-    /// native replay or mutation must uphold all resource and failure-status contracts.
     pub(crate) fn as_raw(&self) -> *mut c_void {
         self.raw.as_raw()
     }
 
-    /// Submits this executable with tracked dependencies and returns its completion event.
-    ///
-    /// # Errors
-    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
     pub fn launch(&self, stream: &Stream) -> Result<Event> {
         if !Rc::ptr_eq(&self.graph.0.device, &stream.device) {
             return Err(Error::InvalidOperation(
@@ -90,10 +82,6 @@ impl GraphExec {
         Ok(event)
     }
 
-    /// Updates retained device state while preserving its tracked allocation dependencies.
-    ///
-    /// # Errors
-    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
     pub fn update(&mut self, graph: &Graph) -> Result<i32> {
         self.try_finish()?;
         if !Rc::ptr_eq(&self.graph.0.device, &graph.0.device) {
@@ -108,13 +96,6 @@ impl GraphExec {
         Ok(result)
     }
 
-    /// Replaces one kernel's verified arguments and geometry without CUDA recapture or waiting.
-    /// `index` counts kernel calls in capture order. Record exactly one call to the same
-    /// kernel entry point; its ordinary launcher rechecks all verifier preconditions.
-    /// Queued replays keep their original arguments, and future replays track new storage.
-    ///
-    /// # Errors
-    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
     pub fn update_kernel(
         &mut self,
         index: usize,
@@ -172,8 +153,7 @@ impl GraphExec {
         }
         let mut parameters = [kernel.arguments.as_mut_ptr().cast()];
         let _context = stream.device.context.try_enter()?;
-        // SAFETY: the ordinary launcher verified this call, resources are retained below,
-        // and the original status pointer still belongs to the captured reset and snapshot.
+        // SAFETY: the call is verified and its resources and status pointer are retained.
         unsafe {
             self.raw.try_set_kernel(
                 self.origin.0.nodes[index],
@@ -209,9 +189,6 @@ impl GraphExec {
         Ok(())
     }
 
-    ///
-    /// # Errors
-    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
     /// # Safety
     /// The node, parameter ABI, resources, effects, and status pointers obey `set_kernel`.
     pub unsafe fn set_kernel(

@@ -12,8 +12,10 @@ use crate::{
     Argument, Buffer, DeviceAddress, DeviceSlice, DeviceSliceMut, Error, ExternalAccess, Gpu,
     Launch, LaunchConfig, PinnedBuffer, Result, Stream, Transfer,
     gpu::Scatter,
-    graph::{CapturedKernel, CapturedOperation},
-    tracking::{self, Access},
+    host::{
+        graph::{CapturedKernel, CapturedOperation},
+        tracking::{self, Access},
+    },
 };
 
 pub struct DeviceScatter<T> {

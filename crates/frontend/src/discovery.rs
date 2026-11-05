@@ -77,7 +77,7 @@ impl HostView {
 
     fn scan(&mut self, sess: Session<'_>, instance: Instance) {
         let def = instance.def.def_id();
-        if sess.is(def, "gpurs::launch::try_verified") {
+        if sess.is(def, "gpurs::host::launch::kernel::try_verified") {
             let arguments = instance.args();
             let Some(ty) = arguments.0.first().and_then(|argument| argument.ty()) else {
                 return;
@@ -119,7 +119,7 @@ impl HostView {
             let Some((callee, callee_args)) = kind.fn_def() else {
                 continue;
             };
-            if !sess.is(callee.def_id(), "gpurs::launch::kernel") {
+            if !sess.is(callee.def_id(), "gpurs::host::launch::kernel::kernel") {
                 continue;
             }
             let Some(generic_types) = callee_args.0.get(1).and_then(|argument| argument.ty())
@@ -149,7 +149,7 @@ impl HostView {
                 .and_then(|argument| argument.ty())
                 .is_some_and(|stream| {
                     matches!(stream.kind(), TyKind::RigidTy(RigidTy::Adt(adt, _))
-                        if sess.is(adt.def_id(), "gpurs::graph::Capture"))
+                        if sess.is(adt.def_id(), "gpurs::host::graph::capture::Capture"))
                 });
             let launch = Launch {
                 key: format!("{module}::{tail}{suffix}"),

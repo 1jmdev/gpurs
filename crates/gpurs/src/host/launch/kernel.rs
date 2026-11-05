@@ -16,13 +16,14 @@ use gpurs_driver as driver;
 use crate::{
     Error, Result,
     buffer::Buffer,
-    device::{Device, KernelKey, LoadedKernel},
-    graph::{CapturedKernel, CapturedOperation},
-    stream::{Launch, LaunchConfig},
-    tracking::{self, Access, Allocation},
+    host::{
+        context::{Device, KernelKey, LoadedKernel},
+        graph::{CapturedKernel, CapturedOperation},
+        stream::{Launch, LaunchConfig},
+        tracking::{self, Access, Allocation},
+    },
 };
 
-/// Arguments of one kernel launch, collected in parameter order.
 pub struct KernelLaunch<'a, S: Launch> {
     pub(crate) stream: &'a S,
     pub(crate) kernel: Rc<LoadedKernel>,
@@ -53,7 +54,6 @@ impl KernelCache {
     }
 }
 
-/// Starts a launch of the kernel `module::tail` instantiated with the generic types `G`.
 #[track_caller]
 pub fn kernel<'a, S: Launch, G>(
     stream: &'a S,
@@ -304,9 +304,7 @@ impl<S: Launch> KernelLaunch<'_, S> {
             stream.raw.submitted.set(stream.raw.submitted.get() + 1);
         }
         stream.retain_statuses(&sources);
-        // SAFETY: the argument block follows the kernel's verified parameter layout, and the
-        // recorded accesses keep every referenced allocation alive until the launch completes.
-        // The certified entry point is launched only after every precondition held.
+        // SAFETY: the arguments follow the verified layout and accesses retain allocations.
         unsafe {
             function
                 .try_launch(
@@ -331,7 +329,6 @@ impl<S: Launch> KernelLaunch<'_, S> {
         Ok(result)
     }
 
-    /// The integer scalar parameter at `parameter`, zero-extended from its size.
     fn scalar(&self, parameter: usize, offset: usize, size: usize) -> u64 {
         let offset = self.kernel.offsets[parameter] as usize + offset;
         (0..size).fold(0, |word, byte| {
@@ -375,7 +372,6 @@ fn reject_aliasing(accesses: &[Access], kernel: &str) -> Result<()> {
     Ok(())
 }
 
-/// Transfer descriptor of `T`, which the gpurs compiler verified for this executable.
 #[inline(never)]
 #[track_caller]
 pub(crate) fn try_verified<T>(device: &Device) -> Result<&TransferType> {

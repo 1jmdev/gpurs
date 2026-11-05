@@ -10,14 +10,15 @@ use gpurs_driver::{self as driver, Event};
 
 use crate::{
     Capture, Result,
-    device::Device,
+    host::{
+        context::Device,
+        tracking::{self, Access, Status},
+    },
     sealed_launch::Sealed,
-    tracking::{self, Access, Status},
 };
 
 type CompletionBatch = (u64, Event, Vec<Rc<Status>>);
 
-/// An ordered queue of GPU work. Launches return without waiting for completion.
 pub struct Stream {
     pub(crate) raw: Rc<driver::Stream>,
     pub(crate) device: Rc<Device>,
@@ -30,22 +31,16 @@ pub struct Stream {
     pub(crate) accesses: RefCell<Vec<Access>>,
 }
 
-/// Explicit grid and block geometry for one launch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LaunchConfig {
     pub grid: [usize; 3],
     pub block: [usize; 3],
-    /// Total dynamic shared memory in bytes, including the compiler-reserved prefix.
-    /// `kernel::shared::dynamic_shared` exposes the remaining launch-time scratch storage.
     pub shared_bytes: usize,
 }
 
-/// A sealed target for kernel submission with inferred or explicit launch geometry.
 pub trait Launch: Sealed {}
 
 impl Stream {
-    /// Exports a borrowed handle. External allocation accesses require `submit_external`;
-    /// the handle must not be destroyed or used after the stream's retained lifetime.
     pub(crate) fn as_raw(&self) -> *mut c_void {
         self.raw.as_raw()
     }
@@ -64,7 +59,6 @@ impl Stream {
         }
     }
 
-    /// A view of this stream that launches with `config` instead of inferred geometry.
     pub fn launch(&self, config: LaunchConfig) -> Capture<'_> {
         Capture {
             stream: self,
@@ -73,10 +67,6 @@ impl Stream {
         }
     }
 
-    /// Waits for submitted work and reports CUDA or instrumented kernel failures.
-    ///
-    /// # Errors
-    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
     pub fn synchronize(&self) -> Result<()> {
         let _context = self.device.context.try_enter()?;
         self.raw.try_synchronize()?;
@@ -179,7 +169,6 @@ impl Sealed for Stream {
 
 impl Drop for Stream {
     fn drop(&mut self) {
-        // Status words must remain reserved until every queued writer completes.
         if self.raw.try_synchronize().is_err() {
             mem::forget(self.launched.take());
             mem::forget(self.completed.take());

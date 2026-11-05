@@ -2,7 +2,7 @@ use std::{mem, ops::Range, rc::Rc, slice};
 
 use crate::{
     Argument, Buffer, DeviceAddress, DeviceScatter, DeviceSlice, DeviceSliceMut, Error, Gpu,
-    PinnedBuffer, Result, Stream, Transfer, buffer::Span, gpu::Strided, tracking::Allocation,
+    PinnedBuffer, Result, Stream, Transfer, buffer::Span, gpu::Strided, host::tracking::Allocation,
 };
 
 /// A retained strided descriptor. Zero strides broadcast; dimensions must be nonempty.

@@ -13,14 +13,15 @@ use gpurs_driver::{self as driver, Context, Function, Module, Ownership};
 use crate::{
     Error, Result,
     buffer::Buffer,
-    launch::{self, ValidatedLaunch},
-    stream::Stream,
-    tracking::{self, Access, Allocation, STATUS_CHUNK, Status, StatusPool},
+    host::{
+        launch::{self, ValidatedLaunch},
+        stream::Stream,
+        tracking::{self, Access, Allocation, STATUS_CHUNK, Status, StatusPool},
+    },
 };
 
 pub(crate) type KernelKey = (&'static str, &'static str, &'static str);
 
-/// Handle to one GPU. Cloning shares the device.
 #[derive(Clone)]
 pub struct Gpu {
     pub(crate) device: Rc<Device>,
@@ -39,12 +40,10 @@ pub(crate) struct Device {
     pub context: Context,
 }
 
-/// One entry point, and the copy of it for a one-dimensional launch.
 pub(crate) struct Entry {
     pub general: Function,
     pub linear: Option<Function>,
     pub status: bool,
-    /// Byte offset of the argument block the entry point receives.
     pub offset: usize,
 }
 
@@ -68,18 +67,10 @@ pub(crate) struct LoadedKernel {
 }
 
 impl Gpu {
-    /// Creates retained device storage and verifies its construction requirements.
-    ///
-    /// # Errors
-    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
     pub fn new(ordinal: usize) -> Result<Self> {
         Self::from_context(Context::try_primary(ordinal)?)
     }
 
-    /// Loads embedded kernels into the supplied CUDA context on this host thread.
-    ///
-    /// # Errors
-    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
     pub fn from_context(context: Context) -> Result<Self> {
         let _context = context.try_enter()?;
         context.try_set_pool_release_threshold(u64::MAX)?;
@@ -107,10 +98,6 @@ impl Gpu {
         })
     }
 
-    /// Launches the instrumented entry point of every kernel instead of the certified one. The
-    /// instrumented entry point carries every runtime check; it exists for kernels whose
-    /// obligations were not all discharged and, in debug builds, for ordinary kernels.
-    /// Asynchronous tensor kernels require certified execution and reject this selection.
     pub fn select_instrumented(&self, enabled: bool) {
         self.device.instrumented.set(enabled);
         self.device.kernels.borrow().values().for_each(|kernel| {
@@ -122,27 +109,15 @@ impl Gpu {
         &self.device.context
     }
 
-    /// Queries the free and total device memory available in this context.
-    ///
-    /// # Errors
-    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
     pub fn memory_info(&self) -> Result<(usize, usize)> {
         Ok(self.device.context.try_memory_info()?)
     }
 
-    /// Waits for outstanding device work before releasing unused pooled allocations.
-    ///
-    /// # Errors
-    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
     pub fn trim_memory(&self) -> Result<()> {
         self.device.context.try_synchronize()?;
         Ok(self.device.context.try_trim_pool(0)?)
     }
 
-    /// Creates an ordered queue with the requested CUDA scheduling priority.
-    ///
-    /// # Errors
-    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
     pub fn stream_with_priority(&self, priority: i32) -> Result<Stream> {
         Ok(Stream::from_driver(
             self.device.clone(),
@@ -150,12 +125,8 @@ impl Gpu {
         ))
     }
 
-    /// Imports an external stream belonging to this context.
-    ///
     /// # Safety
-    /// The handle must belong to this context. Borrowed streams must outlive the returned
-    /// stream and queued uses. Owned streams transfer destruction rights. All external work
-    /// touching tracked storage must follow `Stream::submit_external`'s contract.
+    /// The handle must belong to this context and obey `Stream::submit_external`.
     pub unsafe fn import_stream(&self, raw: *mut c_void, ownership: Ownership) -> Stream {
         let _context = self.device.context.enter();
         Stream::from_driver(self.device.clone(), unsafe {
@@ -163,10 +134,6 @@ impl Gpu {
         })
     }
 
-    /// Creates an ordered submission queue belonging to this device context.
-    ///
-    /// # Errors
-    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
     pub fn stream(&self) -> Result<Stream> {
         Ok(Stream::from_driver(
             self.device.clone(),
@@ -174,10 +141,6 @@ impl Gpu {
         ))
     }
 
-    /// Copies host values into device storage while preserving tracked allocation dependencies.
-    ///
-    /// # Errors
-    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
     pub fn upload<T>(&self, data: &[T]) -> Result<Buffer<T>> {
         launch::try_verified::<T>(&self.device)?;
         self.copy(data)
@@ -193,8 +156,7 @@ impl Gpu {
             &[Access::recovering(&allocation, 0..bytes)],
             &[],
         );
-        // SAFETY: padding may be copied as `MaybeUninit<u8>`; the allocation holds the
-        // bytes, and the borrowed source stays valid until synchronization below.
+        // SAFETY: the allocation holds the bytes and the source lives until synchronization.
         unsafe {
             let source = slice::from_raw_parts(data.as_ptr().cast::<MaybeUninit<u8>>(), bytes);
             driver::try_copy_to_device_async(pointer, source, &self.device.transfer)?;
@@ -205,10 +167,6 @@ impl Gpu {
         Ok(Buffer::new(allocation, data.len()))
     }
 
-    /// Allocates verified elements initialized to their valid all-zero representation.
-    ///
-    /// # Errors
-    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
     pub fn zeros<T>(&self, len: usize) -> Result<Buffer<T>> {
         let _context = self.device.context.try_enter()?;
         let descriptor = launch::try_verified::<T>(&self.device)?;
@@ -238,10 +196,6 @@ impl Gpu {
 
 impl Device {
     #[track_caller]
-    /// Resolves a named entry point while retaining its owning CUDA module.
-    ///
-    /// # Errors
-    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
     pub fn kernel(
         &self,
         module: &'static str,
@@ -327,10 +281,6 @@ impl Device {
         Ok(kernel)
     }
 
-    /// Reserves a status word; the submission resets it on its own stream.
-    ///
-    /// # Errors
-    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
     pub fn status(&self, kernel: &str) -> Result<Rc<Status>> {
         self.statuses.trim();
         if self.statuses.free.borrow().is_empty() {

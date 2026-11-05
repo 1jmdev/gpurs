@@ -12,11 +12,12 @@ use gpurs_driver as driver;
 use super::sealed::Sealed;
 use crate::{
     BitPattern, Error, Gpu, Result,
-    stream::Stream,
-    tracking::{self, Access, Allocation},
+    host::{
+        stream::Stream,
+        tracking::{self, Access, Allocation},
+    },
 };
 
-/// GPU-resident elements owned by the host. Storage outlives queued work after a drop.
 pub struct Buffer<T> {
     pub(crate) allocation: Rc<Allocation>,
     len: usize,
@@ -24,19 +25,16 @@ pub struct Buffer<T> {
     marker: PhantomData<T>,
 }
 
-/// Shared view of a buffer range, usable as a `&[T]` kernel argument.
 pub struct View<'a, T> {
     span: Span<'a>,
     marker: PhantomData<&'a [T]>,
 }
 
-/// Exclusive view of a buffer range, usable as a `&mut [T]` kernel argument.
 pub struct ViewMut<'a, T> {
     span: Span<'a>,
     marker: PhantomData<&'a mut [T]>,
 }
 
-/// A single GPU-resident value; annotated methods of `T` launch directly on it.
 pub struct DeviceValue<T> {
     pub(crate) buffer: Buffer<T>,
 }
@@ -49,12 +47,7 @@ pub struct Span<'a> {
     pub(crate) len: usize,
 }
 
-/// GPU data accepted where a kernel takes `&[T]`.
 pub trait DeviceSlice<T>: Sealed<T> {
-    /// Copies this range to the host after its producing operations finish.
-    ///
-    /// # Errors
-    /// Returns transfer failures or failures inherited from kernels writing this range.
     fn download(&self) -> Result<Vec<T>> {
         download(self.span())
     }
@@ -68,12 +61,7 @@ pub trait DeviceSlice<T>: Sealed<T> {
     }
 }
 
-/// GPU data accepted where a kernel takes `&mut [T]`.
 pub trait DeviceSliceMut<T>: DeviceSlice<T> {
-    /// Overwrites this range, recovering contents invalidated by failed kernels.
-    ///
-    /// # Errors
-    /// Returns context, submission, or dependency failures.
     fn fill(&mut self, stream: &Stream, value: T) -> Result<()>
     where
         T: Copy,
@@ -146,10 +134,6 @@ impl<T> Buffer<T> {
 }
 
 impl<T> DeviceValue<T> {
-    /// Copies one verified host value into retained device storage.
-    ///
-    /// # Errors
-    /// Returns transfer-type verification, allocation, or CUDA copy failures.
     pub fn new(stream: &Stream, value: &T) -> Result<Self> {
         Ok(Self {
             buffer: Gpu {
@@ -159,10 +143,6 @@ impl<T> DeviceValue<T> {
         })
     }
 
-    /// Waits for producing operations before returning the single retained device value.
-    ///
-    /// # Errors
-    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
     pub fn read(&self) -> Result<T> {
         Ok(self
             .buffer
@@ -210,8 +190,7 @@ fn download<T>(span: Span<'_>) -> Result<Vec<T>> {
     let range = span.bytes::<T>();
     let sources = tracking::try_order(stream, &[Access::read(span.allocation, range.clone())])?;
     let mut host = Vec::<T>::with_capacity(span.len);
-    // SAFETY: the spare capacity holds `range.len()` bytes and stays untouched until the
-    // stream is synchronized below; the source range lies inside the allocation.
+    // SAFETY: the spare capacity holds the range and is untouched until synchronization.
     unsafe {
         let destination =
             slice::from_raw_parts_mut(host.as_mut_ptr().cast::<MaybeUninit<u8>>(), range.len());
@@ -315,10 +294,6 @@ impl<T: BitPattern> Clone for Buffer<T> {
 }
 
 impl<T: BitPattern> Buffer<T> {
-    /// Shares this allocation through a checked element representation without copying bytes.
-    ///
-    /// # Errors
-    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
     pub fn cast<U: BitPattern>(&self) -> Result<Buffer<U>> {
         self.try_cast_range(0..self.len() * mem::size_of::<T>())
     }

@@ -1,9 +1,4 @@
 //! Region-based dependency tracking and launch failure propagation.
-//!
-//! Every allocation keeps records of submitted operations over byte ranges. A new operation
-//! waits for overlapping records when either side writes, and its writes inherit the failure
-//! statuses of the overlapping writes it read, unless it is a full overwrite that recovers the
-//! region. Failures therefore propagate on the host; kernels never inspect other launches.
 
 use std::{
     any::Any,
@@ -17,7 +12,7 @@ use std::{
 
 use gpurs_driver::{self as driver, Context, DevicePointer, Stream};
 
-use crate::{Error, Result, device::Device};
+use crate::{Error, Result, host::context::Device};
 
 pub(crate) struct Allocation {
     pub device: Rc<Device>,
@@ -38,7 +33,6 @@ struct Record {
     statuses: Vec<Rc<Status>>,
 }
 
-/// Device status word of one launch; zero while the launch has not failed.
 pub(crate) struct Status {
     pub pointer: DevicePointer,
     pub chunk: DevicePointer,
@@ -54,7 +48,6 @@ pub(crate) struct Access {
     pub allocation: Rc<Allocation>,
     pub range: Range<usize>,
     pub write: bool,
-    /// A full overwrite that does not depend on, and therefore recovers, previous contents.
     pub recovers: bool,
 }
 
@@ -158,10 +151,6 @@ impl Status {
         })
     }
 
-    /// Updates retained device state while preserving tracked allocation dependencies.
-    ///
-    /// # Errors
-    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
     pub fn failure(&self) -> Result<()> {
         if let Some(error) = &self.error {
             self.reported.set(true);
@@ -214,8 +203,6 @@ pub(crate) fn overlaps(left: &Range<usize>, right: &Range<usize>) -> bool {
     !left.is_empty() && !right.is_empty() && left.start < right.end && right.start < left.end
 }
 
-/// Orders `stream` after conflicting earlier work and returns the failure sources the
-/// operation depends on.
 pub(crate) fn try_order(stream: &Rc<Stream>, accesses: &[Access]) -> Result<Vec<Rc<Status>>> {
     let mut sources: Vec<Rc<Status>> = Vec::new();
     for access in accesses {
@@ -253,15 +240,12 @@ pub(crate) fn try_order(stream: &Rc<Stream>, accesses: &[Access]) -> Result<Vec<
     Ok(sources)
 }
 
-/// Records the operation just submitted to `stream`; its writes carry `statuses`,
-/// the launch's own status and the failure sources it depends on.
 pub(crate) fn complete(stream: &Rc<Stream>, accesses: &[Access], statuses: &[Rc<Status>]) {
     let sequence = stream.submitted.get() + 1;
     stream.submitted.set(sequence);
     for access in accesses {
         let mut records = access.allocation.records.borrow_mut();
         if access.write {
-            // Preserve failure sources only for bytes this write did not replace.
             for index in (0..records.len()).rev() {
                 if !overlaps(&records[index].range, &access.range) {
                     continue;
@@ -316,7 +300,6 @@ pub(crate) fn complete(stream: &Rc<Stream>, accesses: &[Access], statuses: &[Rc<
     }
 }
 
-/// Number of launch status words reserved in each device allocation.
 pub(crate) const STATUS_CHUNK: usize = 1024;
 
 pub(crate) struct StatusPool {

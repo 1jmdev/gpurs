@@ -12,9 +12,11 @@ use gpurs_driver::{self as driver, Function};
 use crate::{
     DeviceSlice, DeviceSliceMut, Error, Event, ExternalAccess, Launch, LaunchConfig, Ownership,
     Result, Stream,
-    device::Device,
+    host::{
+        context::Device,
+        tracking::{self, Access, Status},
+    },
     sealed_launch::Sealed,
-    tracking::{self, Access, Status},
 };
 
 pub struct CapturedKernel {
@@ -48,7 +50,6 @@ impl CapturedOperation {
 
     pub(crate) fn try_submit(&mut self, stream: &driver::Stream) -> driver::Result<()> {
         // SAFETY: constructors retain storage and establish the operation's bounds and ABI.
-        // Callers order accesses before submission or record this operation in a graph.
         unsafe {
             match &mut self.0 {
                 Operation::Kernel(kernel) => {
@@ -95,14 +96,12 @@ impl CapturedOperation {
     }
 }
 
-/// A capture queue for verified kernels writing into existing allocations.
 pub struct Capture<'a> {
     pub(crate) stream: &'a Stream,
     pub(crate) config: Option<LaunchConfig>,
     pub(crate) kernels: Option<&'a RefCell<Vec<CapturedOperation>>>,
 }
 
-/// A reusable CUDA graph retaining device storage, modules, and fixed kernel arguments.
 #[derive(Clone)]
 pub struct Graph(pub(crate) Rc<GraphInner>);
 
@@ -116,7 +115,6 @@ pub(crate) struct GraphInner {
     pub(crate) pending: RefCell<Option<Event>>,
 }
 
-/// An executable graph. Replays order status reuse through stream dependencies.
 pub struct GraphExec {
     pub(crate) raw: driver::GraphExec,
     pub(crate) graph: Graph,
@@ -127,10 +125,6 @@ pub struct GraphExec {
 }
 
 impl Stream {
-    /// Records verified submissions into a graph while retaining their allocation dependencies.
-    ///
-    /// # Errors
-    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
     pub fn capture(&self, record: impl FnOnce(&Capture<'_>) -> Result<()>) -> Result<Graph> {
         let _context = self.device.context.try_enter()?;
         let kernels = RefCell::new(Vec::new());
@@ -176,13 +170,8 @@ impl Stream {
         })))
     }
 
-    /// Captures external CUDA work, retaining declared allocations and additional resources.
-    ///
     /// # Safety
-    /// Obey `submit_external` and CUDA capture restrictions. The closure must not panic or
-    /// call gpurs APIs. All graph resources must be retained by `resources` or `accesses`;
-    /// device addresses and host buffers must remain valid across every replay. External
-    /// kernels must maintain initialization and value validity on every replay.
+    /// Obey `submit_external` and CUDA capture rules; retain every replayed resource.
     pub unsafe fn capture_external(
         &self,
         accesses: Vec<ExternalAccess>,
@@ -207,8 +196,7 @@ impl Stream {
     }
 
     /// # Safety
-    /// The graph must belong to this context and obey `capture_external`'s replay and
-    /// retention contract. Borrowed native graphs must outlive all derived executables.
+    /// The graph must belong to this context and obey `capture_external`.
     pub unsafe fn import_graph(
         &self,
         raw: *mut c_void,
@@ -233,10 +221,6 @@ impl Stream {
 }
 
 impl Capture<'_> {
-    /// Updates retained device state while preserving tracked allocation dependencies.
-    ///
-    /// # Errors
-    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
     pub fn fill(&self, destination: &mut impl DeviceSliceMut<u8>, value: u8) -> Result<()> {
         if self.kernels.is_none() {
             return destination.fill(self.stream, value);
@@ -251,10 +235,6 @@ impl Capture<'_> {
         Ok(())
     }
 
-    /// Copies nonoverlapping device ranges with equal element counts in stream order.
-    ///
-    /// # Errors
-    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
     pub fn copy<T>(
         &self,
         destination: &mut impl DeviceSliceMut<T>,
@@ -311,15 +291,10 @@ impl Sealed for Capture<'_> {
 }
 
 impl Graph {
-    /// Exports a borrowed graph handle. External code must not mutate or destroy it.
     pub(crate) fn as_raw(&self) -> *mut c_void {
         self.0.raw.as_raw()
     }
 
-    /// Creates a reusable executable retaining this graph and its allocation dependencies.
-    ///
-    /// # Errors
-    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
     pub fn instantiate(&self) -> Result<GraphExec> {
         self.0.device.context.try_trim_pool(0)?;
         Ok(GraphExec {
@@ -332,10 +307,6 @@ impl Graph {
         })
     }
 
-    /// Returns the CUDA nodes corresponding to kernels retained by this graph.
-    ///
-    /// # Errors
-    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
     pub fn kernel_nodes(&self) -> Result<Vec<*mut c_void>> {
         Ok(self.0.raw.try_kernel_nodes()?)
     }

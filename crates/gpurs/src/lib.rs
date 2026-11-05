@@ -21,47 +21,42 @@
 #![cfg_attr(gpurs_device, allow(internal_features))]
 
 mod argument;
-mod device;
 mod error;
 pub mod gpu;
-mod graph;
-mod graph_exec;
-mod kernel_argument;
-mod launch;
-mod memory;
+mod host;
 pub mod raw;
-mod stream;
-mod tracking;
 
 pub use argument::{
     Argument, ArgumentMut, DeviceAddress, DeviceDescriptor, DeviceIndexed, DeviceScatter,
     DeviceStrided, DeviceTensorMap,
 };
-pub use device::Gpu;
 pub use error::{Error, Result};
 pub(crate) use gpurs_driver::Ownership;
 pub use gpurs_macros::{BitPattern, gpu, unsafe_primitive};
-pub use graph::{Capture, Graph, GraphExec};
-pub(crate) use memory::buffer;
-pub use memory::{
-    BitPattern, Buffer, DeviceSlice, DeviceSliceMut, DeviceValue, PinnedBuffer, Transfer, View,
-    ViewMut,
+pub(crate) use host::memory::buffer;
+pub use host::{
+    context::Gpu,
+    graph::{Capture, Graph, GraphExec},
+    memory::{
+        BitPattern, Buffer, DeviceSlice, DeviceSliceMut, DeviceValue, PinnedBuffer, Transfer, View,
+        ViewMut,
+    },
+    stream::{Launch, LaunchConfig, Stream},
 };
 pub use raw::interop::Event;
 pub(crate) use raw::interop::ExternalAccess;
-pub use stream::{Launch, LaunchConfig, Stream};
 
 #[doc(hidden)]
 pub mod __private {
     pub use gpurs_macros::{compilation, device};
 
-    pub use crate::launch::{KernelCache, KernelLaunch, kernel};
+    pub use crate::host::launch::{KernelCache, KernelLaunch, kernel};
 }
 
 pub(crate) mod sealed_launch {
     use std::cell::RefCell;
 
-    use crate::{LaunchConfig, Stream, graph::CapturedOperation};
+    use crate::{LaunchConfig, Stream, host::graph::CapturedOperation};
 
     pub trait Sealed {
         fn stream(&self) -> &Stream;

@@ -3,7 +3,8 @@ use std::{ffi::c_void, rc::Rc};
 use gpurs_driver::{self as driver, Function};
 
 use crate::{
-    Error, Event, ExternalAccess, Gpu, LaunchConfig, Result, Stream, device::Device, tracking,
+    Error, Event, ExternalAccess, Gpu, LaunchConfig, Result, Stream,
+    host::{context::Device, tracking},
 };
 
 /// An externally compiled module; final release waits for context work to finish.

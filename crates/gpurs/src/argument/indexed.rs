@@ -2,7 +2,7 @@ use std::{rc::Rc, slice};
 
 use crate::{
     Argument, Buffer, DeviceAddress, DeviceSlice, Error, ExternalAccess, Gpu, Result, Stream,
-    gpu::Indexed, tracking::Access,
+    gpu::Indexed, host::tracking::Access,
 };
 
 pub struct DeviceIndexed<T> {

@@ -4,8 +4,10 @@ use gpurs_driver as driver;
 
 use crate::{
     DeviceSlice, DeviceSliceMut, Error, Result, Stream,
-    device::Device,
-    tracking::{self, Access, Status},
+    host::{
+        context::Device,
+        tracking::{self, Access, Status},
+    },
 };
 
 /// A retained allocation range declared to an external CUDA operation.

@@ -12,19 +12,18 @@ use gpurs_driver::{self as driver, Event};
 
 use crate::{
     Buffer, DeviceSlice, DeviceSliceMut, DeviceValue, Error, Gpu, Result, Stream,
-    device::Device,
-    launch,
-    tracking::{self, Access, Allocation, Status},
+    host::{
+        context::Device,
+        launch,
+        tracking::{self, Access, Allocation, Status},
+    },
 };
 
-/// Uninitialized byte storage shared by typed suballocations and queued work.
-/// Suballocations share dependency tracking, including overlapping byte ranges.
 #[derive(Clone)]
 pub struct DeviceAllocation {
     pub(crate) allocation: Rc<Allocation>,
 }
 
-/// Owned page-locked host storage. Transfers consume it and return it on completion.
 pub struct PinnedBuffer<T> {
     storage: HostStorage,
     pointer: *mut T,
@@ -37,9 +36,6 @@ struct HostStorage {
     device: Rc<Device>,
 }
 
-/// A queued transfer retaining its host storage and all device allocations.
-/// Dropping waits for completion; forgetting leaks the retained storage safely.
-/// `wait` reports inherited kernel failures before exposing downloaded values.
 #[must_use]
 pub struct Transfer<T> {
     data: Option<T>,
@@ -52,15 +48,10 @@ pub struct Transfer<T> {
 }
 
 impl Gpu {
-    /// CUDA device ordinal used by this handle.
     pub fn ordinal(&self) -> usize {
         self.device.context.device() as usize
     }
 
-    /// Reserves device storage with the size and alignment specified by the layout.
-    ///
-    /// # Errors
-    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
     pub fn allocate(&self, layout: Layout) -> Result<DeviceAllocation> {
         let _context = self.device.context.try_enter()?;
         let bytes = layout
@@ -87,15 +78,8 @@ impl Gpu {
         Ok(DeviceAllocation { allocation })
     }
 
-    /// Adopts allocator-owned storage without freeing its address through CUDA.
-    /// The owner is dropped only after all tracked work completes.
-    ///
     /// # Safety
-    /// The address range must belong to this GPU's context and remain allocated
-    /// while `owner` lives. Import each allocation once and derive every alias from this
-    /// handle. External accesses and recycling must be ordered outside gpurs; no external
-    /// access may conflict with tracked work. Previously queued initialization must finish
-    /// before import. The owner must not release storage through other aliases.
+    /// The range belongs to this context, outlives `owner`, and is ordered outside gpurs.
     pub unsafe fn import_allocation(
         &self,
         pointer: u64,
@@ -109,10 +93,6 @@ impl Gpu {
         }
     }
 
-    /// Copies verified host values into owned page-locked storage for queued transfers.
-    ///
-    /// # Errors
-    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
     pub fn pin<T>(&self, data: &[T]) -> Result<PinnedBuffer<T>> {
         launch::try_verified::<T>(&self.device)?;
         self.try_pin_copy(data)
@@ -133,10 +113,6 @@ impl Gpu {
         })
     }
 
-    /// Registers an owned host vector without changing its stable allocation address.
-    ///
-    /// # Errors
-    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
     pub fn register<T: 'static>(&self, mut data: Vec<T>) -> Result<PinnedBuffer<T>> {
         launch::try_verified::<T>(&self.device)?;
         if mem::size_of_val(&*data) == 0 {
@@ -192,7 +168,6 @@ impl DeviceAllocation {
         self.len() == 0
     }
 
-    /// Device address; external use must obey the import and initialization contracts.
     pub fn address(&self) -> u64 {
         self.allocation.pointer
     }
@@ -201,7 +176,6 @@ impl DeviceAllocation {
         self.allocation.device.context.device() as usize
     }
 
-    /// Creates typed uninitialized storage at a byte offset, retaining this allocation.
     pub fn uninit<T>(&self, offset: usize, len: usize) -> Buffer<MaybeUninit<T>> {
         let bytes = Layout::array::<T>(len).expect("GPU suballocation exceeds the size range");
         assert!(
@@ -219,23 +193,14 @@ impl DeviceAllocation {
 }
 
 impl<T> Buffer<MaybeUninit<T>> {
-    /// Reinterprets storage as initialized values without copying or synchronizing.
-    ///
     /// # Safety
-    /// Every element must contain a valid GPU-transferable `T` before any read, including
-    /// a kernel read. Queued initialization must be tracked by this allocation or already
-    /// complete. All aliases must obey Rust reference exclusivity for kernel arguments;
-    /// overlapping suballocations must not give incompatible typed views of live values.
+    /// Every element holds a valid `T` and aliases obey reference exclusivity.
     pub unsafe fn assume_init(self) -> Buffer<T> {
         let mut buffer = Buffer::new(self.allocation.clone(), self.len());
         buffer.offset = self.offset;
         buffer
     }
 
-    /// Initializes a suballocation from verified host values.
-    ///
-    /// # Errors
-    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
     pub fn write(self, stream: &Stream, data: &[T]) -> Result<Buffer<T>> {
         let mut buffer = Buffer::new(self.allocation.clone(), self.len());
         buffer.offset = self.offset;
@@ -245,11 +210,8 @@ impl<T> Buffer<MaybeUninit<T>> {
 }
 
 impl<T> Buffer<T> {
-    /// Reinterprets the complete byte range without copying.
-    ///
     /// # Safety
-    /// All bytes, including source padding, must represent initialized transferable `U`
-    /// values. Aliases must obey the same exclusivity rules as `assume_init`.
+    /// All bytes represent initialized `U` values, with aliases as in `assume_init`.
     pub unsafe fn reinterpret<U>(self) -> Buffer<U> {
         let bytes = self.len() * mem::size_of::<T>();
         assert!(
@@ -266,7 +228,6 @@ impl<T> Buffer<T> {
         }
     }
 
-    /// Uses this one-element allocation as a kernel reference argument.
     pub fn into_value(self) -> DeviceValue<T> {
         assert_eq!(self.len(), 1, "device references require one element");
         DeviceValue { buffer: self }
@@ -304,10 +265,6 @@ impl Drop for HostStorage {
 }
 
 impl<T> Transfer<T> {
-    /// Queries completion without exposing device contents before their dependencies finish.
-    ///
-    /// # Errors
-    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
     pub fn is_complete(&self) -> Result<bool> {
         let _context = self.accesses[0].allocation.device.context.try_enter()?;
         self.event
@@ -317,10 +274,6 @@ impl<T> Transfer<T> {
             .map_err(Error::from)
     }
 
-    /// Retains the completion handle and its storage when observation fails.
-    ///
-    /// # Errors
-    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
     pub fn wait(&mut self) -> Result<T> {
         let _context = self.accesses[0].allocation.device.context.try_enter()?;
         self.finish()?;
@@ -385,10 +338,6 @@ impl Stream {
         Ok(transfer)
     }
 
-    /// Copies equal-length, nonoverlapping device ranges without host staging.
-    ///
-    /// # Errors
-    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
     pub fn copy<T>(
         &self,
         destination: &mut impl DeviceSliceMut<T>,
@@ -431,10 +380,6 @@ impl Stream {
         )
     }
 
-    /// Stages host values in owned pinned storage and enqueues an upload.
-    ///
-    /// # Errors
-    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
     pub fn copy_from_host<T>(
         &self,
         destination: &mut impl DeviceSliceMut<T>,
@@ -455,10 +400,6 @@ impl Stream {
         self.upload(destination, gpu.try_pin_copy(source)?)
     }
 
-    /// Enqueues a direct pinned upload, returning host storage through the completion handle.
-    ///
-    /// # Errors
-    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
     pub fn upload<T>(
         &self,
         destination: &mut impl DeviceSliceMut<T>,
@@ -468,10 +409,6 @@ impl Stream {
         self.upload_range(destination, source, 0..len)
     }
 
-    /// Uploads a host sub-range, retaining the entire pinned buffer until completion.
-    ///
-    /// # Errors
-    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
     pub fn upload_range<T>(
         &self,
         destination: &mut impl DeviceSliceMut<T>,
@@ -505,10 +442,6 @@ impl Stream {
         )
     }
 
-    /// Enqueues a download to new pinned storage without synchronizing the stream.
-    ///
-    /// # Errors
-    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
     pub fn download<T>(&self, source: &impl DeviceSlice<T>) -> Result<Transfer<PinnedBuffer<T>>> {
         let gpu = Gpu {
             device: self.device.clone(),
@@ -524,10 +457,6 @@ impl Stream {
         )
     }
 
-    /// Enqueues a download into existing pinned storage, returning it on completion.
-    ///
-    /// # Errors
-    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
     pub fn download_into<T>(
         &self,
         source: &impl DeviceSlice<T>,
@@ -537,10 +466,6 @@ impl Stream {
         self.download_into_range(source, destination, 0..len)
     }
 
-    /// Downloads into a host sub-range, preserving values outside that range.
-    ///
-    /// # Errors
-    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
     pub fn download_into_range<T>(
         &self,
         source: &impl DeviceSlice<T>,

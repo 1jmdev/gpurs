@@ -9,4 +9,4 @@ pub use handle::AsRaw;
 pub use interop::ExternalAccess;
 pub use module::{Kernel, Module};
 
-pub use crate::memory::DeviceAllocation;
+pub use crate::host::memory::DeviceAllocation;
