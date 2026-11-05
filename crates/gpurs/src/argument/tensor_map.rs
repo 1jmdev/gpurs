@@ -21,7 +21,7 @@ impl<T: Element, const ROWS: usize, const COLUMNS: usize> DeviceTensorMap<T, ROW
     #[track_caller]
     ///
     /// # Errors
-    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
+    /// Returns CUDA failures or invalid operation errors.
     pub fn new(
         stream: &Stream,
         source: &impl DeviceSlice<T>,
@@ -67,7 +67,7 @@ impl<T: Element, const ROWS: usize, const COLUMNS: usize> DeviceTensorMap<T, ROW
     /// Updates dimensions within the retained source range without changing the device address.
     ///
     /// # Errors
-    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
+    /// Returns CUDA failures or invalid operation errors.
     pub fn update(
         &mut self,
         stream: &Stream,

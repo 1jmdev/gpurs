@@ -105,15 +105,16 @@ fn compile_target(
     let mut kernels = Vec::new();
     let mut preconditions = String::new();
     for kernel in program.kernels {
-        let (kernel, fragment, summary) = cache.kernel(
+        if let Some((kernel, fragment, summary)) = cache.kernel(
             sess,
             kernel.instance,
             kernel.configured,
             &kernel.key,
             architecture,
-        )?;
-        preconditions.push_str(&summary);
-        kernels.push((kernel, fragment));
+        )? {
+            preconditions.push_str(&summary);
+            kernels.push((kernel, fragment));
+        }
     }
     sess.abort_if_errors();
     Ok(LoweredTarget {

@@ -5,6 +5,7 @@ use std::{
     rc::Rc,
 };
 
+use fixedbitset::FixedBitSet;
 use gpurs_rustc::{Body, Dominators, FxHashSet, Instance, Span};
 
 use crate::{
@@ -150,24 +151,35 @@ impl IndexMut<usize> for Slots {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Kind {
-    /// A memory-safety check: no certified entry point exists unless it is discharged.
-    Memory,
-    /// A data-dependent arithmetic check the certified entry point records and survives.
-    Arithmetic,
-    /// A panic: no certified entry point exists unless it is unreachable.
-    Panic,
+/// What an obligation checks; diagnostics render it only when its proof fails.
+pub enum Check {
+    Bounds(Option<Polynomial>, Option<Polynomial>),
+    Divisor(Option<Polynomial>),
+    SignedDivision,
+    Assertion(&'static str),
+    Unreachable,
+    Unanalyzed(Instance),
 }
 
 pub struct Obligation {
     pub context: usize,
-    pub block: usize,
-    pub kind: Kind,
+    pub check: Check,
     pub goal: Option<Predicate>,
-    pub description: String,
     pub verdict: Option<Requirement>,
     pub span: Span,
+}
+
+impl Check {
+    /// The reason recorded with the launch preconditions that discharge this check.
+    pub fn reason(&self) -> &'static str {
+        match self {
+            Check::Bounds(..) => "the index is below the length",
+            Check::Divisor(_) => "the divisor is not zero",
+            Check::SignedDivision => "the signed division does not overflow",
+            Check::Assertion(message) => message,
+            Check::Unreachable | Check::Unanalyzed(_) => "this panic is unreachable",
+        }
+    }
 }
 
 pub struct Context {
@@ -180,8 +192,12 @@ pub struct Context {
 pub struct Frame {
     pub body: Rc<Body>,
     pub postdominators: Rc<Dominators<usize>>,
+    pub loop_heads: Rc<FixedBitSet>,
     /// Facts the caller established before entering; a panic is never blamed on them.
     pub inherited: Vec<Fact>,
+    /// The call that entered this frame, and whether its function belongs to the kernel crate.
+    pub call: Span,
+    pub local: bool,
     pub base: usize,
     pub context: usize,
     pub block: usize,

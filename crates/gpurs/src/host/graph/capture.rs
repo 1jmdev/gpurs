@@ -14,7 +14,7 @@ use crate::{
     Result, Stream,
     host::{
         context::Device,
-        tracking::{self, Access, Status},
+        tracking::{self, Access},
     },
     sealed_launch::Sealed,
 };
@@ -24,7 +24,6 @@ pub struct CapturedKernel {
     pub(crate) config: LaunchConfig,
     pub(crate) arguments: Vec<MaybeUninit<u8>>,
     pub(crate) accesses: Vec<Access>,
-    pub(crate) status: Option<Rc<Status>>,
 }
 
 pub struct CapturedOperation(pub(crate) Operation);
@@ -53,9 +52,6 @@ impl CapturedOperation {
         unsafe {
             match &mut self.0 {
                 Operation::Kernel(kernel) => {
-                    if let Some(status) = &kernel.status {
-                        driver::try_fill_async(status.pointer, 0, 4, stream)?;
-                    }
                     kernel.function.try_launch(
                         kernel.config.grid.map(|value| value as u32),
                         kernel.config.block.map(|value| value as u32),
@@ -110,7 +106,6 @@ pub(crate) struct GraphInner {
     pub(crate) raw: driver::Graph,
     pub(crate) device: Rc<Device>,
     pub(crate) accesses: Vec<Access>,
-    pub(crate) statuses: Vec<Rc<Status>>,
     pub(crate) nodes: Vec<*mut c_void>,
     pub(crate) _resources: Box<dyn Any>,
     pub(crate) pending: RefCell<Option<Event>>,
@@ -140,13 +135,6 @@ impl Stream {
             .flat_map(|operation| operation.accesses().iter().cloned())
             .collect();
         tracking::deduplicate(&mut accesses);
-        let statuses = kernels
-            .iter()
-            .filter_map(|operation| match &operation.0 {
-                Operation::Kernel(kernel) => kernel.status.clone(),
-                _ => None,
-            })
-            .collect();
         let stream = driver::Stream::try_new()?;
         let mut nodes = Vec::new();
         let raw = unsafe {
@@ -164,7 +152,6 @@ impl Stream {
             raw,
             device: self.device.clone(),
             accesses,
-            statuses,
             nodes,
             _resources: Box::new(kernels),
             pending: RefCell::default(),
@@ -189,7 +176,6 @@ impl Stream {
             raw,
             device: self.device.clone(),
             accesses,
-            statuses: Vec::new(),
             nodes: Vec::new(),
             _resources: Box::new(resources),
             pending: RefCell::default(),
@@ -213,7 +199,6 @@ impl Stream {
             raw: unsafe { driver::Graph::from_raw(raw, ownership) },
             device: self.device.clone(),
             accesses,
-            statuses: Vec::new(),
             nodes: Vec::new(),
             _resources: Box::new(resources),
             pending: RefCell::default(),
@@ -227,7 +212,7 @@ impl Capture<'_> {
             return destination.fill(self.stream, value);
         }
         let span = destination.span();
-        let access = Access::recovering(span.allocation, span.bytes::<u8>());
+        let access = Access::write(span.allocation, span.bytes::<u8>());
         self.stream.check_external(slice::from_ref(&access))?;
         self.kernels
             .expect("capture queue is present")
@@ -248,7 +233,7 @@ impl Capture<'_> {
         let source = source.span();
         let accesses = [
             Access::read(source.allocation, source.bytes::<T>()),
-            Access::recovering(destination.allocation, destination.bytes::<T>()),
+            Access::write(destination.allocation, destination.bytes::<T>()),
         ];
         if destination.len != source.len
             || (Rc::ptr_eq(source.allocation, destination.allocation)
@@ -318,7 +303,6 @@ impl Drop for GraphInner {
         if self.device.context.try_synchronize().is_err() {
             mem::forget(mem::replace(&mut self._resources, Box::new(())));
             mem::forget(mem::take(&mut self.accesses));
-            mem::forget(mem::take(&mut self.statuses));
         }
     }
 }

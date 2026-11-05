@@ -1,35 +1,14 @@
-use std::collections::{BTreeMap, BTreeSet};
-
-use gpurs_artifact::{self as artifact, Access, Extent, Parameter, Strictness, Value};
+use gpurs_artifact::{self as artifact, Access, Extent, Parameter, Value};
 use gpurs_rustc::{
     CrateDef, Instance, Mutability, RigidTy, Session, Shape, TyKind, layout, session,
 };
 
 use crate::{
-    analysis::{Analysis, Kind, Obligation},
-    diagnostic::{self, Warning},
-    render, support,
+    analysis::{Analysis, Obligation},
+    diagnostic, render, support,
     symbolic::{self, Clause},
     transfer,
 };
-
-/// Which checks of one function copy the verifier discharged, by MIR block.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
-pub struct Certificate {
-    /// Blocks whose assertion or panic cannot fail; their checks are omitted.
-    pub discharged: BTreeSet<usize>,
-    /// Blocks whose data-dependent arithmetic check records the failure and continues.
-    pub recorded: BTreeSet<usize>,
-    /// Certificates of the callees, by call block.
-    pub calls: BTreeMap<usize, Certificate>,
-}
-
-impl Certificate {
-    /// Whether a check of this copy or of a callee reports through the status word.
-    pub fn records(&self) -> bool {
-        !self.recorded.is_empty() || self.calls.values().any(Certificate::records)
-    }
-}
 
 #[derive(Clone)]
 pub struct KernelParameter {
@@ -47,12 +26,6 @@ pub struct KernelPlan {
     pub result: Option<Value>,
     pub requirements: Vec<artifact::Clause>,
     pub preconditions: Vec<artifact::Clause>,
-    /// The checks the certified entry point omits; `None` when it does not exist.
-    pub certificate: Option<Certificate>,
-    /// Whether the certified entry point records arithmetic failures in the status word.
-    pub status: bool,
-    /// Whether the instrumented entry point exists.
-    pub instrumented: bool,
     /// Whether the kernel reads the linear thread index.
     pub uses_index: bool,
     /// Whether the kernel issues asynchronous copies, which must land before the block exits.
@@ -62,20 +35,23 @@ pub struct KernelPlan {
 /// The outcome of verifying one kernel.
 pub struct Verification {
     pub plan: KernelPlan,
-    /// The human-readable account of every obligation and precondition.
+    /// The human-readable account of every launch precondition.
     pub summary: String,
-    /// One warning per residual obligation, emitted on every build of the kernel.
-    pub warnings: Vec<Warning>,
 }
 
-/// Verifies `instance` and plans its entry points. `None` after a reported compile error.
+/// Verifies `instance` and plans its entry point. `None` after a reported compile error.
 pub fn kernel(
     sess: Session<'_>,
     instance: Instance,
     configured: bool,
     key: String,
 ) -> Option<Verification> {
+    let errors = sess.error_count();
+    let span = instance.def.def_id().span();
     let effects = support::check(sess, instance);
+    if sess.error_count() > errors {
+        return None;
+    }
     let signature = layout::signature(sess, instance);
     let mut parameters = Vec::new();
     for (_, shape) in &signature.arguments {
@@ -90,14 +66,10 @@ pub fn kernel(
                     RigidTy::Slice(element) => element,
                     _ => pointee,
                 };
-                let transfer =
-                    if transfer::opaque_descriptor(sess, pointee) && access == Access::Read {
-                        Ok(())
-                    } else {
-                        transfer::check(sess, referent)
-                    };
-                if let Err(message) = transfer {
-                    sess.error(instance.def.def_id().span(), message);
+                if !(transfer::opaque_descriptor(sess, pointee) && access == Access::Read)
+                    && let Err(message) = transfer::check(sess, referent)
+                {
+                    sess.error(span, message);
                     return None;
                 }
                 if matches!(session::rigid(pointee), RigidTy::Slice(_)) {
@@ -108,7 +80,7 @@ pub fn kernel(
             }
             _ => {
                 if let Err(message) = transfer::check(sess, shape.ty) {
-                    sess.error(instance.def.def_id().span(), message);
+                    sess.error(span, message);
                     return None;
                 }
                 Parameter::Value(Value {
@@ -124,7 +96,7 @@ pub fn kernel(
     }
     let result = &signature.result.1;
     if let Err(message) = transfer::check(sess, result.ty) {
-        sess.error(instance.def.def_id().span(), message);
+        sess.error(span, message);
         return None;
     }
     let result =
@@ -139,8 +111,8 @@ pub fn kernel(
     analysis.run();
     if analysis.failure.is_none() {
         analysis.collective_control();
+        analysis.races();
     }
-    let span = instance.def.def_id().span();
     let extent = if result.is_some() || !analysis.findings.uses_index {
         Extent::Single
     } else if !analysis.findings.geometry && analysis.findings.lengths.len() == 1 {
@@ -151,34 +123,23 @@ pub fn kernel(
     if !configured && extent == Extent::Explicit {
         sess.error_help(
             span,
-            "GPU launch dimensions cannot be inferred",
+            format!(
+                "launch dimensions of `{}` cannot be inferred",
+                instance.name()
+            ),
             "launch this kernel with stream.launch(LaunchConfig { grid, block, shared_bytes })",
         );
     }
-    if analysis.failure.is_none() {
-        analysis.races();
-    }
-
     let residual: Vec<&Obligation> = analysis
         .findings
         .obligations
         .iter()
-        .filter(|obligation| obligation.verdict.is_none() && obligation.kind != Kind::Arithmetic)
+        .filter(|obligation| obligation.verdict.is_none())
         .collect();
-    let certified = analysis.failure.is_none() && residual.is_empty();
-    if effects.tensor && !certified {
-        sess.error_help(
-            span,
-            "asynchronous tensor kernels require a complete memory-safety and panic proof",
-            "guard data-dependent accesses or move them to another kernel; a failing thread \
-             cannot skip collective tensor cleanup",
-        );
+    diagnostic::report(&analysis, &residual);
+    if sess.error_count() > errors {
+        return None;
     }
-    let warnings = if !certified && sess.policy.strictness != Strictness::Omit {
-        diagnostic::report(&analysis, &residual)
-    } else {
-        Vec::new()
-    };
     let mut preconditions: Vec<Clause> = Vec::new();
     for clause in analysis
         .findings
@@ -194,7 +155,6 @@ pub fn kernel(
             preconditions.push(clause.clone());
         }
     }
-    let names = &analysis.names;
     let clauses = |clauses: &[Clause]| -> Vec<artifact::Clause> {
         clauses
             .iter()
@@ -204,56 +164,28 @@ pub fn kernel(
                     .iter()
                     .map(symbolic::Predicate::artifact)
                     .collect(),
-                reason: clause.reason.clone(),
-                rendering: render::clause(clause, names),
+                reason: clause.reason.to_owned(),
+                rendering: render::clause(clause, &analysis.names),
             })
             .collect()
     };
-    let certificate = certified.then(|| certify(&analysis, 0));
-    let status = certificate.as_ref().is_some_and(Certificate::records);
-    let summary = diagnostic::summary(&analysis, certified, &preconditions, &residual);
-    let plan = KernelPlan {
-        instance,
-        key,
-        parameters: parameters.clone(),
-        extent,
-        result,
-        requirements: clauses(&analysis.findings.requirements),
-        preconditions: if certified {
-            clauses(&preconditions)
-        } else {
-            Vec::new()
-        },
-        certificate,
-        status,
-        instrumented: !effects.tensor && (!certified || sess.policy.instrumented),
-        uses_index: analysis.findings.uses_index,
-        asynchronous: effects.asynchronous,
-    };
+    let summary = diagnostic::summary(&analysis, &preconditions);
+    let requirements = clauses(&analysis.findings.requirements);
+    let preconditions = clauses(&preconditions);
+    let (uses_index, asynchronous) = (analysis.findings.uses_index, effects.asynchronous);
+    drop(analysis);
     Some(Verification {
-        plan,
+        plan: KernelPlan {
+            instance,
+            key,
+            parameters,
+            extent,
+            result,
+            requirements,
+            preconditions,
+            uses_index,
+            asynchronous,
+        },
         summary,
-        warnings,
     })
-}
-
-/// Which checks of `context` and its callees the certified entry point omits or records.
-fn certify(analysis: &Analysis<'_, '_>, context: usize) -> Certificate {
-    let mut certificate = Certificate::default();
-    for obligation in &analysis.findings.obligations {
-        if obligation.context != context {
-            continue;
-        }
-        if obligation.verdict.is_some() {
-            certificate.discharged.insert(obligation.block);
-        } else if obligation.kind == Kind::Arithmetic {
-            certificate.recorded.insert(obligation.block);
-        }
-    }
-    certificate.calls = analysis.program.contexts[context]
-        .calls
-        .iter()
-        .map(|(block, child)| (*block, certify(analysis, *child)))
-        .collect();
-    certificate
 }

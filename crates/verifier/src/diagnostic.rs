@@ -1,67 +1,23 @@
-use std::collections::BTreeSet;
+use std::fmt::Write;
 
-use gpurs_artifact::Strictness;
-use gpurs_rustc::{CrateDef, Instance, Session};
-use serde::{Deserialize, Serialize};
+use gpurs_rustc::CrateDef;
 
 use super::{
-    analysis::{Analysis, Kind, Obligation},
+    analysis::{Analysis, Check, Obligation},
     render,
     symbolic::Clause,
 };
 
-#[derive(Serialize, Deserialize)]
-pub struct Warning {
-    pub function: String,
-    pub block: Option<usize>,
-    pub statement: Option<usize>,
-    pub message: String,
-    pub notes: Vec<String>,
-}
-
-impl Warning {
-    pub fn emit(&self, sess: Session<'_>, functions: &[Instance]) {
-        let instance = functions
-            .iter()
-            .find(|instance| instance.name() == self.function)
-            .unwrap();
-        let span = self.block.map_or_else(
-            || instance.def.def_id().span(),
-            |block| {
-                let body = instance.body().unwrap();
-                let block = &body.blocks[block];
-                self.statement
-                    .map_or(block.terminator.source_info.span, |statement| {
-                        block.statements[statement].source_info.span
-                    })
-            },
-        );
-        match sess.policy.strictness {
-            Strictness::Error => sess.error_notes(span, self.message.clone(), &self.notes),
-            _ => sess.warning_notes(span, self.message.clone(), &self.notes),
-        }
-    }
-}
-
-/// One diagnostic per obligation that could not be discharged.
-pub(super) fn report(analysis: &Analysis<'_, '_>, residual: &[&Obligation]) -> Vec<Warning> {
+/// Reports the analysis limit, if reached, and every obligation that could not be proven.
+pub(super) fn report(analysis: &Analysis<'_, '_>, residual: &[&Obligation]) {
     let kernel = analysis.kernel.name();
-    let consequence = match analysis.sess.policy.strictness {
-        Strictness::Error => format!("kernel `{kernel}` has no certified entry point"),
-        _ => format!(
-            "kernel `{kernel}` keeps every runtime check; set GPURS_STRICTNESS=omit to silence \
-             this"
-        ),
-    };
-    let mut warnings = Vec::new();
     if let Some(failure) = &analysis.failure {
-        warnings.push(Warning {
-            function: kernel.clone(),
-            block: None,
-            statement: None,
-            message: format!("the safety analysis of `{kernel}` did not converge"),
-            notes: vec![failure.clone(), consequence.clone()],
-        });
+        analysis.sess.error_help_notes(
+            analysis.kernel.def.def_id().span(),
+            format!("the safety analysis of `{kernel}` did not converge"),
+            std::slice::from_ref(failure),
+            "split the kernel into smaller functions or simplify its control flow",
+        );
     }
     for obligation in residual {
         let function = analysis.program.contexts[obligation.context]
@@ -70,46 +26,68 @@ pub(super) fn report(analysis: &Analysis<'_, '_>, residual: &[&Obligation]) -> V
         let mut notes = vec![why(analysis, obligation)];
         if let Some(goal) = &obligation.goal {
             notes.push(format!(
-                "it would hold if `{}` were known before launch",
+                "it holds where `{}`",
                 render::predicate(goal, &analysis.names)
             ));
         }
-        notes.push(consequence.clone());
-        warnings.push(Warning {
-            function: function.clone(),
-            block: Some(obligation.block),
-            statement: analysis.program.contexts[obligation.context]
-                .instance
-                .body()
-                .unwrap()
-                .blocks[obligation.block]
-                .statements
-                .iter()
-                .position(|statement| statement.source_info.span == obligation.span),
-            message: format!(
-                "cannot prove that {} in `{function}`",
-                obligation.description
-            ),
-            notes,
-        });
+        let unknown = obligation
+            .goal
+            .as_ref()
+            .is_some_and(|goal| !goal.polynomial.variables().is_empty());
+        let help = match obligation.check {
+            Check::Bounds(..) if unknown => {
+                "compare the index with the length first, as in `if index < values.len()`, or use \
+                 `values.get(index)`"
+            }
+            Check::Bounds(..) => {
+                "guard the access with a comparison against the length, as in `if index < \
+                 values.len()`"
+            }
+            Check::Divisor(_) | Check::SignedDivision => {
+                "check the divisor first, as in `if divisor != 0`, or use `checked_div`, \
+                 `checked_rem`, or `wrapping_div`"
+            }
+            Check::Assertion(_) | Check::Unreachable => {
+                "handle the failing case explicitly, with `if let`, `match`, or `get` instead of \
+                 `unwrap`, `expect`, or `panic!`"
+            }
+            Check::Unanalyzed(_) => "call a #[gpu] function or a supported GPU operation instead",
+        };
+        analysis.sess.error_help_notes(
+            obligation.span,
+            format!("{} in `{function}`", describe(analysis, &obligation.check)),
+            &notes,
+            help,
+        );
     }
-    warnings
 }
 
-/// Why an obligation was not discharged.
+fn describe(analysis: &Analysis<'_, '_>, check: &Check) -> String {
+    match check {
+        Check::Bounds(Some(index), Some(length)) => format!(
+            "cannot prove that index `{}` is below the length `{}`",
+            analysis.describe(index),
+            analysis.describe(length)
+        ),
+        Check::Bounds(..) => "cannot prove that the index is below the length".to_owned(),
+        Check::Divisor(Some(dividend)) => format!(
+            "cannot prove that the divisor of `{}` is not zero",
+            analysis.describe(dividend)
+        ),
+        Check::Unanalyzed(instance) => {
+            format!("cannot analyze the body of `{}`", instance.name())
+        }
+        check => format!("cannot prove that {}", check.reason()),
+    }
+}
+
 fn why(analysis: &Analysis<'_, '_>, obligation: &Obligation) -> String {
     let Some(goal) = &obligation.goal else {
-        return match obligation.kind {
-            Kind::Panic => "the facts on this path do not exclude the panic, and the condition \
-                            cannot be evaluated before launch"
-                .to_owned(),
-            _ => "the analysis has no symbolic form for the checked values (unsupported operation)"
-                .to_owned(),
-        };
+        return "no condition on this path excludes the failure".to_owned();
     };
-    let variables: BTreeSet<_> = goal.polynomial.variables();
+    let variables = goal.polynomial.variables();
     if variables.is_empty() {
-        return "the facts on this path do not imply it (missing fact)".to_owned();
+        return "no condition on this path implies it".to_owned();
     }
     let unknown = variables
         .iter()
@@ -125,40 +103,15 @@ fn why(analysis: &Analysis<'_, '_>, obligation: &Obligation) -> String {
 }
 
 /// The `*.preconditions` entry of one kernel.
-pub(super) fn summary(
-    analysis: &Analysis<'_, '_>,
-    certified: bool,
-    preconditions: &[Clause],
-    residual: &[&Obligation],
-) -> String {
-    let mut text = format!(
-        "{}: {}\n",
-        analysis.kernel.name(),
-        if certified {
-            "certified"
-        } else {
-            "instrumented"
-        }
-    );
-    if let Some(failure) = &analysis.failure {
-        text.push_str(&format!("  analysis limit: {failure}\n"));
-    }
+pub(super) fn summary(analysis: &Analysis<'_, '_>, preconditions: &[Clause]) -> String {
+    let mut text = format!("{}\n", analysis.kernel.name());
     for clause in preconditions {
-        text.push_str(&format!(
-            "  requires {}  ({})\n",
+        let _ = writeln!(
+            text,
+            "  requires {}  ({})",
             render::clause(clause, &analysis.names),
             clause.reason
-        ));
-    }
-    for obligation in residual {
-        text.push_str(&format!(
-            "  unproven: {} in `{}`; {}\n",
-            obligation.description,
-            analysis.program.contexts[obligation.context]
-                .instance
-                .name(),
-            why(analysis, obligation)
-        ));
+        );
     }
     text
 }

@@ -91,7 +91,7 @@ impl<T> DeviceDescriptor<T> {
     ///
     ///
     /// # Errors
-    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
+    /// Returns CUDA failures or invalid operation errors.
     /// # Safety
     /// Register every reachable allocation, including indirect pointer-table targets, with
     /// its complete range and read/write effect. Addresses must belong to this GPU, respect

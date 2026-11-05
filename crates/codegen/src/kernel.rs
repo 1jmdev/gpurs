@@ -1,8 +1,7 @@
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 use gpurs_artifact::{
-    self as artifact, Entry, Fragment, Kernel, PARAMETERS_OFFSET, RESULT_OFFSET, STATUS_OFFSET,
-    SharedMemory,
+    self as artifact, Entry, Fragment, Kernel, PARAMETERS_OFFSET, RESULT_OFFSET, SharedMemory,
 };
 use gpurs_ir::{Access, Binary, Conversion, Flags, Type, Value as IRValue};
 use gpurs_rustc::{CrateDef, Session, attributes};
@@ -19,12 +18,16 @@ pub struct GeneratedKernel {
 }
 
 /// Lowers a verified kernel and its callees, aborting the session on code generation errors.
-pub fn generate(sess: Session<'_>, plan: KernelPlan) -> GeneratedKernel {
+pub fn generate(sess: Session<'_>, plan: KernelPlan, audit: bool) -> GeneratedKernel {
+    let errors = sess.error_count();
     let mut module = ModuleBuilder::new(sess);
+    module.audit = audit;
     let mut kernel = module.kernel(plan);
     let (fragment, shared) = module.finish();
     kernel.shared = shared;
-    sess.abort_if_errors();
+    if sess.error_count() > errors {
+        sess.abort_if_errors();
+    }
     GeneratedKernel { kernel, fragment }
 }
 
@@ -40,30 +43,13 @@ impl ModuleBuilder<'_> {
             .next()
             .unwrap_or_default();
         let symbol = format!("{SYMBOL}_{function}_{:016x}", hasher.finish());
-        let certified = plan.certificate.clone().map(|certificate| {
-            let root = self.function(plan.instance, Some(certificate.clone()), false);
-            self.entry(&plan, &symbol, root, false, plan.status);
-            let linear = plan.uses_index.then(|| {
-                let symbol = format!("{symbol}_linear");
-                let root = self.function(plan.instance, Some(certificate), true);
-                self.entry(&plan, &symbol, root, true, plan.status);
-                symbol
-            });
-            Entry {
-                symbol: symbol.clone(),
-                linear,
-                status: plan.status,
-            }
-        });
-        let instrumented = plan.instrumented.then(|| {
-            let symbol = format!("{symbol}_instrumented");
-            let root = self.function(plan.instance, None, false);
-            self.entry(&plan, &symbol, root, false, true);
-            Entry {
-                symbol,
-                linear: None,
-                status: true,
-            }
+        let root = self.function(plan.instance, false);
+        self.entry(&plan, &symbol, root, false);
+        let linear = plan.uses_index.then(|| {
+            let symbol = format!("{symbol}_linear");
+            let root = self.function(plan.instance, true);
+            self.entry(&plan, &symbol, root, true);
+            symbol
         });
         Kernel {
             key: plan.key,
@@ -77,15 +63,13 @@ impl ModuleBuilder<'_> {
             result: plan.result,
             requirements: plan.requirements,
             preconditions: plan.preconditions,
-            certified,
-            instrumented,
+            entry: Entry { symbol, linear },
             shared: SharedMemory::default(),
         }
     }
 
     /// Emits the entry point `symbol`, which unpacks the argument block and calls `root`.
-    /// With `status`, every thread publishes the status word pointer for failure reports.
-    fn entry(&mut self, plan: &KernelPlan, symbol: &str, root: String, linear: bool, status: bool) {
+    fn entry(&mut self, plan: &KernelPlan, symbol: &str, root: String, linear: bool) {
         let parameters: Vec<_> = plan
             .parameters
             .iter()
@@ -99,16 +83,12 @@ impl ModuleBuilder<'_> {
             .unwrap_or(8)
             .max(8);
         let signature = self.signature(plan.instance);
-        let argument_offset = if status {
-            0
+        let start = if plan.result.is_some() {
+            RESULT_OFFSET
         } else {
-            let start = if plan.result.is_some() {
-                RESULT_OFFSET
-            } else {
-                PARAMETERS_OFFSET
-            };
-            start / align * align
+            PARAMETERS_OFFSET
         };
+        let argument_offset = start / align * align;
         let size = size - argument_offset;
         let mut function = FunctionBuilder::new(self, plan.instance);
         function.linear = linear;
@@ -120,15 +100,6 @@ impl ModuleBuilder<'_> {
         let arguments = function
             .ir
             .cast(Conversion::BitCast, arguments, Type::byte_pointer());
-        if status {
-            // Every thread stores the same pointer, so each reads a valid one.
-            let pointer = function.offset(arguments.clone(), STATUS_OFFSET);
-            let pointer = function
-                .ir
-                .load(Type::I32.pointer(), pointer, 8, Access::Plain);
-            let slot = function.module.status.clone();
-            function.ir.store(pointer, slot, 8, Access::Plain);
-        }
         let operands: Vec<_> = plan
             .parameters
             .iter()

@@ -1,9 +1,7 @@
-use std::io;
-
 use gpurs_artifact::{BuildConfiguration, Kernel, Key, Kind, Store};
 use gpurs_codegen::{self as codegen, GeneratedKernel};
 use gpurs_rustc::{FxHashMap, FxHashSet, Instance, Session, call_graph, driver};
-use gpurs_verifier::{self as verifier, Verification, Warning};
+use gpurs_verifier::{self as verifier, Verification};
 use serde::{Deserialize, Serialize};
 
 /// A lowered kernel, cached by its MIR, its configuration, and the gpurs version.
@@ -11,7 +9,6 @@ use serde::{Deserialize, Serialize};
 struct Lowered {
     kernel: Kernel,
     summary: String,
-    warnings: Vec<Warning>,
 }
 
 pub struct Cache<'a> {
@@ -37,10 +34,11 @@ impl<'a> Cache<'a> {
         key: &str,
         architecture: &str,
     ) -> bool {
-        let (_, digest) = self.locate(sess, root, configured, key, architecture);
+        let digest = self.locate(sess, root, configured, key, architecture);
         self.store.path(Kind::Kernel, &digest).exists()
     }
 
+    /// The lowered kernel, its fragment digest, and its summary; `None` after a reported error.
     pub fn kernel(
         &mut self,
         sess: Session<'_>,
@@ -48,39 +46,36 @@ impl<'a> Cache<'a> {
         configured: bool,
         key: &str,
         architecture: &str,
-    ) -> Result<(Kernel, String, String), String> {
-        let (functions, digest) = self.locate(sess, root, configured, key, architecture);
-        let bytes = self.store.get_or_insert(Kind::Kernel, &digest, || {
-            let verification = verifier::kernel(sess, root, configured, key.to_owned());
-            sess.abort_if_errors();
-            let Verification {
-                plan,
-                summary,
-                warnings,
-            } = verification.expect("verification without errors produces a plan");
-            let GeneratedKernel {
-                kernel, fragment, ..
-            } = codegen::generate(sess, plan);
-            // The fragment precedes its entry, so a cached kernel always has a fragment.
-            self.store.insert(
-                Kind::Fragment,
-                &digest,
-                &postcard::to_allocvec(&fragment).map_err(io::Error::other)?,
-            )?;
-            postcard::to_allocvec(&Lowered {
-                kernel,
-                summary,
-                warnings,
-            })
-            .map_err(io::Error::other)
-        });
-        let lowered = postcard::from_bytes::<Lowered>(&bytes.map_err(|error| error.to_string())?)
-            .map_err(|error| error.to_string())?;
-        for warning in &lowered.warnings {
-            warning.emit(sess, &functions);
-        }
-        sess.abort_if_errors();
-        Ok((lowered.kernel, digest, lowered.summary))
+    ) -> Result<Option<(Kernel, String, String)>, String> {
+        let digest = self.locate(sess, root, configured, key, architecture);
+        let lowered = match self.store.get(Kind::Kernel, &digest) {
+            Some(bytes) => {
+                postcard::from_bytes::<Lowered>(&bytes).map_err(|error| error.to_string())?
+            }
+            None => {
+                let Some(Verification { plan, summary }) =
+                    verifier::kernel(sess, root, configured, key.to_owned())
+                else {
+                    return Ok(None);
+                };
+                let GeneratedKernel {
+                    kernel, fragment, ..
+                } = codegen::generate(sess, plan, self.configuration.audit);
+                let lowered = Lowered { kernel, summary };
+                // The fragment precedes its entry, so a cached kernel always has a fragment.
+                for (kind, bytes) in [
+                    (Kind::Fragment, postcard::to_allocvec(&fragment)),
+                    (Kind::Kernel, postcard::to_allocvec(&lowered)),
+                ] {
+                    let bytes = bytes.map_err(|error| error.to_string())?;
+                    self.store
+                        .insert(kind, &digest, &bytes)
+                        .map_err(|error| error.to_string())?;
+                }
+                lowered
+            }
+        };
+        Ok(Some((lowered.kernel, digest, lowered.summary)))
     }
 
     fn locate(
@@ -90,7 +85,7 @@ impl<'a> Cache<'a> {
         configured: bool,
         key: &str,
         architecture: &str,
-    ) -> (Vec<Instance>, String) {
+    ) -> String {
         let mut functions = Vec::new();
         let mut pending = vec![root];
         let mut visited = FxHashSet::default();
@@ -115,19 +110,16 @@ impl<'a> Cache<'a> {
             .collect::<Vec<_>>();
         fingerprints.sort_unstable();
         let configuration = self.configuration;
-        let digest = Key::Kernel {
+        Key::Kernel {
             driver: driver::version(),
             compiler: &configuration.compiler,
             architectures: &configuration.architectures,
-            overflow_checks: configuration.overflow_checks,
-            strictness: configuration.strictness,
-            instrumented: configuration.instrumented,
             architecture,
             kernel: key,
             configured,
+            audit: configuration.audit,
             functions: &fingerprints,
         }
-        .digest();
-        (functions, digest)
+        .digest()
     }
 }

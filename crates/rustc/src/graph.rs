@@ -7,7 +7,7 @@ use rustc_data_structures::graph::{
     iterate,
 };
 
-use crate::Body;
+use crate::{Body, TerminatorKind};
 
 /// A control-flow graph over block indices.
 pub struct Graph {
@@ -42,6 +42,40 @@ impl Graph {
                 .map(|block| block.terminator.successors())
                 .collect(),
         )
+    }
+
+    /// Whether every path from each block of `body` ends without returning, as on the way into
+    /// a panic.
+    pub fn diverging(body: &Body) -> Vec<bool> {
+        let graph = Graph::of(body);
+        let mut diverging: Vec<bool> = body
+            .blocks
+            .iter()
+            .map(|block| {
+                matches!(
+                    block.terminator.kind,
+                    TerminatorKind::Call { target: None, .. }
+                        | TerminatorKind::Unreachable
+                        | TerminatorKind::Abort
+                        | TerminatorKind::Resume
+                )
+            })
+            .collect();
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for block in 0..diverging.len() {
+                let successors = &graph.successors[block];
+                if !diverging[block]
+                    && !successors.is_empty()
+                    && successors.iter().all(|&successor| diverging[successor])
+                {
+                    diverging[block] = true;
+                    changed = true;
+                }
+            }
+        }
+        diverging
     }
 
     pub fn predecessors(&self, block: usize) -> &[usize] {

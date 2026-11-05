@@ -28,17 +28,16 @@ impl Proof {
         }
     }
 
-    pub fn materialize(&self, reason: impl FnOnce() -> String) -> Requirement {
+    pub fn materialize(&self, reason: &'static str) -> Requirement {
         if self.pending.is_empty() {
             return self.fixed.clone();
         }
-        let reason = reason();
         self.fixed
             .iter()
             .cloned()
             .chain(self.pending.iter().map(|options| Clause {
                 options: options.clone(),
-                reason: reason.clone(),
+                reason,
             }))
             .collect()
     }

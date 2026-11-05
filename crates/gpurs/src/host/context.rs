@@ -1,5 +1,5 @@
 use std::{
-    cell::{Cell, OnceCell, RefCell},
+    cell::{OnceCell, RefCell},
     collections::HashMap,
     ffi::c_void,
     mem::{self, MaybeUninit},
@@ -16,7 +16,7 @@ use crate::{
     host::{
         launch::{self, ValidatedLaunch},
         stream::Stream,
-        tracking::{self, Access, Allocation, STATUS_CHUNK, Status, StatusPool},
+        tracking::{self, Access, Allocation},
     },
 };
 
@@ -34,16 +34,13 @@ pub(crate) struct Device {
     pub release: Rc<driver::Stream>,
     pub artifact: Artifact,
     modules: Vec<OnceCell<Module>>,
-    pub instrumented: Cell<bool>,
     kernels: RefCell<HashMap<KernelKey, Rc<LoadedKernel>>>,
-    pub statuses: Rc<StatusPool>,
     pub context: Context,
 }
 
 pub(crate) struct Entry {
     pub general: Function,
     pub linear: Option<Function>,
-    pub status: bool,
     pub offset: usize,
 }
 
@@ -57,8 +54,7 @@ impl Entry {
 }
 
 pub(crate) struct LoadedKernel {
-    pub certified: Option<Entry>,
-    pub instrumented: Option<Entry>,
+    pub entry: Entry,
     pub offsets: Vec<u64>,
     pub size: usize,
     pub validated: RefCell<Option<ValidatedLaunch>>,
@@ -75,34 +71,19 @@ impl Gpu {
         let _context = context.try_enter()?;
         context.try_set_pool_release_threshold(u64::MAX)?;
         let artifact = embedded_artifact(context.try_compute_capability()?)?;
-        let release = Rc::new(driver::Stream::try_with_context(&context, 0)?);
         let device = Device {
             scatter_validation: OnceCell::new(),
             transfer: Rc::new(driver::Stream::try_with_context(&context, 0)?),
             download: Rc::new(driver::Stream::try_with_context(&context, 0)?),
-            release: release.clone(),
+            release: Rc::new(driver::Stream::try_with_context(&context, 0)?),
             modules: artifact.modules.iter().map(|_| OnceCell::new()).collect(),
-            instrumented: Cell::new(false),
             artifact,
             kernels: RefCell::default(),
-            statuses: Rc::new(StatusPool {
-                chunks: RefCell::default(),
-                free: RefCell::default(),
-                release,
-                context: context.clone(),
-            }),
             context: context.clone(),
         };
         Ok(Gpu {
             device: Rc::new(device),
         })
-    }
-
-    pub fn select_instrumented(&self, enabled: bool) {
-        self.device.instrumented.set(enabled);
-        self.device.kernels.borrow().values().for_each(|kernel| {
-            kernel.validated.take();
-        });
     }
 
     pub fn context(&self) -> &Context {
@@ -153,16 +134,15 @@ impl Gpu {
         let allocation = Rc::new(Allocation::new(self.device.clone(), pointer, bytes));
         tracking::complete(
             &self.device.transfer,
-            &[Access::recovering(&allocation, 0..bytes)],
-            &[],
+            &[Access::write(&allocation, 0..bytes)],
         );
         // SAFETY: the allocation holds the bytes and the source lives until synchronization.
         unsafe {
             let source = slice::from_raw_parts(data.as_ptr().cast::<MaybeUninit<u8>>(), bytes);
             driver::try_copy_to_device_async(pointer, source, &self.device.transfer)?;
         }
-        let access = Access::recovering(&allocation, 0..bytes);
-        tracking::complete(&self.device.transfer, &[access], &[]);
+        let access = Access::write(&allocation, 0..bytes);
+        tracking::complete(&self.device.transfer, &[access]);
         self.device.transfer.try_synchronize()?;
         Ok(Buffer::new(allocation, data.len()))
     }
@@ -183,13 +163,12 @@ impl Gpu {
         let allocation = Rc::new(Allocation::new(self.device.clone(), pointer, bytes));
         tracking::complete(
             &self.device.transfer,
-            &[Access::recovering(&allocation, 0..bytes)],
-            &[],
+            &[Access::write(&allocation, 0..bytes)],
         );
         // SAFETY: the allocation holds `bytes` bytes.
         unsafe { driver::try_fill_async(pointer, 0, bytes, &self.device.transfer)? };
-        let access = Access::recovering(&allocation, 0..bytes);
-        tracking::complete(&self.device.transfer, &[access], &[]);
+        let access = Access::write(&allocation, 0..bytes);
+        tracking::complete(&self.device.transfer, &[access]);
         Ok(Buffer::new(allocation, len))
     }
 }
@@ -249,28 +228,19 @@ impl Device {
         };
         let shared_bytes = u32::try_from(metadata.shared.dynamic_bytes)
             .expect("kernel shared memory exceeds CUDA's size range");
-        let load = |entry: &gpurs_artifact::Entry| {
-            let function = |symbol: &str| {
-                let function = module.try_function(symbol)?;
-                if shared_bytes > 0 {
-                    function.try_reserve_shared(shared_bytes)?;
-                }
-                Ok::<_, Error>(function)
-            };
-            Ok::<_, Error>(Entry {
-                general: function(&entry.symbol)?,
-                linear: entry.linear.as_deref().map(function).transpose()?,
-                status: entry.status,
-                offset: if entry.status {
-                    0
-                } else {
-                    (start / align * align) as usize
-                },
-            })
+        let function = |symbol: &str| {
+            let function = module.try_function(symbol)?;
+            if shared_bytes > 0 {
+                function.try_reserve_shared(shared_bytes)?;
+            }
+            Ok::<_, Error>(function)
         };
         let kernel = Rc::new(LoadedKernel {
-            certified: metadata.certified.as_ref().map(load).transpose()?,
-            instrumented: metadata.instrumented.as_ref().map(load).transpose()?,
+            entry: Entry {
+                general: function(&metadata.entry.symbol)?,
+                linear: metadata.entry.linear.as_deref().map(function).transpose()?,
+                offset: (start / align * align) as usize,
+            },
             offsets,
             size: size as usize,
             validated: RefCell::default(),
@@ -279,34 +249,6 @@ impl Device {
         });
         self.kernels.borrow_mut().insert(identity, kernel.clone());
         Ok(kernel)
-    }
-
-    pub fn status(&self, kernel: &str) -> Result<Rc<Status>> {
-        self.statuses.trim();
-        if self.statuses.free.borrow().is_empty() {
-            let chunk = driver::try_allocate(STATUS_CHUNK * 4)?;
-            self.statuses.chunks.borrow_mut().push(chunk);
-            self.statuses.free.borrow_mut().extend(
-                (0..STATUS_CHUNK)
-                    .rev()
-                    .map(|index| (chunk + 4 * index as u64, chunk)),
-            );
-        }
-        let (pointer, chunk) = self
-            .statuses
-            .free
-            .borrow_mut()
-            .pop()
-            .expect("status chunk has slots");
-        Ok(Rc::new(Status {
-            pointer,
-            chunk,
-            kernel: kernel.to_owned(),
-            observed: Cell::new(None),
-            reported: Cell::new(false),
-            error: None,
-            pool: Some(self.statuses.clone()),
-        }))
     }
 }
 

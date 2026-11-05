@@ -1,6 +1,6 @@
-use std::{cell::RefCell, ffi::c_void, mem::MaybeUninit, ptr, rc::Rc};
+use std::{cell::RefCell, ffi::c_void, ptr, rc::Rc};
 
-use gpurs_driver::{self as driver, KernelNodeParameters};
+use gpurs_driver::KernelNodeParameters;
 
 use crate::{
     Error, Event, Result, Stream,
@@ -49,31 +49,13 @@ impl GraphExec {
                 stream.raw.try_wait(&event.raw)?;
             }
         }
-        let mut statuses = tracking::try_order(&stream.raw, &self.accesses)?;
-        let snapshots = self
-            .graph
-            .0
-            .statuses
-            .iter()
-            .map(|status| stream.device.status(&status.kernel))
-            .collect::<Result<Vec<_>>>()?;
+        tracking::try_order(&stream.raw, &self.accesses)?;
         unsafe { self.raw.try_launch(&stream.raw)? };
-        for (source, destination) in self.graph.0.statuses.iter().zip(&snapshots) {
-            if let Err(error) = unsafe {
-                driver::try_copy_device_async(destination.pointer, source.pointer, 4, &stream.raw)
-            } {
-                stream.raw.try_synchronize()?;
-                return Err(error.into());
-            }
-        }
-        statuses.extend(snapshots);
-        tracking::complete(&stream.raw, &self.accesses, &statuses);
-        stream.retain_statuses(&statuses);
-        let event = match stream.record_statuses(statuses.clone()) {
+        tracking::complete(&stream.raw, &self.accesses);
+        let event = match stream.record() {
             Ok(event) => event,
             Err(error) => {
                 stream.raw.try_synchronize()?;
-                tracking::read_statuses(&statuses)?;
                 return Err(error);
             }
         };
@@ -147,13 +129,9 @@ impl GraphExec {
                 "graph update must preserve the kernel entry point".to_owned(),
             ));
         }
-        if let Some(status) = &original.status {
-            kernel.arguments[..8]
-                .copy_from_slice(&status.pointer.to_ne_bytes().map(MaybeUninit::new));
-        }
         let mut parameters = [kernel.arguments.as_mut_ptr().cast()];
         let _context = stream.device.context.try_enter()?;
-        // SAFETY: the call is verified and its resources and status pointer are retained.
+        // SAFETY: the call is verified and its resources are retained.
         unsafe {
             self.raw.try_set_kernel(
                 self.origin.0.nodes[index],
@@ -190,7 +168,7 @@ impl GraphExec {
     }
 
     /// # Safety
-    /// The node, parameter ABI, resources, effects, and status pointers obey `set_kernel`.
+    /// The node, parameter ABI, resources, and effects obey `set_kernel`.
     pub unsafe fn set_kernel(
         &mut self,
         node: *mut c_void,
@@ -210,22 +188,12 @@ impl GraphExec {
                     .stream
                     .completed
                     .set(event.stream.completed.get().max(event.sequence));
-                tracking::read_statuses(&event.statuses)?;
             }
         }
-        let mut result = Ok(());
         for pending in [&self.graph.0.pending, &self.pending] {
-            if let Some(event) = pending.take() {
-                result = result.and(
-                    event
-                        .statuses
-                        .iter()
-                        .filter(|status| !status.reported.get())
-                        .try_for_each(|status| status.failure()),
-                );
-            }
+            pending.take();
         }
-        result
+        Ok(())
     }
 }
 

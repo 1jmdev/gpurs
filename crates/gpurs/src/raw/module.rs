@@ -28,7 +28,7 @@ impl Gpu {
     /// Loads a CUDA module from PTX text into this device context.
     ///
     /// # Errors
-    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
+    /// Returns CUDA failures or invalid operation errors.
     pub fn load_ptx(&self, ptx: &str) -> Result<Module> {
         let _context = self.device.context.try_enter()?;
         Ok(Module(Rc::new(ModuleInner {
@@ -39,7 +39,7 @@ impl Gpu {
 
     ///
     /// # Errors
-    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
+    /// Returns CUDA failures or invalid operation errors.
     /// # Safety
     /// `image` must satisfy the complete-module contract of `load_module`.
     pub unsafe fn load_module(&self, image: &[u8]) -> Result<Module> {
@@ -59,7 +59,7 @@ impl Module {
     /// Resolves a named entry point while retaining its owning CUDA module.
     ///
     /// # Errors
-    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
+    /// Returns CUDA failures or invalid operation errors.
     pub fn kernel(&self, name: &str) -> Result<Kernel> {
         Ok(Kernel {
             module: self.clone(),
@@ -82,7 +82,7 @@ impl Kernel {
     /// Sets the requested CUDA function attribute before subsequent kernel submissions.
     ///
     /// # Errors
-    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
+    /// Returns CUDA failures or invalid operation errors.
     pub fn set_attribute(&self, attribute: i32, value: i32) -> Result<()> {
         let _context = self.module.0.device.context.try_enter()?;
         Ok(self.function.try_set_attribute(attribute, value)?)
@@ -103,7 +103,7 @@ impl Kernel {
     /// Requests the preferred shared-memory percentage for subsequent kernel submissions.
     ///
     /// # Errors
-    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
+    /// Returns CUDA failures or invalid operation errors.
     pub fn shared_carveout(&self, percent: i32) -> Result<()> {
         self.set_attribute(9, percent)
     }
@@ -111,7 +111,7 @@ impl Kernel {
     /// Queries resident blocks for the supplied block size and shared-memory requirement.
     ///
     /// # Errors
-    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
+    /// Returns CUDA failures or invalid operation errors.
     pub fn active_blocks(&self, block_size: u32, shared_bytes: usize) -> Result<u32> {
         let _context = self.module.0.device.context.try_enter()?;
         Ok(self.function.try_active_blocks(block_size, shared_bytes)?)
@@ -129,7 +129,7 @@ impl Kernel {
 
     ///
     /// # Errors
-    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
+    /// Returns CUDA failures or invalid operation errors.
     /// # Safety
     /// Parameters, geometry, accesses, and retained resources obey `launch`'s contract.
     pub unsafe fn launch(
@@ -166,7 +166,7 @@ impl Kernel {
         stream.maintain()?;
         let accesses: Vec<_> = accesses.iter().map(|access| access.0.clone()).collect();
         stream.check_external(&accesses)?;
-        let statuses = tracking::try_order(&stream.raw, &accesses)?;
+        tracking::try_order(&stream.raw, &accesses)?;
         unsafe {
             self.function
                 .try_launch_parameters(grid, block, shared, &stream.raw, parameters)
@@ -175,9 +175,8 @@ impl Kernel {
                     source,
                 })?;
         };
-        tracking::complete(&stream.raw, &accesses, &statuses);
-        stream.retain_statuses(&statuses);
-        stream.record_statuses(statuses)
+        tracking::complete(&stream.raw, &accesses);
+        stream.record()
     }
 }
 

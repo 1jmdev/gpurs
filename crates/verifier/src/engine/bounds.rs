@@ -33,25 +33,16 @@ impl Engine<'_> {
             return vec![(polynomial.clone(), Requirement::new())];
         }
         let key = (self.facts.clone(), polynomial.clone(), direction);
-        if let Some((snapshot, result)) = self.cache.bounds.borrow().get(&key)
-            && self.dependencies.valid(snapshot)
-        {
-            self.dependencies.include(snapshot);
+        if let Some(result) = self.cache.bounds.borrow().get(&key) {
             return result.clone();
         }
-        self.dependencies.begin();
-        let epoch = self.dependencies.epoch;
         let facts = self.context(polynomial);
         let result: Vec<_> = self
             .search(polynomial, direction, &facts, |_, _| false)
             .into_iter()
             .map(|(bound, requirement, _)| (bound, requirement))
             .collect();
-        let snapshot = self.dependencies.finish(epoch);
-        self.cache
-            .bounds
-            .borrow_mut()
-            .insert(key, (snapshot, result.clone()));
+        self.cache.bounds.borrow_mut().insert(key, result.clone());
         result
     }
 
@@ -243,7 +234,6 @@ impl Engine<'_> {
                 .and_then(|count| count.offset(-1))
                 .map_or_default(|bound| vec![(bound, none())]),
             (Atom::Variable(variable), direction) => {
-                self.dependencies.touch(*variable);
                 let info = &self.variables[*variable];
                 let bound = match direction {
                     Direction::Lower => Some(&info.lower),

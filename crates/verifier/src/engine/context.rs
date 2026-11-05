@@ -8,20 +8,14 @@ impl Engine<'_> {
     /// axioms of the atoms in `goal`.
     pub(super) fn context(&self, goal: &Polynomial) -> Rc<Vec<(Polynomial, Requirement)>> {
         let key = (self.facts.clone(), goal.clone());
-        if let Some((snapshot, context)) = self.cache.contexts.borrow().get(&key)
-            && self.dependencies.valid(snapshot)
-        {
-            self.dependencies.include(snapshot);
+        if let Some(context) = self.cache.contexts.borrow().get(&key) {
             return context.clone();
         }
-        self.dependencies.begin();
-        let epoch = self.dependencies.epoch;
         let context = Rc::new(self.expand_context(goal));
-        let snapshot = self.dependencies.finish(epoch);
         self.cache
             .contexts
             .borrow_mut()
-            .insert(key, (snapshot, context.clone()));
+            .insert(key, context.clone());
         context
     }
 
@@ -42,7 +36,6 @@ impl Engine<'_> {
         }
         let mut pending: Vec<_> = variables.iter().copied().collect();
         while let Some(variable) = pending.pop() {
-            self.dependencies.touch(variable);
             let info = &self.variables[variable];
             for bound in info.upper.iter().chain([&info.lower]) {
                 for nested in bound.variables() {
@@ -53,7 +46,6 @@ impl Engine<'_> {
             }
         }
         for variable in variables {
-            self.dependencies.touch(variable);
             let info = &self.variables[variable];
             let atom = Polynomial::atom(Atom::Variable(variable));
             if info.lower.value() != Some(0)

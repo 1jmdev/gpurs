@@ -1,72 +1,56 @@
 use std::rc::Rc;
 
 use gpurs_artifact::{Fragment, Lowering, SharedMemory};
-use gpurs_ir::{Access, Ordering, Type, Value as IRValue};
+use gpurs_ir::{Type, Value as IRValue};
 use gpurs_rustc::{
     AllocId, CrateDef, FxHashMap, Instance, Session, Signature, attributes, call_graph, layout,
 };
-use gpurs_verifier::Certificate;
 
 use super::{
     function::FunctionBuilder,
     shared_memory::{CallPath, SharedAllocations},
 };
 
-/// One copy of a function: certified with its certificate, or instrumented; `linear` folds a
-/// one-dimensional launch geometry.
-type Copy = (Instance, Option<Certificate>, bool, CallPath);
+/// One copy of a function; `linear` folds a one-dimensional launch geometry.
+type Copy = (Instance, bool, CallPath);
 
 /// One NVVM IR module holding every device function reachable from the requested kernels.
 pub(crate) struct ModuleBuilder<'sess> {
     pub sess: Session<'sess>,
     pub ir: gpurs_ir::Module,
-    /// The block-shared slot holding the launch's failure status pointer.
-    pub status: IRValue,
     functions: FxHashMap<Copy, String>,
     queue: Vec<Copy>,
     /// Whether a function reaches a block-shared allocation, whose slot depends on the path.
     allocating: FxHashMap<Instance, bool>,
     pub(super) allocations: FxHashMap<AllocId, IRValue>,
     pub shared: SharedAllocations,
+    pub audit: bool,
 }
 
 impl<'sess> ModuleBuilder<'sess> {
     pub fn new(sess: Session<'sess>) -> Self {
         let mut ir = gpurs_ir::Module::default();
         ir.typed_byval = sess.target.capability() >= 100;
-        let status_pointer = Type::I32.pointer();
-        let status = ir.global("gpurs.status", 3, false, IRValue::undef(status_pointer), 8);
         ModuleBuilder {
             sess,
             ir,
-            status,
             functions: FxHashMap::default(),
             queue: Vec::new(),
             allocating: FxHashMap::default(),
             allocations: FxHashMap::default(),
             shared: SharedAllocations::default(),
+            audit: false,
         }
     }
 
     /// Name of the device function for one copy of `instance`, queueing it for lowering on
     /// first use.
-    pub fn function(
-        &mut self,
-        instance: Instance,
-        certificate: Option<Certificate>,
-        linear: bool,
-    ) -> String {
-        self.specialize(instance, certificate, linear, Vec::new())
+    pub fn function(&mut self, instance: Instance, linear: bool) -> String {
+        self.specialize(instance, linear, Vec::new())
     }
 
-    pub fn specialize(
-        &mut self,
-        instance: Instance,
-        certificate: Option<Certificate>,
-        linear: bool,
-        path: CallPath,
-    ) -> String {
-        let copy = (instance, certificate, linear, path);
+    pub fn specialize(&mut self, instance: Instance, linear: bool, path: CallPath) -> String {
+        let copy = (instance, linear, path);
         if let Some(name) = self.functions.get(&copy) {
             return name.clone();
         }
@@ -101,15 +85,12 @@ impl<'sess> ModuleBuilder<'sess> {
     pub fn finish(mut self) -> (Fragment, SharedMemory) {
         while let Some(copy) = self.queue.pop() {
             let name = self.functions[&copy].clone();
-            let (instance, certificate, linear, path) = copy;
+            let (instance, linear, path) = copy;
             let mut builder = FunctionBuilder::new(&mut self, instance);
-            builder.certificate = certificate;
             builder.linear = linear;
             builder.path = path;
             builder.lower(&name);
         }
-        self.ir.define(self.failure("gpurs.fail", true));
-        self.ir.define(self.failure("gpurs.record", false));
         if self.shared.dynamic {
             self.shared.required.dynamic_bytes =
                 self.shared.required.dynamic_bytes.next_multiple_of(16);
@@ -119,38 +100,5 @@ impl<'sess> ModuleBuilder<'sess> {
             self.ir.define(offset);
         }
         (self.ir.fragment(), self.shared.required)
-    }
-
-    /// `gpurs.fail(code)` records the first failure of the launch and stops the thread;
-    /// `gpurs.record(code)` records it and returns.
-    fn failure(&self, name: &str, stop: bool) -> gpurs_ir::Function {
-        let mut function = gpurs_ir::Function::new(name, Type::Void, vec![Type::I32]);
-        function.cold = true;
-        let status = function.load(Type::I32.pointer(), self.status.clone(), 8, Access::Plain);
-        let code = function.parameter(0);
-        function.compare_exchange(
-            status,
-            IRValue::i32(0),
-            code,
-            (Ordering::Monotonic, Ordering::Monotonic),
-            false,
-        );
-        if stop {
-            // A stopping thread may still have asynchronous copies into block-shared memory.
-            if self.sess.target.capability() >= 80 {
-                function.assembly(
-                    "cp.async.wait_all;",
-                    "~{memory}",
-                    true,
-                    Type::Void,
-                    Vec::new(),
-                );
-            }
-            function.assembly("exit;", "", true, Type::Void, Vec::new());
-            function.unreachable();
-        } else {
-            function.ret(None);
-        }
-        function
     }
 }

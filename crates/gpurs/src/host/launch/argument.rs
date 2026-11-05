@@ -81,7 +81,6 @@ impl<S: Launch> KernelLaunch<'_, S> {
             allocation: span.allocation.clone(),
             range: span.bytes::<T>(),
             write: effect,
-            recovers: false,
         });
         Ok(())
     }
@@ -105,7 +104,6 @@ impl<S: Launch> KernelLaunch<'_, S> {
             allocation: value.buffer().allocation.clone(),
             range: value.buffer().offset..value.buffer().offset + size_of::<T>(),
             write: effect,
-            recovers: false,
         });
         if let Some(source) = value.source() {
             self.accesses

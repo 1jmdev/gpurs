@@ -10,7 +10,7 @@ use std::{
 
 use gpurs_artifact::{
     self as artifact, BuildConfiguration, CONFIGURATION, CONFIGURATION_VARIABLE, Crate, Key,
-    Libraries, LoweredCrate, Stage, Store, Strictness, Target,
+    Libraries, LoweredCrate, Stage, Store, Target,
 };
 use gpurs_nvvm::TOOLKIT_ENVIRONMENT;
 
@@ -110,14 +110,8 @@ fn build(architectures: &[&str]) -> Result<()> {
     let mut configuration = BuildConfiguration {
         stage: Stage::LibraryView,
         architectures: architectures.iter().map(|&name| name.to_owned()).collect(),
-        overflow_checks: env::var("PROFILE")? != "release",
-        strictness: match env::var("GPURS_STRICTNESS").as_deref() {
-            Ok("error") => Strictness::Error,
-            Ok("omit") => Strictness::Omit,
-            _ => Strictness::Warn,
-        },
-        instrumented: env::var("GPURS_INSTRUMENTED").is_ok_and(|value| value == "1"),
         compiler: artifact::digest(fs::read(COMPILER_LIBRARY)?),
+        audit: env::var_os("GPURS_AUDIT").is_some(),
         artifacts: artifacts.clone(),
         cache: cache.clone(),
         library_view: selection.library_view.clone(),
@@ -205,11 +199,10 @@ fn build(architectures: &[&str]) -> Result<()> {
     );
     println!("cargo::rustc-env=GPURS_ARTIFACT={}", image.display());
     println!("cargo::rerun-if-changed={COMPILER_LIBRARY}");
-    for name in TOOLKIT_ENVIRONMENT.into_iter().chain([
-        "GPURS_STRICTNESS",
-        "GPURS_INSTRUMENTED",
-        "GPURS_MAX_REGISTERS",
-    ]) {
+    for name in TOOLKIT_ENVIRONMENT
+        .into_iter()
+        .chain(["GPURS_MAX_REGISTERS", "GPURS_AUDIT"])
+    {
         println!("cargo::rerun-if-env-changed={name}");
     }
     Ok(())

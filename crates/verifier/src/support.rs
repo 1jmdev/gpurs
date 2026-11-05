@@ -7,15 +7,15 @@ use gpurs_rustc::{
 #[derive(Default)]
 pub struct Effects {
     pub asynchronous: bool,
-    pub tensor: bool,
 }
 
-/// Rejects unsupported call graphs and determines which asynchronous exit protocols they require.
+/// Rejects unsupported call graphs and determines whether they issue asynchronous copies.
 pub fn check(sess: Session<'_>, root: Instance) -> Effects {
     let mut effects = Effects::default();
     visit(
         sess,
         root,
+        root.def.def_id().span(),
         &mut Vec::new(),
         &mut FxHashSet::default(),
         &mut effects,
@@ -26,13 +26,14 @@ pub fn check(sess: Session<'_>, root: Instance) -> Effects {
 fn visit(
     sess: Session<'_>,
     instance: Instance,
+    span: Span,
     active: &mut Vec<Instance>,
     checked: &mut FxHashSet<Instance>,
     effects: &mut Effects,
 ) {
     if active.contains(&instance) {
         sess.error_help(
-            instance.def.def_id().span(),
+            span,
             format!("recursive GPU call to `{}`", instance.name()),
             "replace the recursive call with a loop; GPU call graphs must be acyclic",
         );
@@ -57,7 +58,8 @@ fn visit(
         return;
     };
     let reachable = Graph::of(body).reachable();
-    for block in (0..body.blocks.len()).filter(|&block| reachable[block]) {
+    let diverging = Graph::diverging(body);
+    for block in (0..body.blocks.len()).filter(|&block| reachable[block] && !diverging[block]) {
         let terminator = &body.blocks[block].terminator;
         match &terminator.kind {
             TerminatorKind::Call {
@@ -108,10 +110,6 @@ fn visit(
                 effects.asynchronous |= primitive.as_ref().is_some_and(|primitive| {
                     matches!(&primitive.lowering, Lowering::Assembly { text, .. } if text.contains("cp.async."))
                 });
-                effects.tensor |= primitive.as_ref().is_some_and(|primitive| {
-                    matches!(&primitive.lowering, Lowering::Assembly { text, .. }
-                        if text.contains("wgmma.") || text.contains("tcgen05."))
-                });
                 if let Some(primitive) = primitive
                     && !sess
                         .target
@@ -133,12 +131,26 @@ fn visit(
                     );
                 }
                 if allowed(sess, callee, terminator.source_info.span) {
-                    visit(sess, callee, active, checked, effects);
+                    visit(
+                        sess,
+                        callee,
+                        terminator.source_info.span,
+                        active,
+                        checked,
+                        effects,
+                    );
                 }
             }
             TerminatorKind::Drop { .. } => {
                 if let Some(&callee) = function.calls.get(&block) {
-                    visit(sess, callee, active, checked, effects);
+                    visit(
+                        sess,
+                        callee,
+                        terminator.source_info.span,
+                        active,
+                        checked,
+                        effects,
+                    );
                 }
             }
             TerminatorKind::InlineAsm { .. } => {

@@ -1,8 +1,6 @@
-//! The value domain: polynomials over the launch basis and opaque per-thread symbols, and the
-//! predicates and requirements built from them.
-//!
-//! Every atom denotes a non-negative integer. Division follows the device semantics of a
-//! certified entry point, where a zero divisor is replaced by one: `x / 0 = x` and `x % 0 = 0`.
+//! Polynomials over launch values and opaque per-thread symbols, each a non-negative integer,
+//! and the predicates and launch requirements built from them. A quotient or remainder by zero
+//! never executes, so `x / 0 = x` and `x % 0 = 0` keep the algebra total.
 
 use std::collections::BTreeSet;
 
@@ -50,7 +48,7 @@ pub struct Predicate {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Clause {
     pub options: BTreeSet<Predicate>,
-    pub reason: String,
+    pub reason: &'static str,
 }
 
 /// A conjunction of clauses.
@@ -174,10 +172,10 @@ impl Fact {
 }
 
 impl Clause {
-    pub fn single(predicate: Predicate, reason: impl Into<String>) -> Self {
+    pub fn single(predicate: Predicate, reason: &'static str) -> Self {
         Clause {
             options: BTreeSet::from([predicate]),
-            reason: reason.into(),
+            reason,
         }
     }
 }

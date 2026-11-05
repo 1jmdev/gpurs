@@ -1,29 +1,22 @@
 //! Safety verification of GPU kernels and of the types transferred to them.
 //!
-//! [`kernel`] verifies one kernel and plans its entry points. A kernel is compiled once with a
-//! set of obligations: every runtime check and panic of the kernel and of each function it
-//! calls, per call path. `analysis` establishes what is true and asks `engine` whether it
-//! entails each obligation. An obligation is either discharged statically, discharged under
-//! launch preconditions that the host evaluates before every launch, or residual. A kernel
-//! whose residual obligations are all data-dependent arithmetic gets a certified entry point
-//! without memory-safety branches; any other residual obligation leaves the kernel with only
-//! its instrumented entry point, as the configured strictness allows. The host re-evaluates every
-//! precondition, so a wrong static bound yields a rejected launch rather than an out-of-bounds
-//! access.
+//! [`kernel`] proves every bounds check, divisor check, and panic of a kernel and of each
+//! function it calls unable to fail, so generated code carries none of them. A proof may rest on
+//! launch preconditions, which the host evaluates before submission; anything else unproven is a
+//! compile error. Integer arithmetic wraps.
 //!
 //! [`transfer`] rejects types that cannot cross the host-device boundary.
 #![feature(rustc_private)]
 
 mod analysis;
 mod diagnostic;
-mod engine;
+pub mod engine;
 mod kernel;
-mod proof;
-mod render;
-mod shared;
+pub mod proof;
+pub mod render;
+pub mod shared;
 mod support;
-mod symbolic;
+pub mod symbolic;
 pub mod transfer;
 
-pub use diagnostic::Warning;
-pub use kernel::{Certificate, KernelParameter, KernelPlan, Verification, kernel};
+pub use kernel::{KernelParameter, KernelPlan, Verification, kernel};

@@ -8,14 +8,13 @@
 //! a context per thread; operations restore the previously current context. Raw CUDA work
 //! must use the explicit external submission protocol to participate in dependency tracking.
 //!
-//! Kernel submissions return [`Result`] without catching panics.
-//! Instrumented kernel failures invalidate dependent contents; a complete overwrite recovers
-//! those regions. CUDA context-fatal failures (illegal addresses, device assertions, launch
-//! timeouts, device loss) require abandoning the context and its allocations. Retrying a
-//! launch cannot repair that context; device loss may require process or device restart.
+//! The compiler proves every kernel free of out-of-bounds accesses, zero divisors, and panics,
+//! so kernels carry no runtime checks; integer arithmetic wraps. CUDA context-fatal failures
+//! (illegal addresses, launch timeouts, device loss) require abandoning the context and its
+//! allocations. Retrying a launch cannot repair that context; device loss may require process
+//! or device restart.
 //! Destructors perform best-effort cleanup and may retain resources when completion fails.
-//! Successful status storage is reused after completion and the last observer is released.
-//! Retained events, graphs, outstanding work, and unobserved failures can retain storage.
+//! Retained events, graphs, and outstanding work can retain storage.
 
 #![cfg_attr(gpurs_device, feature(rustc_attrs))]
 #![cfg_attr(gpurs_device, allow(internal_features))]

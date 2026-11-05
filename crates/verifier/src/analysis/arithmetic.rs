@@ -113,14 +113,9 @@ impl Analysis<'_, '_> {
         } else {
             integer.offset(-limit)?
         };
-        requirement.extend(self.engine(&state.facts).prove_with(
+        requirement.extend(self.engine(&state.facts).prove(
             &Predicate::new(goal, Relation::NonNegative),
-            || {
-                format!(
-                    "the value of `{}` fits its integer type",
-                    self.describe(integer)
-                )
-            },
+            "the value fits its integer type",
         )?);
         Some(requirement)
     }
@@ -197,6 +192,10 @@ impl Analysis<'_, '_> {
             });
         }
         let integer = kind.zip(operands).and_then(|((signed, bits), (a, b))| {
+            // Signed results of per-thread values stay opaque: only their comparisons matter.
+            if signed && !(a.launch() && b.launch()) {
+                return None;
+            }
             let (minimum, maximum) = range((signed, bits));
             let shift = || b.value().filter(|shift| (0..bits as i128).contains(shift));
             let (result, unchecked) = match operation {
@@ -255,11 +254,10 @@ impl Analysis<'_, '_> {
                 goals.push(Polynomial::constant(maximum).add(&result, -1)?);
             }
             for goal in goals {
-                requirement.extend(
-                    engine.prove_with(&Predicate::new(goal, Relation::NonNegative), || {
-                        format!("`{}` does not overflow", self.describe(&result))
-                    })?,
-                );
+                requirement.extend(engine.prove(
+                    &Predicate::new(goal, Relation::NonNegative),
+                    "the integer arithmetic does not wrap",
+                )?);
             }
             Some(result)
         });

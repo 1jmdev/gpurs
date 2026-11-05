@@ -2,7 +2,8 @@ use super::{Direction, Engine};
 use crate::symbolic::{Atom, Polynomial};
 
 impl Engine<'_> {
-    /// Numeric bound of a launch polynomial over the hardware ranges of launch variables.
+    /// Numeric bound of a polynomial over the hardware ranges of launch variables; per-thread
+    /// values bound only from below.
     pub fn numeric(&self, polynomial: &Polynomial, direction: Direction) -> Option<i128> {
         polynomial
             .0
@@ -46,7 +47,10 @@ impl Engine<'_> {
                 let divisor_high = self.numeric(divisor, Direction::Upper)?;
                 (0, high.min((divisor_high - 1).max(0)))
             }
-            _ => return None,
+            Atom::Thread(_) | Atom::Block(_) | Atom::Index | Atom::Variable(_) => match direction {
+                Direction::Lower => (0, 0),
+                Direction::Upper => return None,
+            },
         };
         Some(match direction {
             Direction::Lower => lower,

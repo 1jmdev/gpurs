@@ -12,14 +12,13 @@ mod target;
 pub use annotation::{Annotation, AnnotationKind};
 pub use configuration::{
     BuildConfiguration, CONFIGURATION, CONFIGURATION_VARIABLE, Crate, DEVICE_FLAGS, Libraries,
-    Stage, Strictness, cargo,
+    Stage, cargo,
 };
 pub use fragment::{Fragment, link};
 pub use image::{Artifact, LoweredCrate, LoweredTarget, Module, Reference};
 pub use kernel::{
-    Access, Clause, Entry, Extent, Failure, Kernel, PARAMETERS_OFFSET, Parameter, Polynomial,
-    Predicate, RESULT_OFFSET, Relation, STATUS_OFFSET, SharedMemory, TransferType, Value, Variable,
-    parameter_offsets,
+    Access, Clause, Entry, Extent, Kernel, PARAMETERS_OFFSET, Parameter, Polynomial, Predicate,
+    RESULT_OFFSET, Relation, SharedMemory, TransferType, Value, Variable, parameter_offsets,
 };
 pub use primitive::{Convergence, Lowering, Memory, Operand, Primitive, Proof};
 pub use store::{Key, Kind, Store, digest};

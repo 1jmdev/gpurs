@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, hash_map::Entry};
 
 use gpurs_artifact::Parameter;
 use gpurs_rustc::{FxHashMap, Instance, RigidTy, Session, Span, TerminatorKind, Ty, session};
@@ -9,11 +9,23 @@ use super::{
     state::Findings,
 };
 use crate::{
-    engine::{Cache, Dependencies, Engine, Variable},
+    engine::{Cache, Engine, Variable},
     kernel::KernelParameter,
     render::{self, Names},
     symbolic::{Atom, Clause, Facts, Polynomial, Predicate, Requirement},
 };
+
+/// The identity of an opaque variable: its position, path, interval, and variance.
+type VariableKey = (
+    usize,
+    usize,
+    usize,
+    Vec<usize>,
+    Polynomial,
+    Option<Polynomial>,
+    Requirement,
+    u8,
+);
 
 pub struct Analysis<'a, 'sess> {
     pub sess: Session<'sess>,
@@ -21,16 +33,15 @@ pub struct Analysis<'a, 'sess> {
     pub parameters: &'a [KernelParameter],
     pub scalars: Vec<u32>,
     pub variables: Vec<Variable>,
-    pub dependencies: Dependencies,
     pub proof_cache: Cache,
-    keys: FxHashMap<(usize, usize, usize, Vec<usize>), usize>,
+    keys: FxHashMap<VariableKey, usize>,
+    /// The loop head position each loop variable stands for: context, block, and path.
+    pub loops: FxHashMap<usize, (usize, usize, Vec<usize>)>,
     pub loads: FxHashMap<(Origin, Ty), Polynomial>,
     pub frames: Vec<Frame>,
     pub collect: bool,
     /// Nesting depth of calls whose memory accesses belong to an intercepted model.
     pub quiet: usize,
-    /// The variable table changed during this round, so states derived from it are stale.
-    pub changed: bool,
     /// The analysis gave up; nothing it established may be trusted.
     pub failure: Option<String>,
     pub span: Span,
@@ -57,14 +68,13 @@ impl<'a, 'sess> Analysis<'a, 'sess> {
                 })
                 .collect(),
             variables: Vec::new(),
-            dependencies: Dependencies::default(),
             proof_cache: Cache::default(),
             keys: FxHashMap::default(),
+            loops: FxHashMap::default(),
             loads: FxHashMap::default(),
             frames: Vec::new(),
             collect: false,
             quiet: 0,
-            changed: false,
             failure: None,
             span,
             program: Program::new(blocks),
@@ -86,7 +96,7 @@ impl<'a, 'sess> Analysis<'a, 'sess> {
         }
     }
 
-    /// Analyzes the kernel body twice: once to a fixpoint, once collecting obligations.
+    /// Analyzes the kernel to a fixpoint, then once more collecting obligations.
     pub fn run(&mut self) -> Option<State> {
         let body = self.sess.body(self.kernel);
         let mut slots = vec![Value::varying(0); body.locals().len()];
@@ -146,7 +156,7 @@ impl<'a, 'sess> Analysis<'a, 'sess> {
             .map(|(state, _)| state)
     }
 
-    /// The context of `instance` called from `parent`, rustc across passes.
+    /// The context of `instance` called from `parent`, stable across passes.
     pub fn context(&mut self, parent: Option<(usize, usize)>, instance: Instance) -> usize {
         if let Some((context, block)) = parent
             && let Some(child) = self.program.contexts[context].calls.get(&block)
@@ -199,6 +209,15 @@ impl<'a, 'sess> Analysis<'a, 'sess> {
         self.frames.last().unwrap()
     }
 
+    /// The current position in the kernel crate: inside a library function, the call that
+    /// left the kernel crate.
+    pub fn source(&self) -> Span {
+        match self.frames.iter().rposition(|frame| frame.local) {
+            Some(index) if index + 1 < self.frames.len() => self.frames[index + 1].call,
+            _ => self.span,
+        }
+    }
+
     /// The context-specific block that the current position belongs to.
     pub fn kernel_block(&self) -> usize {
         self.program.contexts[self.frame().context].offset + self.frame().block
@@ -207,14 +226,14 @@ impl<'a, 'sess> Analysis<'a, 'sess> {
     pub fn engine(&self, facts: &Facts) -> Engine<'_> {
         Engine {
             cache: &self.proof_cache,
-            dependencies: &self.dependencies,
             variables: &self.variables,
             scalars: &self.scalars,
             facts: facts.clone(),
         }
     }
 
-    /// The opaque variable for `path` at the current position, with the given interval.
+    /// The opaque variable for `path` at the current position with the given interval. A
+    /// variable never changes, so a different interval at the same position is a new variable.
     pub fn variable(
         &mut self,
         path: Vec<usize>,
@@ -222,64 +241,38 @@ impl<'a, 'sess> Analysis<'a, 'sess> {
         upper: Option<Polynomial>,
         requirement: Requirement,
         variance: u8,
-        description: impl Into<String>,
+        description: &'static str,
     ) -> Polynomial {
         let frame = self.frame();
-        let key = (frame.context, frame.block, frame.statement, path);
-        let variable = match self.keys.get(&key) {
-            Some(variable) => *variable,
-            None => {
+        let key = (
+            frame.context,
+            frame.block,
+            frame.statement,
+            path,
+            lower,
+            upper,
+            requirement,
+            variance,
+        );
+        let variable = match self.keys.entry(key) {
+            Entry::Occupied(entry) => *entry.get(),
+            Entry::Vacant(entry) => {
+                let (.., lower, upper, requirement, variance) = entry.key().clone();
                 self.variables.push(Variable {
-                    lower: lower.clone(),
-                    upper: upper.clone(),
-                    requirement: requirement.clone(),
-                    description: description.into(),
-                    updates: 0,
+                    lower,
+                    upper,
+                    requirement,
+                    description,
                     variance,
                 });
-                self.dependencies.touch(self.variables.len() - 1);
-                self.keys.insert(key, self.variables.len() - 1);
-                return Polynomial::atom(Atom::Variable(self.variables.len() - 1));
+                *entry.insert(self.variables.len() - 1)
             }
         };
-        self.dependencies.touch(variable);
-        self.variables[variable].variance = self.variables[variable].variance.max(variance);
-        self.update(variable, lower, upper, requirement);
         Polynomial::atom(Atom::Variable(variable))
     }
 
-    /// Replaces the interval of `variable`, widening it once it keeps changing.
-    pub fn update(
-        &mut self,
-        variable: usize,
-        lower: Polynomial,
-        upper: Option<Polynomial>,
-        requirement: Requirement,
-    ) {
-        self.dependencies.touch(variable);
-        let info = &mut self.variables[variable];
-        if info.lower == lower && info.upper == upper && info.requirement == requirement {
-            return;
-        }
-        info.updates += 1;
-        if info.updates > 3 {
-            if info.lower.value() == Some(0) && info.upper.is_none() {
-                return;
-            }
-            info.lower = Polynomial::default();
-            info.upper = None;
-            info.requirement = Requirement::new();
-        } else {
-            info.lower = lower;
-            info.upper = upper;
-            info.requirement = requirement;
-        }
-        self.changed = true;
-        self.dependencies.changed(variable);
-    }
-
     /// Records a launch requirement of race freedom or initialization.
-    pub fn requirement(&mut self, predicate: Predicate, reason: &str) {
+    pub fn requirement(&mut self, predicate: Predicate, reason: &'static str) {
         let clause = Clause::single(predicate, reason);
         if !self.findings.requirements.contains(&clause) {
             self.findings.requirements.push(clause);

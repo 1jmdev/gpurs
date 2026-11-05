@@ -17,7 +17,7 @@ pub const DEVICE_FLAGS: [&str; 8] = [
     "-Zinline-mir=no",
     "-Copt-level=3",
     "-Cdebug-assertions=no",
-    "-Coverflow-checks=on",
+    "-Coverflow-checks=off",
     "-Zcrate-attr=feature(register_tool)",
     "-Zcrate-attr=register_tool(gpurs_tool)",
 ];
@@ -32,10 +32,9 @@ pub static CONFIGURATION: LazyLock<Option<BuildConfiguration>> = LazyLock::new(|
 pub struct BuildConfiguration {
     pub stage: Stage,
     pub architectures: Vec<String>,
-    pub overflow_checks: bool,
-    pub strictness: Strictness,
-    pub instrumented: bool,
     pub compiler: String,
+    /// Whether discharged checks trap instead of disappearing, to test the verifier itself.
+    pub audit: bool,
     pub artifacts: PathBuf,
     pub cache: PathBuf,
     pub library_view: BTreeSet<Crate>,
@@ -55,14 +54,6 @@ pub enum Stage {
     Discovery,
     Device { output: PathBuf },
     Shard { architecture: String },
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
-pub enum Strictness {
-    #[default]
-    Warn,
-    Error,
-    Omit,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]

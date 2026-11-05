@@ -3,10 +3,9 @@ use std::{
     fmt::{self, Display, Formatter},
 };
 
-use gpurs_artifact::Failure;
 use gpurs_driver as driver;
 
-/// A runtime operation result carrying a driver, launch, or kernel failure.
+/// A runtime operation result carrying a driver or launch failure.
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Clone, Debug)]
@@ -17,10 +16,6 @@ pub enum Error {
         kernel: String,
         source: driver::Error,
     },
-    Kernel {
-        kernel: String,
-        code: u32,
-    },
     InvalidOperation(String),
 }
 
@@ -30,13 +25,6 @@ impl Display for Error {
             Self::Driver(error) => error.fmt(formatter),
             Self::Launch { kernel, source } => {
                 write!(formatter, "launch of `{kernel}` failed: {source}")
-            }
-            Self::Kernel { kernel, code } => {
-                write!(
-                    formatter,
-                    "GPU kernel `{kernel}` failed: {}",
-                    Failure::describe(*code)
-                )
             }
             Self::InvalidOperation(message) => formatter.write_str(message),
         }

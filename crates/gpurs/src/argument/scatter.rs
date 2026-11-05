@@ -27,7 +27,7 @@ impl<T: Copy> DeviceScatter<T> {
     /// do not affect this view; use `DeviceScatter::update_device` to refresh it.
     ///
     /// # Errors
-    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
+    /// Returns CUDA failures or invalid operation errors.
     pub fn from_device(
         stream: &Stream,
         target: &mut impl DeviceSliceMut<T>,
@@ -78,7 +78,7 @@ impl<T: Copy> DeviceScatter<T> {
     /// Creates retained device storage and verifies its construction requirements.
     ///
     /// # Errors
-    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
+    /// Returns CUDA failures or invalid operation errors.
     pub fn new(
         stream: &Stream,
         target: &mut impl DeviceSliceMut<T>,
@@ -109,7 +109,7 @@ impl<T: Copy> DeviceScatter<T> {
     ///
     ///
     /// # Errors
-    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
+    /// Returns CUDA failures or invalid operation errors.
     /// # Safety
     /// In-bounds destinations must be unique for every launch using this descriptor,
     /// including after changes through aliases of the index buffer. The index range
@@ -162,7 +162,7 @@ impl<T> DeviceScatter<T> {
     /// Existing graph consumers automatically wait for the refreshed snapshot.
     ///
     /// # Errors
-    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
+    /// Returns CUDA failures or invalid operation errors.
     pub fn update_device(
         &mut self,
         queue: &impl Launch,
@@ -216,12 +216,12 @@ impl<T> DeviceScatter<T> {
             .expect("scatter validation storage was allocated");
         let accesses = [
             Access::read(source.allocation, source.bytes::<usize>()),
-            Access::recovering(
+            Access::write(
                 &self.indices.allocation,
                 self.indices.offset..self.indices.offset + self.len() * size_of::<usize>(),
             ),
-            Access::recovering(&snapshot.allocation, 0..snapshot.allocation.bytes),
-            Access::recovering(&owners.allocation, 0..owners.allocation.bytes),
+            Access::write(&snapshot.allocation, 0..snapshot.allocation.bytes),
+            Access::write(&owners.allocation, 0..owners.allocation.bytes),
         ];
         let arguments = [
             snapshot.allocation.pointer,
@@ -252,7 +252,6 @@ impl<T> DeviceScatter<T> {
                 },
                 arguments: arguments.clone(),
                 accesses: accesses[1..].to_vec(),
-                status: None,
             }));
         }
         if let Some(capture) = queue.capture() {
@@ -260,12 +259,11 @@ impl<T> DeviceScatter<T> {
             return Ok(());
         }
         stream.maintain()?;
-        let statuses = tracking::try_order(&stream.raw, &accesses)?;
+        tracking::try_order(&stream.raw, &accesses)?;
         let result = operations
             .iter_mut()
             .try_for_each(|operation| operation.try_submit(&stream.raw));
-        tracking::complete(&stream.raw, &accesses, &statuses);
-        stream.retain_statuses(&statuses);
+        tracking::complete(&stream.raw, &accesses);
         result.map_err(Error::from)
     }
 
@@ -280,7 +278,7 @@ impl<T> DeviceScatter<T> {
     /// Enqueues validated replacement indices without waiting for prior descriptor reads.
     ///
     /// # Errors
-    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
+    /// Returns CUDA failures or invalid operation errors.
     pub fn update(
         &mut self,
         stream: &Stream,

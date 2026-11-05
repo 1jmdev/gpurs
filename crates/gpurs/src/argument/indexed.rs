@@ -14,7 +14,7 @@ impl<T: Copy> DeviceIndexed<T> {
     /// Creates retained device storage and verifies its construction requirements.
     ///
     /// # Errors
-    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
+    /// Returns CUDA failures or invalid operation errors.
     pub fn new(
         stream: &Stream,
         source: &impl DeviceSlice<T>,

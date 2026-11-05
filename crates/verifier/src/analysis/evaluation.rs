@@ -53,21 +53,32 @@ impl Analysis<'_, '_> {
         }
     }
 
-    /// Gives an unknown unsigned integer an opaque variable spanning its type.
-    pub fn opaque(&mut self, value: &mut Value, ty: Ty, path: Vec<usize>, description: &str) {
+    /// Gives an unknown integer an opaque variable spanning its type, offset by the minimum of a
+    /// signed type.
+    pub fn opaque(
+        &mut self,
+        value: &mut Value,
+        ty: Ty,
+        path: Vec<usize>,
+        description: &'static str,
+    ) {
         if value.integer.is_some() {
             return;
         }
-        if let Some(kind @ (false, _)) = arithmetic::integer_kind(ty) {
-            let (_, maximum) = arithmetic::range(kind);
-            value.integer = Some(self.variable(
-                path,
-                Polynomial::default(),
-                Some(Polynomial::constant(maximum)),
-                engine::opaque(),
-                value.variance,
-                description,
-            ));
+        if let Some(kind) = arithmetic::integer_kind(ty)
+            && let (minimum, maximum) = arithmetic::range(kind)
+            && let Some(extent) = maximum.checked_sub(minimum)
+        {
+            value.integer = self
+                .variable(
+                    path,
+                    Polynomial::default(),
+                    Some(Polynomial::constant(extent)),
+                    engine::opaque(),
+                    value.variance,
+                    description,
+                )
+                .offset(minimum);
         }
     }
 
@@ -216,10 +227,8 @@ impl Analysis<'_, '_> {
                 }
                 self.aggregate_constant(ty, &allocation)
             }
-            Operand::RuntimeChecks(checks) => Value::from(ValueData {
-                integer: Some(Polynomial::constant(
-                    self.sess.policy.runtime_check(checks) as i128
-                )),
+            Operand::RuntimeChecks(_) => Value::from(ValueData {
+                integer: Some(Polynomial::constant(0)),
                 domain: Some(2),
                 ..ValueData::default()
             }),

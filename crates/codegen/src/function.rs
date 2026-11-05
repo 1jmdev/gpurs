@@ -1,14 +1,11 @@
 use std::{collections::BTreeSet, rc::Rc};
 
-use gpurs_artifact::Failure;
 use gpurs_ir::{Type, Value as IRValue};
 use gpurs_rustc::{
-    AssertMessage, BinOp, Body, CrateDef, FxHashMap, FxHashSet, Graph, Instance, Mutability,
-    NonDivergingIntrinsic, Operand as MirOperand, Place as MirPlace, ProjectionElem, RETURN_LOCAL,
-    RigidTy, Rvalue, Session, Span, StatementKind, TerminatorKind, Ty, ValueRepr, attributes,
-    session,
+    BinOp, Body, CrateDef, FxHashMap, Graph, Instance, Mutability, NonDivergingIntrinsic,
+    Operand as MirOperand, Place as MirPlace, ProjectionElem, RETURN_LOCAL, RigidTy, Rvalue,
+    Session, Span, StatementKind, TerminatorKind, Ty, ValueRepr, attributes, session,
 };
-use gpurs_verifier::Certificate;
 
 use super::{
     layout::{self, PassMode, Shape},
@@ -39,10 +36,6 @@ pub struct FunctionBuilder<'m, 'sess> {
     /// The IR blocks of further copies, and the copies awaiting lowering.
     copies: FxHashMap<(usize, Vec<u64>), gpurs_ir::Block>,
     pending: Vec<(usize, Vec<u64>)>,
-    /// The checks this certified copy omits or records; `None` for the instrumented copy.
-    pub certificate: Option<Certificate>,
-    /// Blocks whose divisions follow a recorded zero-divisor check and use a safe divisor.
-    pub guarded: FxHashSet<usize>,
     /// Whether the launch has one block and thread dimension.
     pub linear: bool,
     pub block: usize,
@@ -69,8 +62,6 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
             copy: Vec::new(),
             copies: FxHashMap::default(),
             pending: Vec::new(),
-            certificate: None,
-            guarded: FxHashSet::default(),
             linear: false,
             block: 0,
             path: Vec::new(),
@@ -126,29 +117,6 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
             "use a supported Rust operation or move this operation to the host before launching \
              the kernel",
         );
-    }
-
-    /// Whether the certificate discharges the check ending the current block.
-    pub fn discharged(&self) -> bool {
-        self.certificate
-            .as_ref()
-            .is_some_and(|certificate| certificate.discharged.contains(&self.block))
-    }
-
-    /// Records a device failure; the thread continues.
-    pub fn record(&mut self, failure: Failure) {
-        self.ir.call(
-            "gpurs.record",
-            Type::Void,
-            vec![IRValue::i32(failure as i32)],
-        );
-    }
-
-    /// Records a device failure and terminates the thread.
-    pub fn fail(&mut self, failure: Failure) {
-        self.ir
-            .call("gpurs.fail", Type::Void, vec![IRValue::i32(failure as i32)]);
-        self.ir.unreachable();
     }
 
     /// The IR block lowering MIR block `block` when the current block branches to it, which is
@@ -298,29 +266,13 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
 
         let body = self.body.clone();
         let reachable = Graph::of(&body).reachable();
-        for block in self
-            .certificate
-            .iter()
-            .flat_map(|certificate| &certificate.recorded)
-        {
-            if let TerminatorKind::Assert {
-                msg:
-                    AssertMessage::DivisionByZero(_)
-                    | AssertMessage::RemainderByZero(_)
-                    | AssertMessage::Overflow(BinOp::Div | BinOp::Rem, ..),
-                target,
-                ..
-            } = self.body.blocks[*block].terminator.kind
-            {
-                self.guarded.insert(target);
-            }
-        }
+        let diverging = Graph::diverging(&body);
         while let Some((block, copy)) = self.pending.pop() {
             self.block = block;
             self.ir.position(self.copies[&(block, copy.clone())]);
             self.copy = copy;
-            if !reachable[block] {
-                self.ir.unreachable();
+            if !reachable[block] || diverging[block] {
+                self.diverge();
                 continue;
             }
             for statement in &body.blocks[block].statements {
@@ -440,48 +392,27 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
                 self.ir.ret(value);
             }
             TerminatorKind::Unreachable | TerminatorKind::Resume | TerminatorKind::Abort => {
-                self.ir.unreachable();
+                self.diverge();
             }
             TerminatorKind::Assert {
                 cond,
                 expected,
-                msg,
                 target,
                 ..
-            } => {
-                if self.sess.policy.unchecked_overflow(msg) || self.discharged() {
-                    return self.branch(*target);
-                }
-                let record = self
-                    .certificate
-                    .as_ref()
-                    .is_some_and(|certificate| certificate.recorded.contains(&self.block));
-                let condition = self.operand(cond);
-                let failure = self.ir.fresh_block("assert");
+            } if self.module.audit => {
+                let condition = self.operand(cond).scalar();
+                let ty = condition.ty.clone();
                 let target = self.target(*target);
-                let (on_true, on_false) = match expected {
-                    true => (target, failure),
-                    false => (failure, target),
-                };
-                self.ir.branch_if(condition.scalar(), on_true, on_false);
+                let failure = self.ir.fresh_block(&format!("bb{}.audit", self.block));
+                self.ir.switch(
+                    condition,
+                    failure,
+                    vec![(IRValue::int(ty, *expected as u128), target)],
+                );
                 self.ir.position(failure);
-                let failure = match msg {
-                    AssertMessage::BoundsCheck { .. } => Failure::BoundsCheck,
-                    AssertMessage::Overflow(..) | AssertMessage::OverflowNeg(_) => {
-                        Failure::Overflow
-                    }
-                    AssertMessage::DivisionByZero(_) | AssertMessage::RemainderByZero(_) => {
-                        Failure::DivisionByZero
-                    }
-                    _ => Failure::Panic,
-                };
-                if record {
-                    self.record(failure);
-                    self.ir.branch(target);
-                } else {
-                    self.fail(failure);
-                }
+                self.diverge();
             }
+            TerminatorKind::Assert { target, .. } => self.branch(*target),
             TerminatorKind::Drop { place, target, .. } => {
                 let ty = self.place_type(place);
                 if self.sess.needs_drop(ty) {
@@ -572,10 +503,7 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
                     return Some((blocks, target));
                 }
                 let next = match &block.terminator.kind {
-                    TerminatorKind::Goto { target } => *target,
-                    TerminatorKind::Assert { msg, target, .. }
-                        if self.sess.policy.unchecked_overflow(msg) =>
-                    {
+                    TerminatorKind::Goto { target } | TerminatorKind::Assert { target, .. } => {
                         *target
                     }
                     _ => return Some((blocks, target)),
@@ -658,6 +586,14 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
         true
     }
 
+    /// Ends a block that verification proved unreachable; an audit build traps there instead.
+    pub fn diverge(&mut self) {
+        if self.module.audit {
+            self.ir.assembly("trap;", "", true, Type::Void, Vec::new());
+        }
+        self.ir.unreachable();
+    }
+
     pub fn branch(&mut self, target: usize) {
         let target = self.target(target);
         self.ir.branch(target);
@@ -670,9 +606,8 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
                 self.load(&place)
             }
             MirOperand::Constant(constant) => self.constant(constant),
-            MirOperand::RuntimeChecks(checks) => {
-                let value = self.sess.policy.runtime_check(checks);
-                Operand::immediate(IRValue::bool(value), self.shape_of(Ty::bool_ty()))
+            MirOperand::RuntimeChecks(_) => {
+                Operand::immediate(IRValue::bool(false), self.shape_of(Ty::bool_ty()))
             }
         }
     }

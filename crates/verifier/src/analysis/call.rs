@@ -2,7 +2,7 @@ use std::rc::Rc;
 
 use gpurs_rustc::{CrateDef, Instance, Operand, Place, RigidTy, TyKind, attributes, call_graph};
 
-use super::{Analysis, Kind, Obligation, State, Value, ValueData, program::Callee, state};
+use super::{Analysis, Check, Obligation, State, Value, ValueData, program::Callee, state};
 use crate::symbolic::Polynomial;
 
 const DEPTH: usize = 48;
@@ -93,11 +93,9 @@ impl Analysis<'_, '_> {
                     "ub_checks" | "contract_checks" | "overflow_checks"
                 )
             })
-            .map(|name| {
+            .map(|_| {
                 Value::from(ValueData {
-                    integer: Some(Polynomial::constant(
-                        self.sess.policy.intrinsic_check(name) as i128
-                    )),
+                    integer: Some(Polynomial::constant(0)),
                     domain: Some(2),
                     ..ValueData::default()
                 })
@@ -124,9 +122,7 @@ impl Analysis<'_, '_> {
             let value = model.unwrap_or_else(|| Value::varying(2));
             return self.result(value, destination, state);
         }
-        // A modelled callee is still analyzed for the checks it carries, but its memory
-        // effects and result come from the model. Its checks are only kept by the collecting
-        // pass, so the fixpoint rounds skip it.
+        // A modelled callee is analyzed only for its checks; the model supplies its effects.
         match model {
             Some(value) => {
                 if self.collect {
@@ -220,16 +216,12 @@ impl Analysis<'_, '_> {
 
     fn unanalyzed(&mut self, instance: Instance) {
         if self.collect {
-            let context = self.frame().context;
-            let block = self.frame().block;
             self.findings.obligations.push(Obligation {
-                context,
-                block,
-                kind: Kind::Panic,
+                context: self.frame().context,
+                check: Check::Unanalyzed(instance),
                 goal: None,
-                description: format!("the body of `{}` cannot be analyzed", instance.name()),
                 verdict: None,
-                span: self.span,
+                span: self.source(),
             });
         }
     }

@@ -1,7 +1,7 @@
 use super::{Analysis, Pointer, State, Value, ValueData};
 use crate::{
     engine::{Bound, Direction},
-    symbolic::{Fact, Facts, Polynomial, Requirement},
+    symbolic::{Atom, Fact, Facts, Polynomial, Predicate, Relation, Requirement},
 };
 
 impl Analysis<'_, '_> {
@@ -14,6 +14,7 @@ impl Analysis<'_, '_> {
         if *previous == next {
             return false;
         }
+        let loop_head = self.frame().loop_heads.contains(block);
         let frame = self.frames.last_mut().unwrap();
         let (saved_block, saved_statement) = (frame.block, frame.statement);
         frame.block = block;
@@ -30,7 +31,14 @@ impl Analysis<'_, '_> {
         };
         let mut slots = previous.slots.clone();
         for (slot, left, right) in previous.slots.differences(&next.slots) {
-            let joined = self.join(left, right, vec![slot], (previous, &next), &facts);
+            let joined = self.join(
+                left,
+                right,
+                vec![slot],
+                (previous, &next),
+                &facts,
+                loop_head,
+            );
             if joined != *left {
                 slots.make_mut()[slot] = joined;
             }
@@ -67,6 +75,7 @@ impl Analysis<'_, '_> {
         path: Vec<usize>,
         sides: (&State, &State),
         facts: &[Fact],
+        loop_head: bool,
     ) -> Value {
         if left == right {
             return left.clone();
@@ -79,6 +88,10 @@ impl Analysis<'_, '_> {
                     .union(&right.requirement)
                     .cloned()
                     .collect(),
+            ),
+            (Some(a), Some(b)) if loop_head => (
+                self.iterate(a, b, path.clone(), sides, variance),
+                Requirement::new(),
             ),
             (Some(a), Some(b)) => (
                 Some(self.widen(a, b, path.clone(), sides, variance)),
@@ -145,6 +158,7 @@ impl Analysis<'_, '_> {
                         path,
                         sides,
                         facts,
+                        loop_head,
                     )
                 })
                 .collect()
@@ -184,6 +198,72 @@ impl Analysis<'_, '_> {
             pointer,
             variance,
         })
+    }
+
+    /// The value at a loop head that `stored` and `incoming` meet at. It is first a variable in
+    /// `[0, stored]`, kept while each iteration provably stays inside, and otherwise in `[0, ∞)`.
+    fn iterate(
+        &mut self,
+        stored: &Polynomial,
+        incoming: &Polynomial,
+        path: Vec<usize>,
+        sides: (&State, &State),
+        variance: u8,
+    ) -> Option<Polynomial> {
+        let frame = self.frame();
+        let position = (frame.context, frame.block, path.clone());
+        let current = match stored.variable() {
+            Some(Atom::Variable(variable)) if self.loops.get(variable) == Some(&position) => {
+                Some(*variable)
+            }
+            _ => None,
+        };
+        if !self.non_negative(incoming, &sides.1.facts)
+            || current.is_none() && !self.non_negative(stored, &sides.0.facts)
+        {
+            return None;
+        }
+        let upper = match current {
+            Some(variable) => self.variables[variable].upper.clone(),
+            None => Some(stored.clone()),
+        };
+        let bounded = upper.as_ref().is_some_and(|upper| {
+            upper.add(incoming, -1).is_some_and(|difference| {
+                self.engine(&sides.1.facts)
+                    .prove(
+                        &Predicate::new(difference, Relation::NonNegative),
+                        "the loop value stays bounded",
+                    )
+                    .is_some_and(|requirement| requirement.is_empty())
+            })
+        });
+        if current.is_some() && (bounded || upper.is_none()) {
+            return Some(stored.clone());
+        }
+        let variable = self.variable(
+            path,
+            Polynomial::default(),
+            upper.filter(|_| bounded),
+            Requirement::new(),
+            variance,
+            "a value that changes across loop iterations",
+        );
+        if let Some(Atom::Variable(index)) = variable.variable() {
+            self.loops.insert(*index, position);
+        }
+        Some(variable)
+    }
+
+    /// Whether `value` is non-negative on a path with `facts`, unconditionally.
+    fn non_negative(&self, value: &Polynomial, facts: &Facts) -> bool {
+        value.0.iter().all(|(_, coefficient)| *coefficient >= 0)
+            || self
+                .engine(facts)
+                .prove(
+                    &Predicate::new(value.clone(), Relation::NonNegative),
+                    "the loop value is not negative",
+                )
+                .is_some_and(|requirement| requirement.is_empty())
     }
 
     /// The variable standing for two different values meeting at a merge, with an interval

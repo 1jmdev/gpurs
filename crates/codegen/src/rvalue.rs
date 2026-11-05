@@ -189,13 +189,7 @@ impl FunctionBuilder<'_, '_> {
         };
         let ty = layout::immediate_type(scalar);
         let signed = layout::is_signed(scalar);
-        let (a, mut b) = (left.scalar(), right.scalar());
-        if !ty.is_float()
-            && matches!(operation, BinOp::Div | BinOp::Rem)
-            && self.guarded.contains(&self.block)
-        {
-            b = self.safe_divisor(a.clone(), b, &ty, signed);
-        }
+        let (a, b) = (left.scalar(), right.scalar());
         if checked && let Some(kind) = overflowing(operation) {
             let sign = if signed { "s" } else { "u" };
             let pair = self.ir.call(
@@ -280,36 +274,6 @@ impl FunctionBuilder<'_, '_> {
 
     /// `divisor`, or one where the recorded zero-divisor or overflow check failed, so the
     /// division that follows a recorded failure stays defined.
-    fn safe_divisor(
-        &mut self,
-        dividend: IRValue,
-        divisor: IRValue,
-        ty: &Type,
-        signed: bool,
-    ) -> IRValue {
-        let invalid = self
-            .ir
-            .compare(Predicate::Eq, divisor.clone(), IRValue::int(ty.clone(), 0));
-        let invalid = if signed {
-            let minimum = IRValue::int(ty.clone(), 1 << (ty.bits() - 1));
-            let minimum = self.ir.compare(Predicate::Eq, dividend, minimum);
-            let negative = self.ir.compare(
-                Predicate::Eq,
-                divisor.clone(),
-                IRValue::int(ty.clone(), u128::MAX),
-            );
-            let overflow = self
-                .ir
-                .binary(Binary::And, Flags::empty(), minimum, negative);
-            self.ir
-                .binary(Binary::Or, Flags::empty(), invalid, overflow)
-        } else {
-            invalid
-        };
-        self.ir
-            .select(invalid, IRValue::int(ty.clone(), 1), divisor)
-    }
-
     /// Shift amount cast to the shifted type; masked unless the shift is unchecked.
     fn shift_amount(&mut self, right: &Operand, scalar: Scalar, operation: BinOp) -> IRValue {
         let ty = layout::immediate_type(scalar);

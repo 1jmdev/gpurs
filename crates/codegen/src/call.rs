@@ -1,4 +1,3 @@
-use gpurs_artifact::Failure;
 use gpurs_rustc::{Instance, InstanceKind, RigidTy, TyKind};
 
 use super::{
@@ -16,10 +15,7 @@ impl FunctionBuilder<'_, '_> {
         target: Option<usize>,
     ) {
         let Some(target) = target else {
-            if self.discharged() {
-                return self.ir.unreachable();
-            }
-            return self.fail(Failure::Panic);
+            return self.diverge();
         };
         let locals = self.body.locals().to_vec();
         let Ok(ty) = function.ty(&locals) else {
@@ -55,19 +51,12 @@ impl FunctionBuilder<'_, '_> {
     }
 
     pub fn invoke(&mut self, instance: Instance, arguments: &[Operand], destination: &Place) {
-        let certificate = self.certificate.as_ref().map(|certificate| {
-            certificate
-                .calls
-                .get(&self.block)
-                .cloned()
-                .unwrap_or_default()
-        });
         let mut path = Vec::new();
         if self.module.allocates(instance) {
             path.clone_from(&self.path);
             path.push((self.instance, self.block, self.copy.clone()));
         }
-        let name = self.module.specialize(instance, certificate, false, path);
+        let name = self.module.specialize(instance, false, path);
         self.invoke_named(&name, instance, arguments, destination);
     }
 

@@ -24,7 +24,16 @@ impl FileLoader for Source {
         {
             return Ok(source);
         }
-        let (attributes, items) = source.split_at(inner_attributes(&source));
+        let mut split = inner_attributes(&source);
+        // The line ending after the attributes stays with them, so wrapping the items shifts no
+        // line and a closing line comment cannot swallow the wrapper.
+        if let Some(newline) = source[split..]
+            .find('\n')
+            .filter(|&newline| source[split..split + newline].trim().is_empty())
+        {
+            split += newline + 1;
+        }
+        let (attributes, items) = source.split_at(split);
         Ok((self.transform)(attributes, items))
     }
 

@@ -187,7 +187,7 @@ fn download<T>(span: Span<'_>) -> Result<Vec<T>> {
     let _context = span.allocation.device.context.try_enter()?;
     let stream = &span.allocation.device.download;
     let range = span.bytes::<T>();
-    let sources = tracking::try_order(stream, &[Access::read(span.allocation, range.clone())])?;
+    tracking::try_order(stream, &[Access::read(span.allocation, range.clone())])?;
     let mut host = Vec::<T>::with_capacity(span.len);
     // SAFETY: the spare capacity holds the range and is untouched until synchronization.
     unsafe {
@@ -200,7 +200,6 @@ fn download<T>(span: Span<'_>) -> Result<Vec<T>> {
         )?;
     }
     stream.try_synchronize()?;
-    tracking::try_observe(&sources)?;
     // SAFETY: the copy initialized every element with bytes of a verified transfer type.
     unsafe { host.set_len(span.len) };
     Ok(host)
@@ -214,7 +213,7 @@ fn fill<T: Copy>(span: Span<'_>, stream: &Stream, value: T) -> Result<()> {
     }
     let _context = stream.device.context.try_enter()?;
     stream.maintain()?;
-    let access = Access::recovering(span.allocation, span.bytes::<T>());
+    let access = Access::write(span.allocation, span.bytes::<T>());
     tracking::try_order(&stream.raw, slice::from_ref(&access))?;
     let pointer = span.allocation.pointer + access.range.start as u64;
     match any::type_name::<T>() {
@@ -256,7 +255,7 @@ fn fill<T: Copy>(span: Span<'_>, stream: &Stream, value: T) -> Result<()> {
             stream.raw.try_synchronize()?;
         }
     }
-    tracking::complete(&stream.raw, &[access], &[]);
+    tracking::complete(&stream.raw, &[access]);
     Ok(())
 }
 

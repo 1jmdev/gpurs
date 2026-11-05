@@ -1,10 +1,6 @@
-//! The implication engine: decides whether path facts entail a predicate.
-//!
-//! A goal `P ≥ 0` is reduced to launch polynomials by eliminating per-thread monomials with
-//! facts (`P ≥ P - μ·m·F` for a fact `F ≥ 0`) and bounding what remains by the intervals of its
-//! atoms. A launch polynomial is either decided from the hardware ranges of launch variables or
-//! becomes a clause the host evaluates before submission. The engine knows nothing about MIR;
-//! the analysis supplies facts and variable intervals.
+//! Decides whether path facts entail `P ≥ 0`: per-thread monomials are eliminated with facts,
+//! and the remaining launch polynomial is decided from hardware ranges or becomes a clause the
+//! host evaluates before submission.
 
 mod bounds;
 mod cache;
@@ -13,7 +9,7 @@ mod numeric;
 mod proof;
 mod solver;
 
-pub(super) use bounds::{Bound, Direction};
-pub(super) use cache::{Cache, Dependencies, Snapshot};
-use proof::Proof;
-pub(super) use solver::{Engine, Variable, opaque};
+pub use bounds::{Bound, Direction};
+pub use cache::Cache;
+pub use proof::Proof;
+pub use solver::{Engine, Variable, opaque};

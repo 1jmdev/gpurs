@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use super::{Cache, Dependencies, Direction, Proof};
+use super::{Cache, Direction, Proof};
 use crate::symbolic::{self, Clause, Facts, Polynomial, Predicate, Relation, Requirement};
 
 const OPTIONS: usize = 4;
@@ -11,27 +11,24 @@ pub struct Variable {
     pub lower: Polynomial,
     pub upper: Option<Polynomial>,
     pub requirement: Requirement,
-    pub description: String,
-    pub updates: u8,
+    pub description: &'static str,
     pub variance: u8,
 }
 
 pub struct Engine<'a> {
     pub cache: &'a Cache,
-    pub dependencies: &'a Dependencies,
     pub variables: &'a [Variable],
     /// Bit width of each kernel parameter that is a scalar launch variable.
     pub scalars: &'a [u32],
     pub facts: Facts,
 }
 
-/// The requirement marking a bound that rests on the type range of an opaque value. Such a
-/// bound proves things statically, but is never offered to the host as a precondition: the
-/// value is data-dependent, so a launch predicate built from its type range is meaningless.
+/// Marks a bound resting on the type range of a data-dependent value, which proves things
+/// statically but never becomes a launch precondition.
 pub fn opaque() -> Requirement {
     Requirement::from([Clause {
         options: BTreeSet::new(),
-        reason: String::new(),
+        reason: "",
     }])
 }
 
@@ -59,40 +56,44 @@ pub(super) fn union(left: &Requirement, right: &Requirement) -> Requirement {
 impl Engine<'_> {
     /// The requirement under which `goal` holds on this path, or `None` when it cannot be
     /// reduced to launch variables.
-    pub fn prove(&self, goal: &Predicate, reason: &str) -> Option<Requirement> {
-        self.prove_with(goal, || reason.to_owned())
-    }
-
-    pub fn prove_with(
-        &self,
-        goal: &Predicate,
-        reason: impl FnOnce() -> String,
-    ) -> Option<Requirement> {
+    pub fn prove(&self, goal: &Predicate, reason: &'static str) -> Option<Requirement> {
         if let Some(truth) = goal.truth() {
             return truth.then(Requirement::new);
         }
         let key = (self.facts.clone(), goal.clone());
-        if let Some((snapshot, result)) = self.cache.proofs.borrow().get(&key)
-            && self.dependencies.valid(snapshot)
-        {
-            self.dependencies.include(snapshot);
+        if let Some(result) = self.cache.proofs.borrow().get(&key) {
             return result.as_ref().map(|proof| proof.materialize(reason));
         }
-        self.dependencies.begin();
-        let epoch = self.dependencies.epoch;
         let result = self.solve(goal);
-        let snapshot = self.dependencies.finish(epoch);
-        self.cache
-            .proofs
-            .borrow_mut()
-            .insert(key, (snapshot, result.clone()));
-        result.as_ref().map(|proof| proof.materialize(reason))
+        let requirement = result.as_ref().map(|proof| proof.materialize(reason));
+        self.cache.proofs.borrow_mut().insert(key, result);
+        requirement
     }
 
     fn solve(&self, goal: &Predicate) -> Option<Proof> {
         let facts = self.context(&goal.polynomial);
         match goal.relation {
-            Relation::NonNegative => self.nonnegative(&goal.polynomial, &facts),
+            Relation::NonNegative => {
+                // `p + 1 ≠ 0` with `p + 1` a sum of non-negative terms gives `p ≥ 0`.
+                if let Some(successor) = goal.polynomial.offset(1)
+                    && successor.0.iter().all(|(_, coefficient)| *coefficient > 0)
+                    && let Some(requirement) = self.nonzero(&successor)
+                {
+                    return Some(Proof::fixed(requirement));
+                }
+                // A fact exceeding the goal by a sum of non-negative terms proves it.
+                if let Some(requirement) = facts.iter().find_map(|(fact, requirement)| {
+                    goal.polynomial
+                        .add(fact, -1)?
+                        .0
+                        .iter()
+                        .all(|(_, coefficient)| *coefficient > 0)
+                        .then(|| requirement.clone())
+                }) {
+                    return Some(Proof::fixed(requirement));
+                }
+                self.nonnegative(&goal.polynomial, &facts)
+            }
             Relation::Zero => {
                 let left = self.nonnegative(&goal.polynomial, &facts)?;
                 let right = self.nonnegative(&goal.polynomial.scale(-1)?, &facts)?;
@@ -118,29 +119,23 @@ impl Engine<'_> {
     /// Whether the path facts are contradictory, so the current block cannot execute.
     /// Only the last fact may be negated into a launch precondition, and only when the
     /// panicking function established it (`own`).
-    pub fn contradiction(&self, reason: &str, own: bool) -> Option<Requirement> {
+    pub fn contradiction(&self, reason: &'static str, own: bool) -> Option<Requirement> {
         if self.facts.is_empty() {
             return None;
         }
-        let key = (self.facts.clone(), own, reason.to_owned());
-        if let Some((snapshot, result)) = self.cache.contradictions.borrow().get(&key)
-            && self.dependencies.valid(snapshot)
-        {
-            self.dependencies.include(snapshot);
+        let key = (self.facts.clone(), own);
+        if let Some(result) = self.cache.contradictions.borrow().get(&key) {
             return result.clone();
         }
-        self.dependencies.begin();
-        let epoch = self.dependencies.epoch;
         let result = self.find_contradiction(reason, own);
-        let snapshot = self.dependencies.finish(epoch);
         self.cache
             .contradictions
             .borrow_mut()
-            .insert(key, (snapshot, result.clone()));
+            .insert(key, result.clone());
         result
     }
 
-    fn find_contradiction(&self, reason: &str, own: bool) -> Option<Requirement> {
+    fn find_contradiction(&self, reason: &'static str, own: bool) -> Option<Requirement> {
         let mut best: Option<Requirement> = None;
         for (index, fact) in self.facts.iter().enumerate() {
             let others: Vec<_> = self
@@ -285,6 +280,11 @@ impl Engine<'_> {
             }
             if steps == 2 {
                 continue;
+            }
+            for (fact, extra) in facts {
+                if let Some(next) = current.add(fact, -1) {
+                    pending.push((next, union(&requirement, extra), steps + 1));
+                }
             }
             for (monomial, coefficient) in &current.0 {
                 if monomial.is_empty() || *coefficient > 0 {

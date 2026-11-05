@@ -8,9 +8,7 @@ use std::{
     rc::{Rc, Weak},
 };
 
-use gpurs_artifact::{
-    Clause, Extent, Parameter, RESULT_OFFSET, STATUS_OFFSET, TransferType, Variable,
-};
+use gpurs_artifact::{Clause, Extent, Parameter, RESULT_OFFSET, TransferType, Variable};
 use gpurs_driver as driver;
 
 use crate::{
@@ -105,18 +103,7 @@ impl<S: Launch> KernelLaunch<'_, S> {
         let kernel = self.kernel.clone();
         let metadata = &kernel.metadata;
         let explicit = self.stream.config();
-        let certified = !device.instrumented.get() && kernel.certified.is_some();
-        let entry = if certified {
-            kernel.certified.as_ref()
-        } else {
-            kernel.instrumented.as_ref()
-        }
-        .ok_or_else(|| {
-            Error::InvalidOperation(format!(
-                "kernel `{}` has no instrumented entry point",
-                metadata.name
-            ))
-        })?;
+        let entry = &kernel.entry;
         let config = if let Some(config) = explicit {
             config
         } else {
@@ -194,12 +181,7 @@ impl<S: Launch> KernelLaunch<'_, S> {
                     unreachable!("quotients are evaluated by the polynomial")
                 }
             };
-            let preconditions = certified.then_some(&metadata.preconditions);
-            for clause in metadata
-                .requirements
-                .iter()
-                .chain(preconditions.into_iter().flatten())
-            {
+            for clause in metadata.requirements.iter().chain(&metadata.preconditions) {
                 if !clause.holds(&leaf) {
                     return Err(self.violated(clause, &leaf));
                 }
@@ -240,27 +222,21 @@ impl<S: Launch> KernelLaunch<'_, S> {
                 })?;
                 let pointer = driver::try_allocate_async(bytes, &stream.raw)?;
                 let allocation = Rc::new(Allocation::new(device.clone(), pointer, bytes));
-                tracking::complete(
-                    &stream.raw,
-                    &[Access::recovering(&allocation, 0..bytes)],
-                    &[],
-                );
+                tracking::complete(&stream.raw, &[Access::write(&allocation, 0..bytes)]);
                 Ok::<_, Error>(Buffer::new(allocation, count))
             })
             .transpose()?;
         let mut accesses = mem::take(&mut self.accesses);
         reject_aliasing(&accesses, &metadata.name)?;
         if let Some(buffer) = &result {
-            accesses.push(Access::recovering(
+            accesses.push(Access::write(
                 &buffer.allocation,
                 0..buffer.allocation.bytes,
             ));
         }
-        let mut sources = if capture.is_some() {
-            Vec::new()
-        } else {
-            tracking::try_order(&stream.raw, &accesses)?
-        };
+        if capture.is_none() {
+            tracking::try_order(&stream.raw, &accesses)?;
+        }
         if threads == 0 {
             return Ok(result);
         }
@@ -271,14 +247,6 @@ impl<S: Launch> KernelLaunch<'_, S> {
             && config.block[2] == 1;
         let function = entry.select(linear);
         stream.maintain()?;
-        let status = entry
-            .status
-            .then(|| device.status(&metadata.name))
-            .transpose()?;
-        if let Some(status) = &status {
-            self.write_word(STATUS_OFFSET as usize, status.pointer);
-            sources.push(status.clone());
-        }
         if let Some(buffer) = &result {
             self.write_word(RESULT_OFFSET as usize, buffer.allocation.pointer);
         }
@@ -295,16 +263,9 @@ impl<S: Launch> KernelLaunch<'_, S> {
                     },
                     arguments: self.arguments[entry.offset..].to_vec(),
                     accesses,
-                    status,
                 }));
             return Ok(result);
         }
-        if let Some(status) = &status {
-            // SAFETY: this word is exclusively reserved for this submission.
-            unsafe { driver::try_fill_async(status.pointer, 0, 4, &stream.raw)? };
-            stream.raw.submitted.set(stream.raw.submitted.get() + 1);
-        }
-        stream.retain_statuses(&sources);
         // SAFETY: the arguments follow the verified layout and accesses retain allocations.
         unsafe {
             function
@@ -322,7 +283,7 @@ impl<S: Launch> KernelLaunch<'_, S> {
                     source,
                 })?;
         }
-        tracking::complete(&stream.raw, &accesses, &sources);
+        tracking::complete(&stream.raw, &accesses);
         accesses.clear();
         *stream.accesses.borrow_mut() = accesses;
         *stream.arguments.borrow_mut() = self.arguments;

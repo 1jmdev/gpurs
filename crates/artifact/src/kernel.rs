@@ -1,8 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-pub const STATUS_OFFSET: u64 = 0;
-pub const RESULT_OFFSET: u64 = 8;
-pub const PARAMETERS_OFFSET: u64 = 16;
+pub const RESULT_OFFSET: u64 = 0;
+pub const PARAMETERS_OFFSET: u64 = 8;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Kernel {
@@ -13,8 +12,7 @@ pub struct Kernel {
     pub result: Option<Value>,
     pub requirements: Vec<Clause>,
     pub preconditions: Vec<Clause>,
-    pub certified: Option<Entry>,
-    pub instrumented: Option<Entry>,
+    pub entry: Entry,
     pub shared: SharedMemory,
 }
 
@@ -28,7 +26,6 @@ pub struct SharedMemory {
 pub struct Entry {
     pub symbol: String,
     pub linear: Option<String>,
-    pub status: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -152,31 +149,6 @@ pub struct TransferType {
     pub size: u64,
     pub align: u64,
     pub zeroable: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u32)]
-pub enum Failure {
-    BoundsCheck = 1,
-    Overflow = 2,
-    DivisionByZero = 3,
-    Panic = 4,
-    Unreachable = 5,
-    Divergence = 6,
-}
-
-impl Failure {
-    pub fn describe(code: u32) -> &'static str {
-        match code {
-            1 => "index out of bounds",
-            2 => "arithmetic overflow",
-            3 => "division by zero",
-            4 => "panic in GPU code",
-            5 => "entered unreachable code",
-            6 => "a warp collective was reached by an incomplete warp after a failure",
-            _ => "unknown failure",
-        }
-    }
 }
 
 impl Parameter {

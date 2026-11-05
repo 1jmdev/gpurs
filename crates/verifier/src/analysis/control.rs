@@ -1,7 +1,7 @@
 use fixedbitset::FixedBitSet;
-use gpurs_rustc::{AssertMessage, BinOp, FxHashSet, TerminatorKind};
+use gpurs_rustc::{AssertMessage, FxHashSet, TerminatorKind, session};
 
-use super::{Analysis, Kind, Obligation, Region, State, Value, arithmetic, program};
+use super::{Analysis, Check, Obligation, Region, State, Value, arithmetic, program};
 use crate::symbolic::{Atom, Fact, Polynomial, Predicate, Relation, Requirement};
 
 impl Analysis<'_, '_> {
@@ -70,6 +70,15 @@ impl Analysis<'_, '_> {
                 if self.collect && self.frames.len() == 1 {
                     self.extent(&successors);
                 }
+                successors.retain(|(_, facts)| {
+                    !facts.iter().any(|fact| {
+                        fact.predicate.negate().is_some_and(|negation| {
+                            state.facts.iter().any(|known| {
+                                known.requirement.is_empty() && known.predicate == negation
+                            })
+                        })
+                    })
+                });
                 successors
             }
             TerminatorKind::Assert {
@@ -79,12 +88,12 @@ impl Analysis<'_, '_> {
                 target,
                 ..
             } => {
-                if self.sess.policy.unchecked_overflow(msg) {
+                if session::wrapping(msg) {
                     return vec![(*target, Vec::new())];
                 }
                 let condition = self.operand(cond, state);
                 let key = *expected as i128;
-                let (kind, goals, description) = self.assertion(msg, &condition, key, state);
+                let (check, goals) = self.assertion(msg, &condition, key, state);
                 let goal = goals
                     .as_ref()
                     .and_then(|goals| goals.first())
@@ -95,7 +104,7 @@ impl Analysis<'_, '_> {
                         .try_fold(Requirement::new(), |mut requirement, goal| {
                             requirement.extend(
                                 self.engine(&state.facts)
-                                    .prove(&goal.predicate, &description)?,
+                                    .prove(&goal.predicate, check.reason())?,
                             );
                             requirement.extend(goal.requirement.iter().cloned());
                             Some(requirement)
@@ -105,17 +114,18 @@ impl Analysis<'_, '_> {
                     Some(_) => condition.guard(key).cloned().unwrap_or_default(),
                     None => Vec::new(),
                 };
-                self.obligation(block, kind, goal, description, verdict);
+                self.obligation(check, goal, verdict);
                 vec![(*target, facts)]
             }
             TerminatorKind::Call { target: None, .. } => {
-                let description = "this panic is unreachable".to_owned();
                 let own = state
                     .facts
                     .last()
                     .is_some_and(|fact| !self.frame().inherited.contains(fact));
-                let verdict = self.engine(&state.facts).contradiction(&description, own);
-                self.obligation(block, Kind::Panic, None, description, verdict);
+                let verdict = self
+                    .engine(&state.facts)
+                    .contradiction(Check::Unreachable.reason(), own);
+                self.obligation(Check::Unreachable, None, verdict);
                 Vec::new()
             }
             TerminatorKind::Call {
@@ -128,14 +138,14 @@ impl Analysis<'_, '_> {
         }
     }
 
-    /// The kind, the goals, and the description of an assertion.
+    /// The check of an assertion and the facts that discharge it.
     fn assertion(
         &mut self,
         message: &AssertMessage,
         condition: &Value,
         key: i128,
         state: &State,
-    ) -> (Kind, Option<Vec<Fact>>, String) {
+    ) -> (Check, Option<Vec<Fact>>) {
         let guard = || {
             condition
                 .integer
@@ -148,110 +158,42 @@ impl Analysis<'_, '_> {
         match message {
             AssertMessage::BoundsCheck { len, index } => {
                 let (len, index) = (self.operand(len, state), self.operand(index, state));
-                let description = match (&index.integer, &len.integer) {
-                    (Some(index), Some(len)) => format!(
-                        "index `{}` is below the length `{}`",
-                        self.describe(index),
-                        self.describe(len)
-                    ),
-                    _ => "the index is below the length".to_owned(),
-                };
-                (Kind::Memory, guard(), description)
-            }
-            AssertMessage::Overflow(operation, left, right) => {
-                let kind = self.operand_type(left).and_then(arithmetic::integer_kind);
-                let (left, right) = (self.operand(left, state), self.operand(right, state));
-                let goals = kind
-                    .zip(left.integer.clone().zip(right.integer.clone()))
-                    .and_then(|((signed, bits), (a, b))| {
-                        let (minimum, maximum) = arithmetic::range((signed, bits));
-                        let result = match operation {
-                            BinOp::Add => a.add(&b, 1)?,
-                            BinOp::Sub => a.add(&b, -1)?,
-                            BinOp::Mul => a.multiply(&b)?,
-                            BinOp::Shl | BinOp::Shr => {
-                                return Some(vec![
-                                    Polynomial::constant(bits as i128 - 1).add(&b, -1)?,
-                                ]);
-                            }
-                            BinOp::Div | BinOp::Rem => {
-                                let divisor = b.value()?;
-                                return (divisor != -1 || !signed).then(Vec::new);
-                            }
-                            _ => return None,
-                        };
-                        Some(vec![
-                            result.offset(-minimum)?,
-                            Polynomial::constant(maximum).add(&result, -1)?,
-                        ])
-                    })
-                    .map(|goals| {
-                        let requirement: Requirement = left
-                            .requirement
-                            .union(&right.requirement)
-                            .cloned()
-                            .collect();
-                        goals
-                            .into_iter()
-                            .map(|goal| Fact {
-                                predicate: Predicate::new(goal, Relation::NonNegative),
-                                requirement: requirement.clone(),
-                            })
-                            .collect()
-                    });
                 (
-                    Kind::Arithmetic,
-                    goals,
-                    format!("`{operation:?}` does not overflow"),
+                    Check::Bounds(index.integer.clone(), len.integer.clone()),
+                    guard(),
                 )
+            }
+            AssertMessage::Overflow(_, _, divisor) => {
+                let divisor = self.operand(divisor, state);
+                let goals = divisor
+                    .integer
+                    .as_ref()
+                    .and_then(|divisor| divisor.offset(1))
+                    .map(|goal| vec![Fact::new(Predicate::new(goal, Relation::NonZero))])
+                    .or_else(guard);
+                (Check::SignedDivision, goals)
             }
             AssertMessage::DivisionByZero(dividend) | AssertMessage::RemainderByZero(dividend) => {
                 let dividend = self.operand(dividend, state);
-                let description = match &dividend.integer {
-                    Some(dividend) => {
-                        format!("the divisor of `{}` is not zero", self.describe(dividend))
-                    }
-                    None => "the divisor is not zero".to_owned(),
-                };
-                (Kind::Arithmetic, guard(), description)
+                (Check::Divisor(dividend.integer.clone()), guard())
             }
-            AssertMessage::OverflowNeg(_) => (
-                Kind::Arithmetic,
-                guard(),
-                "negation does not overflow".to_owned(),
-            ),
             message => (
-                Kind::Panic,
+                Check::Assertion(message.description().unwrap_or("runtime assertion")),
                 guard(),
-                message
-                    .description()
-                    .unwrap_or("runtime assertion")
-                    .to_owned(),
             ),
         }
     }
 
-    fn obligation(
-        &mut self,
-        block: usize,
-        kind: Kind,
-        goal: Option<Predicate>,
-        description: String,
-        verdict: Option<Requirement>,
-    ) {
-        if !self.collect {
-            return;
+    fn obligation(&mut self, check: Check, goal: Option<Predicate>, verdict: Option<Requirement>) {
+        if self.collect {
+            self.findings.obligations.push(Obligation {
+                context: self.frame().context,
+                check,
+                goal,
+                verdict,
+                span: self.source(),
+            });
         }
-        let context = self.frame().context;
-        self.findings.obligations.push(Obligation {
-            context,
-            block,
-            kind,
-            goal,
-            description,
-            verdict,
-            span: self.span,
-        });
     }
 
     /// Records slice parameters whose length guards the linear thread index.
@@ -269,7 +211,9 @@ impl Analysis<'_, '_> {
                     && fact.predicate.relation == Relation::NonNegative
                     && polynomial.0.len() == 3
                     && polynomial.coefficient(&[Atom::Index]) == Some(&-1)
-                    && polynomial.coefficient(&[]) == Some(&-1)
+                    && polynomial
+                        .coefficient(&[])
+                        .is_some_and(|constant| *constant <= -1)
                     && !self.findings.lengths.contains(&parameter)
                 {
                     self.findings.lengths.push(parameter);
@@ -295,6 +239,7 @@ impl Analysis<'_, '_> {
         let postdominates = |first: usize, second: usize| {
             postdominators.is_reachable(second) && postdominators.dominates(first, second)
         };
+        let mut reported = Vec::new();
         for block in 0..count {
             let Some(value) = &self.program.branches[block] else {
                 continue;
@@ -315,7 +260,9 @@ impl Analysis<'_, '_> {
                 if value.variance > permitted
                     && !postdominates(collective, block)
                     && controlled.contains(collective)
+                    && !reported.contains(&span)
                 {
+                    reported.push(span);
                     let context = self
                         .program
                         .contexts

@@ -38,8 +38,8 @@ use rustc_public::{
 use rustc_span::{self, FileName, Symbol, kw};
 
 use crate::{
-    Allocation, Body, ConstOperand, ConstantKind, CrateDef, CrateItem, DefId, GlobalAlloc,
-    Instance, Item, Location, MirVisitor, Policy, RigidTy, Span, Ty, TyKind, VariantIdx,
+    Allocation, AssertMessage, BinOp, Body, ConstOperand, ConstantKind, CrateDef, CrateItem, DefId,
+    GlobalAlloc, Instance, Item, Location, MirVisitor, RigidTy, Span, Ty, TyKind, VariantIdx,
     call_graph::Function, layout::Signature,
 };
 
@@ -93,6 +93,17 @@ impl MirVisitor for FingerprintInputs {
     }
 }
 
+/// Whether an assertion checks wrapping arithmetic, which GPU code never traps on.
+pub fn wrapping(message: &AssertMessage) -> bool {
+    matches!(
+        message,
+        AssertMessage::Overflow(
+            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Shl | BinOp::Shr,
+            ..
+        ) | AssertMessage::OverflowNeg(_)
+    )
+}
+
 /// The rigid type of a fully monomorphized value. Device code never contains generics or
 /// projections by the time it is lowered.
 pub fn rigid(ty: Ty) -> RigidTy {
@@ -107,11 +118,10 @@ pub fn rigid(ty: Ty) -> RigidTy {
 pub struct Session<'tcx> {
     tcx: TyCtxt<'tcx>,
     pub target: Target,
-    pub policy: Policy,
 }
 
 impl<'tcx> Session<'tcx> {
-    pub(crate) fn new(tcx: TyCtxt<'tcx>, target: Target, policy: Policy) -> Self {
+    pub(crate) fn new(tcx: TyCtxt<'tcx>, target: Target) -> Self {
         let missing: Vec<_> = Item::ALL
             .iter()
             .map(|item| item.name())
@@ -121,11 +131,7 @@ impl<'tcx> Session<'tcx> {
             tcx.dcx()
                 .fatal(format!("gpurs does not declare `{}`", missing.join("`, `")));
         }
-        Session {
-            tcx,
-            target,
-            policy,
-        }
+        Session { tcx, target }
     }
 
     pub fn body(&self, instance: Instance) -> Rc<Body> {
@@ -491,6 +497,11 @@ impl<'tcx> Session<'tcx> {
         *self.path(def) == *expected
     }
 
+    /// Whether `def` belongs to the crate being compiled.
+    pub fn is_local(&self, def: DefId) -> bool {
+        self.internal_def(def).is_local()
+    }
+
     pub fn is_unsafe_function(&self, def: DefId) -> bool {
         self.tcx
             .fn_sig(self.internal_def(def))
@@ -709,15 +720,6 @@ impl<'tcx> Session<'tcx> {
         diagnostic.emit();
     }
 
-    pub fn warning_notes(&self, span: Span, message: impl Into<String>, notes: &[String]) {
-        let span = self.internal_span(span);
-        let mut diagnostic = self.tcx.dcx().struct_span_warn(span, message.into());
-        for note in notes {
-            diagnostic.note(note.clone());
-        }
-        diagnostic.emit();
-    }
-
     pub fn error_notes(&self, span: Span, message: impl Into<String>, notes: &[String]) {
         let span = self.internal_span(span);
         let mut diagnostic = self.tcx.dcx().struct_span_err(span, message.into());
@@ -727,12 +729,28 @@ impl<'tcx> Session<'tcx> {
         diagnostic.emit();
     }
 
+    pub fn error_help_notes(
+        &self,
+        span: Span,
+        message: impl Into<String>,
+        notes: &[String],
+        help: &str,
+    ) {
+        let span = self.internal_span(span);
+        let mut diagnostic = self.tcx.dcx().struct_span_err(span, message.into());
+        for note in notes {
+            diagnostic.note(note.clone());
+        }
+        diagnostic.help(help.to_owned());
+        diagnostic.emit();
+    }
+
     pub fn err(&self, message: impl Into<String>) {
         self.tcx.dcx().err(message.into());
     }
 
-    pub fn overflow_checks(&self) -> bool {
-        self.tcx.sess.overflow_checks()
+    pub fn error_count(&self) -> usize {
+        self.tcx.dcx().err_count()
     }
 
     pub fn abort_if_errors(&self) {

@@ -15,7 +15,7 @@ use crate::{
     host::{
         context::Device,
         launch,
-        tracking::{self, Access, Allocation, Status},
+        tracking::{self, Access, Allocation},
     },
 };
 
@@ -42,7 +42,6 @@ pub struct Transfer<T> {
     event: Option<Event>,
     stream: Rc<driver::Stream>,
     accesses: Vec<Access>,
-    statuses: Vec<Rc<Status>>,
     finished: bool,
     sequence: u64,
 }
@@ -72,8 +71,7 @@ impl Gpu {
         let allocation = Rc::new(allocation);
         tracking::complete(
             &self.device.transfer,
-            &[Access::recovering(&allocation, 0..layout.size())],
-            &[],
+            &[Access::write(&allocation, 0..layout.size())],
         );
         Ok(DeviceAllocation { allocation })
     }
@@ -277,7 +275,6 @@ impl<T> Transfer<T> {
     pub fn wait(&mut self) -> Result<T> {
         let _context = self.accesses[0].allocation.device.context.try_enter()?;
         self.finish()?;
-        tracking::try_observe(&self.statuses)?;
         self.data.take().ok_or_else(|| {
             Error::InvalidOperation("transfer storage was already returned".to_owned())
         })
@@ -306,7 +303,6 @@ impl<T> Drop for Transfer<T> {
         if self.finish().is_err() {
             mem::forget(self.data.take());
             mem::forget(mem::take(&mut self.accesses));
-            mem::forget(mem::take(&mut self.statuses));
         }
     }
 }
@@ -321,18 +317,17 @@ impl Stream {
         let _context = self.device.context.try_enter()?;
         self.maintain()?;
         self.check_external(&accesses)?;
-        let statuses = tracking::try_order(&self.raw, &accesses)?;
+        tracking::try_order(&self.raw, &accesses)?;
         let mut transfer = Transfer {
             data: Some(data),
             event: None,
             stream: self.raw.clone(),
             accesses,
-            statuses,
             finished: false,
             sequence: 0,
         };
         submit(transfer.data.as_mut().expect("transfer owns its storage"))?;
-        tracking::complete(&self.raw, &transfer.accesses, &transfer.statuses);
+        tracking::complete(&self.raw, &transfer.accesses);
         transfer.sequence = self.raw.submitted.get();
         transfer.event = Some(self.raw.try_record()?);
         Ok(transfer)
@@ -362,7 +357,7 @@ impl Stream {
         self.try_transfer(
             vec![
                 Access::read(source.allocation, origin.clone()),
-                Access::recovering(destination.allocation, target.clone()),
+                Access::write(destination.allocation, target.clone()),
             ],
             (),
             |()| {
@@ -426,7 +421,7 @@ impl Stream {
         }
         let range = destination.bytes::<T>();
         self.try_transfer(
-            vec![Access::recovering(destination.allocation, range.clone())],
+            vec![Access::write(destination.allocation, range.clone())],
             source,
             |host| {
                 // SAFETY: the transfer owns pinned storage and retains the destination.

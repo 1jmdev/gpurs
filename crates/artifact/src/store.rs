@@ -7,8 +7,6 @@ use std::{
     process,
 };
 
-use crate::Strictness;
-
 /// Every input of a cached product; a new input is a new field, never an ad hoc string.
 #[derive(Hash)]
 pub enum Key<'a> {
@@ -16,12 +14,10 @@ pub enum Key<'a> {
         driver: &'a str,
         compiler: &'a str,
         architectures: &'a [String],
-        overflow_checks: bool,
-        strictness: Strictness,
-        instrumented: bool,
         architecture: &'a str,
         kernel: &'a str,
         configured: bool,
+        audit: bool,
         functions: &'a [&'a str],
     },
     Ptx {

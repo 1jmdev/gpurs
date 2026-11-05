@@ -1,10 +1,11 @@
-use std::{collections::VecDeque, mem, rc::Rc};
+use std::{mem, rc::Rc};
 
-use gpurs_rustc::{Instance, TerminatorKind};
+use fixedbitset::FixedBitSet;
+use gpurs_rustc::{CrateDef, Instance, TerminatorKind};
 
 use super::{Analysis, Frame, State, Value, program::Summary};
 
-const ROUNDS: usize = 8;
+/// Visits of one block after which the analysis reports that it does not converge.
 const VISITS: u32 = 64;
 
 impl Analysis<'_, '_> {
@@ -17,26 +18,23 @@ impl Analysis<'_, '_> {
         entry: &State,
     ) -> Option<(State, Value)> {
         let key = (context, entry.clone());
-        let cached = self
-            .memo
-            .get(&key)
-            .filter(|summary| self.dependencies.valid(&summary.dependencies));
-        let cached_states = if let Some(summary) = cached {
-            self.dependencies.include(&summary.dependencies);
-            if !self.collect {
-                return summary.exit.clone();
-            }
-            Some(summary.states.clone())
-        } else {
-            None
-        };
+        let cached = self.memo.get(&key);
+        if let Some(summary) = cached
+            && !self.collect
+        {
+            return summary.exit.clone();
+        }
+        let cached = cached.map(|summary| summary.states.clone());
         let function = self.program.function(self.sess, instance);
         let body = function.body.clone();
         let base = entry.slots.len() - body.locals().len();
         self.frames.push(Frame {
             body: body.clone(),
             postdominators: function.postdominators.clone(),
+            loop_heads: function.loop_heads.clone(),
             inherited: entry.facts.to_vec(),
+            call: self.span,
+            local: self.sess.is_local(instance.def.def_id()),
             base,
             context,
             block: 0,
@@ -45,95 +43,73 @@ impl Analysis<'_, '_> {
         let count = body.blocks.len();
         let collect = mem::replace(&mut self.collect, false);
         let mut exits = vec![None; count];
-        self.dependencies.begin();
-        let mut epoch = self.dependencies.epoch;
-        let states = if let Some(states) = cached_states {
-            if let Some(summary) = self.memo.get(&key) {
-                self.dependencies.include(&summary.dependencies);
-            }
-            states
-        } else {
-            let mut states = Vec::new();
-            for round in 0..ROUNDS {
-                exits.fill(None);
-                self.dependencies.restart();
-                epoch = self.dependencies.epoch;
-                let changed = mem::replace(&mut self.changed, false);
-                states = vec![None; count];
-                states[0] = Some(entry.clone());
-                let mut visits = vec![0; count];
-                let mut pending = VecDeque::from([0]);
-                let mut queued = vec![false; count];
-                queued[0] = true;
-                while let Some(block) = pending.pop_front() {
-                    queued[block] = false;
-                    visits[block] += 1;
-                    if visits[block] > VISITS {
-                        self.failure = Some(format!(
-                            "exceeded {VISITS} visits to bb{block} in `{}`",
-                            instance.name()
-                        ));
-                        break;
-                    }
-                    let mut state = states[block].clone().unwrap();
-                    if !self.block(block, &mut state) {
-                        continue;
-                    }
-                    if !collect
-                        && matches!(body.blocks[block].terminator.kind, TerminatorKind::Return)
-                    {
-                        exits[block] = Some(state);
-                        continue;
-                    }
-                    let variance = match &body.blocks[block].terminator.kind {
-                        TerminatorKind::SwitchInt { discr, .. } => {
-                            Some(self.operand(discr, &state).variance)
-                        }
-                        _ => None,
-                    };
-                    let successors = self.successors(block, &state);
-                    let successor_count = successors.len();
-                    for (position, (successor, facts)) in successors.into_iter().enumerate() {
-                        let mut next = if position + 1 == successor_count {
-                            mem::take(&mut state)
-                        } else {
-                            state.clone()
-                        };
-                        if let Some(variance) = variance {
-                            next.controls.insert(
-                                self.program.contexts[context].offset + block,
-                                (successor, variance),
-                            );
-                        }
-                        for fact in facts {
-                            if !next.facts.contains(&fact) {
-                                next.facts.push(fact);
-                            }
-                        }
-                        if self.merge(&mut states[successor], next, successor) && !queued[successor]
-                        {
-                            queued[successor] = true;
-                            pending.push_back(successor);
-                        }
-                    }
-                }
-                let rustc = !self.changed;
-                self.changed |= changed;
-                if rustc || self.failure.is_some() {
-                    break;
-                }
-                if round + 1 == ROUNDS {
+        let states = cached.unwrap_or_else(|| {
+            let mut states = vec![None; count];
+            states[0] = Some(entry.clone());
+            let mut incoming: Vec<Vec<((usize, usize), State)>> = vec![Vec::new(); count];
+            let mut visits = vec![0; count];
+            let mut pending = FixedBitSet::with_capacity(count);
+            pending.insert(function.ranks[0]);
+            while let Some(rank) = pending.minimum() {
+                pending.remove(rank);
+                let block = function.order[rank];
+                visits[block] += 1;
+                if visits[block] > VISITS {
                     self.failure = Some(format!(
-                        "exceeded {ROUNDS} fixpoint rounds in `{}`",
+                        "exceeded {VISITS} visits to bb{block} in `{}`",
                         instance.name()
                     ));
+                    break;
+                }
+                let mut state = states[block].clone().unwrap();
+                if !self.block(block, &mut state) {
+                    continue;
+                }
+                if !collect && matches!(body.blocks[block].terminator.kind, TerminatorKind::Return)
+                {
+                    exits[block] = Some(state);
+                    continue;
+                }
+                let variance = match &body.blocks[block].terminator.kind {
+                    TerminatorKind::SwitchInt { discr, .. } => {
+                        Some(self.operand(discr, &state).variance)
+                    }
+                    _ => None,
+                };
+                let successors = self.successors(block, &state);
+                let successor_count = successors.len();
+                for (position, (successor, facts)) in successors.into_iter().enumerate() {
+                    let mut next = if position + 1 == successor_count {
+                        mem::take(&mut state)
+                    } else {
+                        state.clone()
+                    };
+                    if let Some(variance) = variance {
+                        next.controls.insert(
+                            self.program.contexts[context].offset + block,
+                            (successor, variance),
+                        );
+                    }
+                    for fact in facts {
+                        if !next.facts.contains(&fact) {
+                            next.facts.push(fact);
+                        }
+                    }
+                    if self.receive(
+                        &mut states[successor],
+                        &mut incoming[successor],
+                        (block, position),
+                        next,
+                        successor,
+                    ) {
+                        pending.insert(function.ranks[successor]);
+                    }
                 }
             }
             Rc::new(states)
-        };
+        });
         self.collect = collect;
         if self.failure.is_some() {
-            self.dependencies.finish(epoch);
             self.frames.pop();
             return None;
         }
@@ -205,18 +181,45 @@ impl Analysis<'_, '_> {
             let value = state.slots[base].clone();
             (state, value)
         });
-        let dependencies = self.dependencies.finish(epoch);
         if self.failure.is_none() {
             self.memo.insert(
                 key,
                 Summary {
-                    dependencies,
                     states,
                     exit: exit.clone(),
                 },
             );
         }
         exit
+    }
+
+    /// Delivers `next` along `edge` into `block`; whether its state changed. A loop head
+    /// accumulates every state it receives, which makes changing values opaque; any other block
+    /// joins the latest state of each incoming edge, so later iterations replace earlier ones.
+    fn receive(
+        &mut self,
+        stored: &mut Option<State>,
+        incoming: &mut Vec<((usize, usize), State)>,
+        edge: (usize, usize),
+        next: State,
+        block: usize,
+    ) -> bool {
+        if self.frame().loop_heads.contains(block) {
+            return self.merge(stored, next, block);
+        }
+        match incoming.iter_mut().find(|(source, _)| *source == edge) {
+            Some((_, state)) => *state = next,
+            None => incoming.push((edge, next)),
+        }
+        let mut joined = None;
+        for (_, state) in incoming.iter() {
+            self.merge(&mut joined, state.clone(), block);
+        }
+        if joined == *stored {
+            return false;
+        }
+        *stored = joined;
+        true
     }
 
     /// Executes the statements of `block` and the call ending it; `false` when the call never

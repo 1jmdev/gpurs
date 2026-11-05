@@ -1,5 +1,5 @@
 use gpurs_artifact::{
-    Compatibility, Convergence, Failure, Lowering, Memory, Operand as CallOperand, Primitive,
+    Compatibility, Convergence, Lowering, Memory, Operand as CallOperand, Primitive,
 };
 use gpurs_ir::{
     Access, Binary, Conversion, Flags, Modification, Ordering, Predicate, Transfer, Type,
@@ -58,7 +58,7 @@ impl FunctionBuilder<'_, '_> {
                 return true;
             }
             "ub_checks" | "contract_checks" | "overflow_checks" => {
-                Value::Scalar(IRValue::bool(self.sess.policy.intrinsic_check(name)))
+                Value::Scalar(IRValue::bool(false))
             }
             "black_box" | "likely" | "unlikely" => arguments[0].value.clone(),
             "read_via_copy" => {
@@ -310,18 +310,6 @@ impl FunctionBuilder<'_, '_> {
     }
 
     fn primitive(&mut self, primitive: Primitive, arguments: &[Operand], destination: &Place) {
-        if self.certificate.is_none() && primitive.convergence == Convergence::Warp {
-            let mask = self
-                .ir
-                .assembly("activemask.b32 $0;", "=r", true, Type::I32, Vec::new());
-            let complete = self.ir.compare(Predicate::Eq, mask, IRValue::i32(-1));
-            let ready = self.ir.fresh_block("warp");
-            let failed = self.ir.fresh_block("warp");
-            self.ir.branch_if(complete, ready, failed);
-            self.ir.position(failed);
-            self.fail(Failure::Divergence);
-            self.ir.position(ready);
-        }
         let value = match primitive.lowering {
             Lowering::Dimensions(prefix) => {
                 for (axis, name) in ["x", "y", "z"].into_iter().enumerate() {
@@ -562,31 +550,8 @@ impl FunctionBuilder<'_, '_> {
         )
     }
 
-    /// Block barrier. In the instrumented copy it also stops every thread once a thread of the
-    /// block has failed: verified kernels reach each barrier with every thread, and a failed
-    /// thread has exited, so fewer arrivals than threads mean a failure. Certified copies never
-    /// stop a thread, so their barriers are plain.
     pub(super) fn barrier(&mut self) {
-        if self.certificate.is_some() {
-            self.ir.call("llvm.nvvm.barrier0", Type::Void, Vec::new());
-            return;
-        }
-        let arrived = self
-            .ir
-            .call("llvm.nvvm.barrier0.popc", Type::I32, vec![IRValue::i32(1)]);
-        let x = self.special_register("ntid.x");
-        let y = self.special_register("ntid.y");
-        let z = self.special_register("ntid.z");
-        let threads = self.ir.binary(Binary::Mul, Flags::NUW, x, y);
-        let threads = self.ir.binary(Binary::Mul, Flags::NUW, threads, z);
-        let incomplete = self.ir.compare(Predicate::Ult, arrived, threads);
-        let failed = self.ir.fresh_block("barrier");
-        let ready = self.ir.fresh_block("barrier");
-        self.ir.branch_if(incomplete, failed, ready);
-        self.ir.position(failed);
-        self.ir.assembly("exit;", "", true, Type::Void, Vec::new());
-        self.ir.unreachable();
-        self.ir.position(ready);
+        self.ir.call("llvm.nvvm.barrier0", Type::Void, Vec::new());
     }
 
     fn math(&mut self, name: &str, arguments: &[Operand]) -> Option<Value> {

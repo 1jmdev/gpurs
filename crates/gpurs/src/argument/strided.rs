@@ -16,7 +16,7 @@ impl<T: Copy> DeviceScatter<T> {
     /// Builds an exclusive scatter descriptor from validated strided element coordinates.
     ///
     /// # Errors
-    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
+    /// Returns CUDA failures or invalid operation errors.
     pub fn from_strides<const N: usize>(
         stream: &Stream,
         target: &mut impl DeviceSliceMut<T>,
@@ -56,7 +56,7 @@ impl<T: Copy, const N: usize> DeviceStrided<T, N> {
     /// Creates retained device storage and verifies its construction requirements.
     ///
     /// # Errors
-    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
+    /// Returns CUDA failures or invalid operation errors.
     pub fn new(
         stream: &Stream,
         source: &impl DeviceSlice<T>,
@@ -86,7 +86,7 @@ impl<T: Copy, const N: usize> DeviceStrided<T, N> {
     /// Updates geometry within the retained source range, preserving captured graph accesses.
     ///
     /// # Errors
-    /// Returns CUDA failures, invalid operation errors, or failures inherited from queued work.
+    /// Returns CUDA failures or invalid operation errors.
     pub fn update(
         &mut self,
         stream: &Stream,

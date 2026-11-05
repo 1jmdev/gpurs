@@ -7,7 +7,7 @@ use gpurs_rustc::{
 };
 
 use super::{Context, State, Value};
-use crate::{engine::Snapshot, symbolic::Fact};
+use crate::symbolic::Fact;
 
 pub struct Callee {
     pub instance: Instance,
@@ -22,6 +22,11 @@ pub struct Callee {
 pub struct Function {
     pub body: Rc<Body>,
     pub postdominators: Rc<Dominators<usize>>,
+    /// Blocks entered by a back edge, where values that change across iterations become opaque.
+    pub loop_heads: Rc<FixedBitSet>,
+    /// Blocks in reverse postorder, then the blocks it does not reach, and each block's rank.
+    pub order: Vec<usize>,
+    pub ranks: Vec<usize>,
 }
 
 #[derive(Default)]
@@ -52,9 +57,33 @@ impl Program {
                 let successors = (0..body.blocks.len())
                     .map(|block| normal_successors(&body, block))
                     .collect::<Vec<_>>();
+                let graph = Graph::new(0, successors.clone());
+                let dominators = graph.dominators();
+                let mut order = graph.reverse_postorder();
+                let mut ranks = vec![usize::MAX; successors.len()];
+                for (rank, &block) in order.iter().enumerate() {
+                    ranks[block] = rank;
+                }
+                for (block, rank) in ranks.iter_mut().enumerate() {
+                    if *rank == usize::MAX {
+                        *rank = order.len();
+                        order.push(block);
+                    }
+                }
+                let mut loop_heads = FixedBitSet::with_capacity(successors.len());
+                for (block, targets) in successors.iter().enumerate() {
+                    for &target in targets {
+                        if dominators.is_reachable(block) && dominators.dominates(target, block) {
+                            loop_heads.insert(target);
+                        }
+                    }
+                }
                 Rc::new(Function {
                     body,
                     postdominators: Rc::new(postdominators(&successors)),
+                    loop_heads: Rc::new(loop_heads),
+                    order,
+                    ranks,
                 })
             })
             .clone()
@@ -62,7 +91,6 @@ impl Program {
 }
 
 pub struct Summary {
-    pub dependencies: Snapshot,
     pub states: Rc<Vec<Option<State>>>,
     pub exit: Option<(State, Value)>,
 }
