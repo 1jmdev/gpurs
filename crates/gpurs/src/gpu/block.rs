@@ -136,7 +136,7 @@ impl<const THREADS: usize> Block<THREADS> {
         proof = Varying
     )]
     pub fn radix_rank<K: RadixKey>(&self, key: K, bit: usize) -> usize {
-        let zero = ((key.radix_bits() >> bit) & 1 == 0) as usize;
+        let zero = usize::from((key.radix_bits() >> bit) & 1 == 0);
         let prefix = self.inclusive_scan(zero, 0, |left, right| left + right);
         let mut total = shared::shared_array::<usize, 1>();
         if self.thread() == THREADS - 1 {

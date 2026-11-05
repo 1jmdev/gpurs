@@ -39,7 +39,7 @@ impl Stream {
         // SAFETY: the out-pointer references a valid local.
         ffi::result(
             unsafe {
-                ffi::cuStreamCreateWithPriority(&mut raw, ffi::CU_STREAM_NON_BLOCKING, priority)
+                ffi::cuStreamCreateWithPriority(&raw mut raw, ffi::CU_STREAM_NON_BLOCKING, priority)
             },
             "cuStreamCreateWithPriority",
         )?;
@@ -87,7 +87,7 @@ impl Stream {
         let _context = self.context.try_enter()?;
         let mut priority = 0;
         ffi::result(
-            unsafe { ffi::cuStreamGetPriority(self.raw, &mut priority) },
+            unsafe { ffi::cuStreamGetPriority(self.raw, &raw mut priority) },
             "cuStreamGetPriority",
         )?;
         Ok(priority)
@@ -112,7 +112,7 @@ impl Stream {
 
     pub fn wait(&self, event: &Event) {
         self.try_wait(event)
-            .unwrap_or_else(|error| panic!("{error}"))
+            .unwrap_or_else(|error| panic!("{error}"));
     }
 
     pub fn try_wait(&self, event: &Event) -> Result<()> {
@@ -127,7 +127,7 @@ impl Stream {
 
     pub fn synchronize(&self) {
         self.try_synchronize()
-            .unwrap_or_else(|error| panic!("{error}"))
+            .unwrap_or_else(|error| panic!("{error}"));
     }
 
     pub fn try_synchronize(&self) -> Result<()> {
@@ -180,7 +180,7 @@ impl Stream {
         let mut raw = ptr::null_mut();
         // SAFETY: the out-pointer references a valid local and the stream is live.
         unsafe {
-            ffi::result(ffi::cuEventCreate(&mut raw, flags), "cuEventCreate")?;
+            ffi::result(ffi::cuEventCreate(&raw mut raw, flags), "cuEventCreate")?;
             let event = Event {
                 raw,
                 context: self.context.clone(),
@@ -229,7 +229,7 @@ impl Event {
         let _context = self.context.try_enter()?;
         let mut milliseconds = 0.0;
         ffi::result(
-            unsafe { ffi::cuEventElapsedTime(&mut milliseconds, self.raw, end.raw) },
+            unsafe { ffi::cuEventElapsedTime(&raw mut milliseconds, self.raw, end.raw) },
             "cuEventElapsedTime",
         )?;
         Ok(std::time::Duration::from_secs_f64(
@@ -256,7 +256,7 @@ impl Event {
 
     pub fn synchronize(&self) {
         self.try_synchronize()
-            .unwrap_or_else(|error| panic!("{error}"))
+            .unwrap_or_else(|error| panic!("{error}"));
     }
 
     pub fn try_synchronize(&self) -> Result<()> {

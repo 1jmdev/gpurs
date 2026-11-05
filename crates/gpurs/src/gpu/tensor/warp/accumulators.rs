@@ -78,6 +78,7 @@ impl<const FM: usize, const FN: usize> AccumulatorTile<f32, FM, FN> {
         self.apply(|value, [i, j, index]| operation(value, other.fragments[i][j].values[index]))
     }
 
+    #[expect(clippy::should_implement_trait)]
     pub fn add(self, other: &Self) -> Self {
         self.zip(other, |left, right| left + right)
     }

@@ -1,6 +1,6 @@
 //! Copy plans that move one operand into ring tiles, one depth step per stage.
 
-use std::{marker::PhantomData, mem};
+use std::marker::PhantomData;
 
 use gpurs_macros::primitive;
 
@@ -173,7 +173,7 @@ impl Chunks<Strided> {
         [base, stride, limit]: [usize; 3],
     ) -> Self {
         let [row, column, rows] = placement::<T, R, C, L, G>(thread);
-        let size = mem::size_of::<T>() as u64;
+        let size = size_of::<T>() as u64;
         let offset = base
             .wrapping_add(row.wrapping_mul(stride))
             .wrapping_add(column);
@@ -292,11 +292,11 @@ impl<S: Source> Chunks<S> {
         let partial = !R.is_multiple_of(G::THREADS / SharedTile::<T, R, C, L>::CHUNKS);
         let address = intrinsics::shared_window(tile as u64) as u32;
         let along = count.saturating_sub(self.depth).min(self.width);
-        let size = mem::size_of::<T>() as u64;
+        let size = size_of::<T>() as u64;
         let vector = (self.source.alignment()
             | shift
-            | (count as u64).wrapping_mul(size)
-            | (self.width as u64).wrapping_mul(size))
+            | u64::from(count).wrapping_mul(size)
+            | u64::from(self.width).wrapping_mul(size))
             & 15
             == 0;
         let elements = |index: usize| -> u32 {
@@ -320,7 +320,7 @@ impl<S: Source> Chunks<S> {
                     intrinsics::copy_chunk_asynchronously(
                         address.wrapping_add(self.shared[index]),
                         self.source.address(index).wrapping_add(shift),
-                        (elements(index) == 0) as u32,
+                        u32::from(elements(index) == 0),
                     );
                 }
             }
@@ -348,8 +348,8 @@ impl<S: Source> Chunks<S> {
     }
 }
 
-impl<'a, T: Element, L: Layout, G: ThreadGroup, const R: usize, const C: usize>
-    TileCursor<'a, T, L, G, R, C>
+impl<T: Element, L: Layout, G: ThreadGroup, const R: usize, const C: usize>
+    TileCursor<'_, T, L, G, R, C>
 {
     pub(super) fn new(steps: Steps, chunks: Chunks<Strided>) -> Self {
         TileCursor {
@@ -372,8 +372,8 @@ impl<'a, T: Element, L: Layout, G: ThreadGroup, const R: usize, const C: usize>
     }
 }
 
-impl<'a, T: Element, L: Layout, const THREADS: usize, const R: usize, const C: usize>
-    TileCursor<'a, T, L, Block<THREADS>, R, C>
+impl<T: Element, L: Layout, const THREADS: usize, const R: usize, const C: usize>
+    TileCursor<'_, T, L, Block<THREADS>, R, C>
 {
     /// Copies the next depth step into a [`GroupRing`](super::super::GroupRing) tile. Every
     /// thread of the block takes part, each copying its own chunks.
@@ -394,14 +394,13 @@ impl<'a, T: Element, L: Layout, const THREADS: usize, const R: usize, const C: u
 }
 
 impl<
-    'a,
     T: Element,
     L: Layout,
     const PRODUCERS: usize,
     const THREADS: usize,
     const R: usize,
     const C: usize,
-> TileCursor<'a, T, L, Producer<PRODUCERS, THREADS>, R, C>
+> TileCursor<'_, T, L, Producer<PRODUCERS, THREADS>, R, C>
 {
     /// Copies the next depth step into a [`BarrierRing`](super::super::BarrierRing) tile.
     /// Every producer thread takes part, each copying its own chunks.

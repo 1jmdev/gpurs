@@ -1,6 +1,6 @@
 //! A ring filled by TMA and read by Hopper or Blackwell tensor cores.
 
-use std::{marker::PhantomData, mem};
+use std::marker::PhantomData;
 
 use gpurs_macros::primitive;
 
@@ -23,7 +23,7 @@ pub trait Consumer: Sealed + 'static {
     unsafe fn release(barrier: u32);
 }
 
-/// sm_90a `wgmma`, issued by every warpgroup through a
+/// `sm_90a` `wgmma`, issued by every warpgroup through a
 /// [`WarpgroupAccumulator`](super::WarpgroupAccumulator).
 #[derive(Debug)]
 pub struct Hopper;
@@ -36,7 +36,7 @@ impl Consumer for Hopper {
             assert!(
                 THREADS % 128 == 0,
                 "Hopper rings require complete warpgroups"
-            )
+            );
         };
         (THREADS / 32) as u32
     }
@@ -212,7 +212,7 @@ impl<S: Stage<Bulk>, const STAGES: usize, C: Consumer> TensorRing<S, STAGES, C> 
         gpu::sync_block();
         let slot = self.slot(index).cast::<u64>();
         let mut word = gpu::thread_id().x;
-        while word < mem::size_of::<S>() / 8 {
+        while word < size_of::<S>() / 8 {
             // SAFETY: the word lies inside a free stage.
             unsafe { slot.add(word).write(0) };
             word += gpu::block_dim().x;

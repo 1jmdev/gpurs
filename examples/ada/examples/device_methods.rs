@@ -45,7 +45,7 @@ fn transform<T: Transform>(input: &[f32], output: &mut [f32], parameters: &T) {
     }
 }
 
-fn main() -> gpurs::Result<()> {
+fn main() -> Result<()> {
     let gpu = Gpu::new(0)?;
     let stream = gpu.stream()?;
 

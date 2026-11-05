@@ -39,14 +39,14 @@ pub fn report(
             let (row, column) = (index / size, index % size);
             let expected: f64 = (0..size)
                 .map(|depth| {
-                    left[row * size + depth].to_f32() as f64
-                        * right[column * size + depth].to_f32() as f64
+                    f64::from(left[row * size + depth].to_f32())
+                        * f64::from(right[column * size + depth].to_f32())
                 })
                 .sum();
             let stored = column / panel_columns * size * panel_columns
                 + row * panel_columns
                 + column % panel_columns;
-            (product[stored] as f64 - expected).abs()
+            (f64::from(product[stored]) - expected).abs()
         })
         .fold(0.0, f64::max);
     println!(

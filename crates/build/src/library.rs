@@ -14,6 +14,7 @@ use crate::{
 };
 
 #[derive(Deserialize)]
+#[expect(clippy::enum_variant_names)]
 #[serde(tag = "reason", rename_all = "kebab-case")]
 enum Message {
     CompilerArtifact {

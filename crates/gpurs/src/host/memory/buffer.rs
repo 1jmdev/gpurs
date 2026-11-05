@@ -1,7 +1,7 @@
 use std::{
     any,
     marker::PhantomData,
-    mem::{self, MaybeUninit},
+    mem::MaybeUninit,
     ops::{Bound, Range, RangeBounds},
     rc::Rc,
     slice,
@@ -165,21 +165,20 @@ impl<'a> Span<'a> {
             Bound::Excluded(&end) => end,
             Bound::Unbounded => self.len,
         };
-        if start > end || end > self.len {
-            panic!(
-                "range {start}..{end} is out of bounds for a GPU buffer of length {}",
-                self.len
-            );
-        }
+        assert!(
+            !(start > end || end > self.len),
+            "range {start}..{end} is out of bounds for a GPU buffer of length {}",
+            self.len
+        );
         Span {
             allocation: self.allocation,
-            start: self.start + start * mem::size_of::<T>(),
+            start: self.start + start * size_of::<T>(),
             len: end - start,
         }
     }
 
     pub fn bytes<T>(&self) -> Range<usize> {
-        self.start..self.start + self.len * mem::size_of::<T>()
+        self.start..self.start + self.len * size_of::<T>()
     }
 }
 
@@ -224,7 +223,7 @@ fn fill<T: Copy>(span: Span<'_>, stream: &Stream, value: T) -> Result<()> {
             unsafe {
                 driver::try_fill_async(
                     pointer,
-                    (&value as *const T).cast::<u8>().read(),
+                    (&raw const value).cast::<u8>().read(),
                     span.len,
                     &stream.raw,
                 )?;
@@ -235,7 +234,7 @@ fn fill<T: Copy>(span: Span<'_>, stream: &Stream, value: T) -> Result<()> {
             unsafe {
                 driver::try_fill_words_async(
                     pointer,
-                    (&value as *const T).cast::<u32>().read_unaligned(),
+                    (&raw const value).cast::<u32>().read_unaligned(),
                     span.len,
                     &stream.raw,
                 )?;
@@ -249,7 +248,7 @@ fn fill<T: Copy>(span: Span<'_>, stream: &Stream, value: T) -> Result<()> {
                     pointer,
                     slice::from_raw_parts(
                         host.as_ptr().cast::<MaybeUninit<u8>>(),
-                        mem::size_of_val(&*host),
+                        size_of_val(&*host),
                     ),
                     &stream.raw,
                 )?;
@@ -295,25 +294,25 @@ impl<T: BitPattern> Clone for Buffer<T> {
 
 impl<T: BitPattern> Buffer<T> {
     pub fn cast<U: BitPattern>(&self) -> Result<Buffer<U>> {
-        self.try_cast_range(0..self.len() * mem::size_of::<T>())
+        self.try_cast_range(0..self.len() * size_of::<T>())
     }
 
     pub(crate) fn try_cast_range<U>(&self, bytes: Range<usize>) -> Result<Buffer<U>> {
-        if bytes.start > bytes.end || bytes.end > self.len() * mem::size_of::<T>() {
+        if bytes.start > bytes.end || bytes.end > self.len() * size_of::<T>() {
             return Err(Error::InvalidOperation(
                 "typed view exceeds its source byte range".to_owned(),
             ));
         }
-        if mem::size_of::<U>() == 0
-            || !bytes.len().is_multiple_of(mem::size_of::<U>())
+        if size_of::<U>() == 0
+            || !bytes.len().is_multiple_of(size_of::<U>())
             || !(self.allocation.pointer + self.offset as u64 + bytes.start as u64)
-                .is_multiple_of(mem::align_of::<U>() as u64)
+                .is_multiple_of(align_of::<U>() as u64)
         {
             return Err(Error::InvalidOperation(
                 "typed view has an invalid element size or alignment".to_owned(),
             ));
         }
-        let mut buffer = Buffer::new(self.allocation.clone(), bytes.len() / mem::size_of::<U>());
+        let mut buffer = Buffer::new(self.allocation.clone(), bytes.len() / size_of::<U>());
         buffer.offset = self.offset + bytes.start;
         Ok(buffer)
     }

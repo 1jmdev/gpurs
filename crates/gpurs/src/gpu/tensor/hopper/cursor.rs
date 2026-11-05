@@ -1,6 +1,6 @@
 //! TMA copy plans that move one operand into ring tiles, one depth step per stage.
 
-use std::{mem, ops::Range};
+use std::ops::Range;
 
 use gpurs_macros::primitive;
 
@@ -78,11 +78,11 @@ impl<T: Element, const ROWS: usize, const COLUMNS: usize> TensorCursor<'_, T, RO
         if gpu::thread_id().x == 0 {
             intrinsics::barrier_expect(
                 writer.completion,
-                mem::size_of::<SharedTile<T, ROWS, COLUMNS>>() as u32,
+                size_of::<SharedTile<T, ROWS, COLUMNS>>() as u32,
             );
             intrinsics::tensor_load(
                 gpu::intrinsics::shared_window(writer.tile as u64) as u32,
-                self.map as *const TensorMap<T, ROWS, COLUMNS> as u64,
+                std::ptr::from_ref::<TensorMap<T, ROWS, COLUMNS>>(self.map) as u64,
                 column as i32,
                 self.first.min(i32::MAX as usize) as i32,
                 writer.completion,

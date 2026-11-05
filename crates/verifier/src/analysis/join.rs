@@ -96,17 +96,17 @@ impl Analysis<'_, '_> {
                     .iter()
                     .flat_map(|value| {
                         [
-                            value.integer.as_ref().and_then(|integer| integer.value()),
+                            value.integer.as_ref().and_then(Polynomial::value),
                             value.variant,
                         ]
                     })
                     .flatten(),
             )
             .collect();
-        keys.sort();
+        keys.sort_unstable();
         keys.dedup();
         let contribution = |value: &Value, state: &State, key: i128| {
-            let constant = value.integer.as_ref().and_then(|integer| integer.value());
+            let constant = value.integer.as_ref().and_then(Polynomial::value);
             if constant.is_some_and(|constant| constant != key)
                 || value.variant.is_some_and(|variant| variant != key)
             {

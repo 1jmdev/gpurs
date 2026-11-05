@@ -1,4 +1,4 @@
-use std::{mem, ops::Range, rc::Rc, slice};
+use std::{ops::Range, rc::Rc, slice};
 
 use crate::{
     Argument, Buffer, DeviceAddress, DeviceScatter, DeviceSlice, DeviceSliceMut, Error, Gpu,
@@ -98,7 +98,7 @@ impl<T: Copy, const N: usize> DeviceStrided<T, N> {
             Span {
                 allocation: &self.source,
                 start: self.range.start,
-                len: self.range.len() / mem::size_of::<T>(),
+                len: self.range.len() / size_of::<T>(),
             },
             shape,
             strides,
@@ -114,7 +114,7 @@ fn descriptor<T, const N: usize>(
     strides: [usize; N],
     offset: usize,
 ) -> Result<Strided<T, N>> {
-    if N > 8 || shape.contains(&0) || mem::size_of::<T>() == 0 {
+    if N > 8 || shape.contains(&0) || size_of::<T>() == 0 {
         return Err(Error::InvalidOperation(
             "strided views require rank at most eight and nonzero extents and element size"
                 .to_owned(),
@@ -138,7 +138,7 @@ fn descriptor<T, const N: usize>(
         // SAFETY: every reachable offset lies within the retained source range.
         address: unsafe {
             DeviceAddress::from_raw(
-                span.allocation.pointer + (span.start + offset * mem::size_of::<T>()) as u64,
+                span.allocation.pointer + (span.start + offset * size_of::<T>()) as u64,
             )
         },
         shape,

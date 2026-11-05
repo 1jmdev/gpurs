@@ -104,14 +104,14 @@ fn main() -> gpurs::Result<()> {
         .step_by(97)
         .map(|index| {
             let (token, column) = (index / COLUMNS, index % COLUMNS);
-            let expected: f64 = bias_host[column] as f64
+            let expected: f64 = f64::from(bias_host[column])
                 + (0..DEPTH)
                     .map(|depth| {
-                        input_host[token * DEPTH + depth].to_f32() as f64
-                            * weight_host[column * DEPTH + depth].to_f32() as f64
+                        f64::from(input_host[token * DEPTH + depth].to_f32())
+                            * f64::from(weight_host[column * DEPTH + depth].to_f32())
                     })
                     .sum::<f64>();
-            (product[index] as f64 - expected).abs()
+            (f64::from(product[index]) - expected).abs()
         })
         .fold(0.0, f64::max);
     println!(

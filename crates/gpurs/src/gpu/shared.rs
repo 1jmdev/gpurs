@@ -1,5 +1,5 @@
 use std::{
-    mem::{self, MaybeUninit},
+    mem::MaybeUninit,
     ops::{Index, IndexMut},
 };
 
@@ -81,11 +81,11 @@ pub unsafe fn dynamic_shared() -> SharedRegion<u8>;
 impl SharedRegion<u8> {
     /// Removes a typed, aligned prefix, returning the remaining disjoint bytes.
     pub fn partition<T>(self, length: usize) -> (SharedRegion<T>, Self) {
-        assert!(mem::size_of::<T>() != 0);
-        assert!((self.pointer as usize).is_multiple_of(mem::align_of::<T>()));
+        assert!(size_of::<T>() != 0);
+        assert!((self.pointer as usize).is_multiple_of(align_of::<T>()));
         let (region, remainder) = self.split_at(
             length
-                .checked_mul(mem::size_of::<T>())
+                .checked_mul(size_of::<T>())
                 .expect("shared partition size exceeds the addressable byte count"),
         );
         (
@@ -136,7 +136,7 @@ impl<T> SharedRegion<T> {
     pub unsafe fn cast<U>(self) -> SharedRegion<U> {
         SharedRegion {
             pointer: self.pointer.cast(),
-            length: self.length * mem::size_of::<T>() / mem::size_of::<U>(),
+            length: self.length * size_of::<T>() / size_of::<U>(),
         }
     }
 

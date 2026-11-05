@@ -8,9 +8,9 @@
 //! Packed operations, including load/store/CAS/exchange, are atomic per 16-bit component,
 //! never as a pair. Component CAS reports success separately for each component.
 //! Storage alignment equals its atomic integer representation. No system-scope interoperability
-//! is promised. The explicit CAS fallback supports BF16 on sm_80; native BF16 add needs sm_90.
+//! is promised. The explicit CAS fallback supports BF16 on `sm_80`; native BF16 add needs `sm_90`.
 //! Load/store/exchange/CAS accept Rust Ordering, with its usual invalid-order panics. Device
-//! integer atomics use system scope; 16-bit accessors require sm_70 and use ordered PTX
+//! integer atomics use system scope; 16-bit accessors require `sm_70` and use ordered PTX
 //! loads/stores and CAS because NVVM does not implement i16 atomic IR. ptxas may itself expand
 //! scalar half atomics to CAS. The verifier rejects native adds on known thread-local storage.
 

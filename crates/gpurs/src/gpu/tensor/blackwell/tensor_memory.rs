@@ -23,7 +23,7 @@ struct Slot {
     address: u32,
 }
 
-/// sm_100a `tcgen05.mma`, issued by one thread through a [`TensorMemoryAccumulator`].
+/// `sm_100a` `tcgen05.mma`, issued by one thread through a [`TensorMemoryAccumulator`].
 #[derive(Debug)]
 pub struct Blackwell;
 
@@ -43,7 +43,7 @@ impl Consumer for Blackwell {
     }
 }
 
-/// A 128x`COLUMNS` f32 product in tensor memory, accumulated by sm_100a `tcgen05.mma` from
+/// A 128x`COLUMNS` f32 product in tensor memory, accumulated by `sm_100a` `tcgen05.mma` from
 /// [`TensorRing`](super::super::hopper::TensorRing) stages in blocks of 128 threads. `COLUMNS` is a
 /// power of two from 64 to 256. Storage is allocated by the first product and released after
 /// storing or when the accumulator leaves scope. Every thread of the block participates in cleanup.
@@ -101,7 +101,7 @@ impl<const COLUMNS: usize> TensorMemoryAccumulator<COLUMNS> {
             assert!(
                 THREADS == 128,
                 "tensor memory accumulators run in blocks of 128 threads"
-            )
+            );
         };
         let accumulate = self.allocated;
         if !self.allocated {
@@ -114,7 +114,7 @@ impl<const COLUMNS: usize> TensorMemoryAccumulator<COLUMNS> {
                     a.descriptor(0, depth * 16) | SWIZZLE,
                     b.descriptor(0, depth * 16) | SWIZZLE,
                     const { Self::instruction::<T>() },
-                    (accumulate || depth > 0) as u32,
+                    u32::from(accumulate || depth > 0),
                 );
             }
         }
@@ -123,9 +123,9 @@ impl<const COLUMNS: usize> TensorMemoryAccumulator<COLUMNS> {
     /// Accumulates caller-described FP8 tiles into this accumulator's managed tensor memory.
     /// # Safety
     /// Every block thread participates. The descriptors name initialized, published shared
-    /// tiles meeting PTX kind::f8f6f4 layout/alignment requirements. The instruction descriptor
+    /// tiles meeting PTX `kind::f8f6f4` layout/alignment requirements. The instruction descriptor
     /// must specify f32 accumulation, 128 rows, exactly COLUMNS columns and the actual FP8
-    /// formats and depth. Keep operands alive until store_tensor_memory or destruction completes.
+    /// formats and depth. Keep operands alive until `store_tensor_memory` or destruction completes.
     #[primitive(
         lowering = Body,
         architecture = 100,
@@ -145,7 +145,7 @@ impl<const COLUMNS: usize> TensorMemoryAccumulator<COLUMNS> {
             assert!(
                 COLUMNS.is_power_of_two() && COLUMNS >= 64 && COLUMNS <= 256,
                 "tensor memory accumulators have 64 to 256 columns"
-            )
+            );
         };
         let accumulate = self.allocated;
         if !self.allocated {
@@ -159,7 +159,7 @@ impl<const COLUMNS: usize> TensorMemoryAccumulator<COLUMNS> {
                     a,
                     b,
                     instruction,
-                    accumulate as u32,
+                    u32::from(accumulate),
                 );
             }
         }
@@ -241,7 +241,7 @@ impl<T: OutputElement, const COLUMNS: usize> OutputTile<'_, T, 128, COLUMNS> {
             assert!(
                 THREADS == 128,
                 "tensor memory is stored by a block of 128 threads"
-            )
+            );
         };
         let accumulator = ManuallyDrop::new(accumulator);
         let lane = gpu::warp::lane_id();

@@ -37,11 +37,11 @@ impl Value {
     }
 
     pub fn i64(value: u64) -> Value {
-        Value::int(Type::I64, value as u128)
+        Value::int(Type::I64, u128::from(value))
     }
 
     pub fn bool(value: bool) -> Value {
-        Value::int(Type::I1, value as u128)
+        Value::int(Type::I1, u128::from(value))
     }
 
     pub fn float(ty: Type, value: f64) -> Value {

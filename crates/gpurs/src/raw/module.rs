@@ -173,7 +173,7 @@ impl Kernel {
                 .map_err(|source| Error::Launch {
                     kernel: self.name.clone(),
                     source,
-                })?
+                })?;
         };
         tracking::complete(&stream.raw, &accesses, &statuses);
         stream.retain_statuses(&statuses);

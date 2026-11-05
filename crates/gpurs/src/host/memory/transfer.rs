@@ -104,7 +104,7 @@ impl Gpu {
         unsafe {
             host.pointer
                 .cast::<T>()
-                .copy_from_nonoverlapping(data.as_ptr(), data.len())
+                .copy_from_nonoverlapping(data.as_ptr(), data.len());
         };
         Ok(PinnedBuffer {
             storage: host.storage,
@@ -115,13 +115,13 @@ impl Gpu {
 
     pub fn register<T: 'static>(&self, mut data: Vec<T>) -> Result<PinnedBuffer<T>> {
         launch::try_verified::<T>(&self.device)?;
-        if mem::size_of_val(&*data) == 0 {
+        if size_of_val(&*data) == 0 {
             return self.pin(&data);
         }
         let _context = self.device.context.try_enter()?;
         let pointer = data.as_mut_ptr();
         // SAFETY: the vector is retained, and its capacity is never changed.
-        unsafe { driver::try_register_host(pointer.cast(), mem::size_of_val(&*data))? };
+        unsafe { driver::try_register_host(pointer.cast(), size_of_val(&*data))? };
         Ok(PinnedBuffer {
             pointer,
             len: data.len(),
@@ -213,9 +213,9 @@ impl<T> Buffer<T> {
     /// # Safety
     /// All bytes represent initialized `U` values, with aliases as in `assume_init`.
     pub unsafe fn reinterpret<U>(self) -> Buffer<U> {
-        let bytes = self.len() * mem::size_of::<T>();
+        let bytes = self.len() * size_of::<T>();
         assert!(
-            mem::size_of::<U>() != 0 && bytes.is_multiple_of(mem::size_of::<U>()),
+            size_of::<U>() != 0 && bytes.is_multiple_of(size_of::<U>()),
             "GPU reinterpretation requires a whole number of nonzero-sized elements"
         );
         // SAFETY: the caller guarantees initialized values and compatible aliases.
@@ -223,7 +223,7 @@ impl<T> Buffer<T> {
             DeviceAllocation {
                 allocation: self.allocation.clone(),
             }
-            .uninit::<U>(self.offset, bytes / mem::size_of::<U>())
+            .uninit::<U>(self.offset, bytes / size_of::<U>())
             .assume_init()
         }
     }
@@ -365,7 +365,7 @@ impl Stream {
                 Access::recovering(destination.allocation, target.clone()),
             ],
             (),
-            |_| {
+            |()| {
                 // SAFETY: checked ranges are retained and ordered until completion.
                 unsafe {
                     driver::try_copy_device_async(

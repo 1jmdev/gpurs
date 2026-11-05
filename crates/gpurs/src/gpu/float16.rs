@@ -44,13 +44,13 @@ impl Half {
         let remainder = mantissa & ((1 << shift) - 1);
         let midpoint = 1 << (shift - 1);
         let round = remainder > midpoint || (remainder == midpoint && truncated & 1 == 1);
-        Half((sign | (truncated + round as u32)) as u16)
+        Half((sign | (truncated + u32::from(round))) as u16)
     }
 
     #[inline]
     #[cfg(not(gpurs_device))]
     pub fn to_f32(self) -> f32 {
-        let bits = self.0 as u32;
+        let bits = u32::from(self.0);
         let sign = (bits & 0x8000) << 16;
         let exponent = bits >> 10 & 0x1f;
         let mantissa = bits & 0x3ff;
@@ -81,7 +81,7 @@ impl BFloat16 {
     #[inline]
     #[cfg(not(gpurs_device))]
     pub fn to_f32(self) -> f32 {
-        f32::from_bits((self.0 as u32) << 16)
+        f32::from_bits(u32::from(self.0) << 16)
     }
 }
 
@@ -484,15 +484,15 @@ bits!(Half: u16, BFloat16: u16, Half2: u32, BFloat162: u32);
 
 impl BFloat16 {
     pub fn equal(self, right: Self) -> u32 {
-        (self.to_f32() == right.to_f32()) as u32
+        u32::from(self.to_f32() == right.to_f32())
     }
 
     pub fn less_than(self, right: Self) -> u32 {
-        (self.to_f32() < right.to_f32()) as u32
+        u32::from(self.to_f32() < right.to_f32())
     }
 
     pub fn less_equal(self, right: Self) -> u32 {
-        (self.to_f32() <= right.to_f32()) as u32
+        u32::from(self.to_f32() <= right.to_f32())
     }
 }
 

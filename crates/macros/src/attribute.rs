@@ -76,8 +76,7 @@ pub(crate) fn expand_function(function: ItemFn) -> Tokens {
         .map(|path| path.display().to_string());
     let recorded: Vec<Reference> = env::var_os("GPURS_REFERENCES")
         .and_then(|path| fs::read(path).ok())
-        .map(|bytes| serde_json::from_slice(&bytes).unwrap())
-        .unwrap_or_default();
+        .map_or_default(|bytes| serde_json::from_slice(&bytes).unwrap());
     let device = recorded
         .into_iter()
         .filter(|reference| Some(&reference.file) == file.as_ref() && reference.line == span.line())
@@ -161,11 +160,10 @@ pub(crate) fn expand_implementation(mut implementation: ItemImpl, host_only: boo
                         GenericParam::Const(parameter) => Some(&parameter.ident),
                         GenericParam::Lifetime(_) => None,
                     });
-            let reference = match &implementation.trait_ {
-                Some((path, _)) => {
-                    quote!(let _ = <#self_type as #path>::#name::<#(#arguments),*>;)
-                }
-                None => quote!(let _ = <#self_type>::#name::<#(#arguments),*>;),
+            let reference = if let Some((path, _)) = &implementation.trait_ {
+                quote!(let _ = <#self_type as #path>::#name::<#(#arguments),*>;)
+            } else {
+                quote!(let _ = <#self_type>::#name::<#(#arguments),*>;)
             };
             launchers.push(launcher::launcher(
                 &signature,
@@ -214,7 +212,7 @@ pub(crate) fn attribute_options(attribute: &Attribute) -> Result<Options> {
     match &attribute.meta {
         Meta::Path(_) => Ok(Options::default()),
         Meta::List(list) => options(list.tokens.clone()),
-        meta => Err(Error::new(
+        meta @ Meta::NameValue(_) => Err(Error::new(
             meta.span(),
             "expected #[gpu] or #[gpu(option, ...)]",
         )),

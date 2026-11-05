@@ -205,8 +205,8 @@ pub fn describe(result: CUresult) -> (String, String) {
     let mut description = ptr::null();
     // SAFETY: the driver writes pointers to static strings or leaves them null.
     unsafe {
-        cuGetErrorName(result, &mut name);
-        cuGetErrorString(result, &mut description);
+        cuGetErrorName(result, &raw mut name);
+        cuGetErrorString(result, &raw mut description);
     }
     let text = |pointer: *const c_char| {
         // SAFETY: non-null pointers returned above reference static NUL-terminated strings.

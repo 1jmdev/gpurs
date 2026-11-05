@@ -121,7 +121,7 @@ impl Function {
                     Access::Plain => write!(f, "load {ty}, {}", Typed(pointer))?,
                     Access::Volatile => write!(f, "load volatile {ty}, {}", Typed(pointer))?,
                     Access::Atomic(ordering) => {
-                        write!(f, "load atomic {ty}, {} {ordering}", Typed(pointer))?
+                        write!(f, "load atomic {ty}, {} {ordering}", Typed(pointer))?;
                     }
                 }
                 write!(f, ", align {align}")
@@ -132,7 +132,7 @@ impl Function {
                     Access::Plain => write!(f, "store {value}, {pointer}")?,
                     Access::Volatile => write!(f, "store volatile {value}, {pointer}")?,
                     Access::Atomic(ordering) => {
-                        write!(f, "store atomic {value}, {pointer} {ordering}")?
+                        write!(f, "store atomic {value}, {pointer} {ordering}")?;
                     }
                 }
                 write!(f, ", align {align}")
@@ -296,7 +296,7 @@ impl Display for Value {
             Kind::Integer(value) if self.ty == Type::I1 => write!(f, "{}", *value != 0),
             Kind::Integer(value) => write!(f, "{value}"),
             Kind::Float(value) if self.ty == Type::Float => {
-                write!(f, "0x{:016X}", (*value as f32 as f64).to_bits())
+                write!(f, "0x{:016X}", f64::from(*value as f32).to_bits())
             }
             Kind::Float(value) => write!(f, "0x{:016X}", value.to_bits()),
             Kind::Null => write!(f, "null"),

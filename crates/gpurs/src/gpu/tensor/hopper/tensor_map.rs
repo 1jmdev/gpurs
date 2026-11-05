@@ -1,6 +1,6 @@
 //! TMA descriptors of matrices in GPU memory.
 
-use std::{marker::PhantomData, mem};
+use std::marker::PhantomData;
 
 /// A TMA descriptor of a row-major matrix in GPU memory, copied in 128-byte swizzled
 /// `ROWS`x`COLUMNS` boxes into [`TensorRing`](super::TensorRing) tiles of the same
@@ -18,7 +18,7 @@ impl<T, const ROWS: usize, const COLUMNS: usize> TensorMap<T, ROWS, COLUMNS> {
     /// a stage on the 1024-byte boundary its swizzle pattern repeats at.
     pub(crate) const fn validate() {
         assert!(
-            COLUMNS * mem::size_of::<T>() == 128 && ROWS >= 8 && ROWS <= 256 && ROWS % 8 == 0,
+            COLUMNS * size_of::<T>() == 128 && ROWS >= 8 && ROWS <= 256 && ROWS % 8 == 0,
             "TMA boxes are 128-byte rows, 8 to 256 of them in multiples of eight"
         );
     }

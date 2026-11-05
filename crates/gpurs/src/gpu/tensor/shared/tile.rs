@@ -1,6 +1,6 @@
 //! Swizzled tiles in block-shared memory.
 
-use std::{marker::PhantomData, mem};
+use std::marker::PhantomData;
 
 use super::super::{DepthMajor, Element};
 use crate::gpu::{self, warp};
@@ -23,7 +23,7 @@ pub struct SharedTile<T, const ROWS: usize, const COLUMNS: usize, L = DepthMajor
 
 impl<T: Element, const ROWS: usize, const COLUMNS: usize, L> SharedTile<T, ROWS, COLUMNS, L> {
     /// Elements per 16-byte chunk.
-    pub(in crate::gpu::tensor) const LANES: usize = 16 / mem::size_of::<T>();
+    pub(in crate::gpu::tensor) const LANES: usize = 16 / size_of::<T>();
 
     /// 16-byte chunks per row.
     pub(in crate::gpu::tensor) const CHUNKS: usize = {
@@ -79,7 +79,7 @@ impl<T: Element, const ROWS: usize, const COLUMNS: usize, L> SharedTile<T, ROWS,
     /// between groups of eight rows. Valid for tiles of 128-byte rows at 1024-byte aligned
     /// addresses, with `row` a multiple of eight and `column` of 16.
     pub(in crate::gpu::tensor) fn descriptor(&self, row: usize, column: usize) -> u64 {
-        let offset = (row * COLUMNS + column) * mem::size_of::<T>();
-        (self.address() + offset as u32) as u64 >> 4 | (1024 >> 4) << 32
+        let offset = (row * COLUMNS + column) * size_of::<T>();
+        u64::from(self.address() + offset as u32) >> 4 | (1024 >> 4) << 32
     }
 }

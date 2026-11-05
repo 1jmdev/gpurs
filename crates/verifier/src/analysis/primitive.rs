@@ -16,7 +16,7 @@ impl Analysis<'_, '_> {
         if matches!(item, Some(Item::ScatterLoad | Item::ScatterStore))
             && let Some(Pointer::Memory(mut origin)) = arguments[0].pointer.clone()
         {
-            origin.index = arguments[1].integer.clone();
+            origin.index.clone_from(&arguments[1].integer);
             origin.inner = false;
             self.access(&origin, item == Some(Item::ScatterStore), false, state);
         }

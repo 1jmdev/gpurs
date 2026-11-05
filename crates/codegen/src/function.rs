@@ -33,7 +33,7 @@ pub struct FunctionBuilder<'m, 'sess> {
     /// The IR block of each MIR block, in the first copy of every unrolled loop.
     blocks: Vec<gpurs_ir::Block>,
     /// The loops lowered as one copy of their body per iteration, outermost first.
-    unrolled: Vec<unroll::Loop>,
+    unrolled: Vec<Loop>,
     /// The copy of each unrolled loop enclosing the current block, outermost first.
     pub(super) copy: Vec<u64>,
     /// The IR blocks of further copies, and the copies awaiting lowering.
@@ -440,7 +440,7 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
                 self.ir.ret(value);
             }
             TerminatorKind::Unreachable | TerminatorKind::Resume | TerminatorKind::Abort => {
-                self.ir.unreachable()
+                self.ir.unreachable();
             }
             TerminatorKind::Assert {
                 cond,
@@ -529,7 +529,7 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
                 .iter()
                 .all(|projection| matches!(projection, ProjectionElem::Field(..))),
             MirOperand::Constant(_) => true,
-            _ => false,
+            MirOperand::RuntimeChecks(_) => false,
         };
         let pure = |rvalue: &Rvalue| match rvalue {
             Rvalue::Use(operand, _) => local(operand),

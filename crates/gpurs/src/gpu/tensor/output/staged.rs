@@ -1,8 +1,6 @@
 //! Stores staged through block-shared memory, so that every global write is a coalesced
 //! 16-byte chunk whichever way the output is laid out.
 
-use std::mem;
-
 use gpurs_macros::primitive;
 
 use super::{OutputTile, matrix::Contiguity};
@@ -33,16 +31,15 @@ impl<T: OutputElement, const BM: usize, const BN: usize> OutputTile<'_, T, BM, B
         values: &AccumulatorTile<T, FM, FN>,
         lease: SharedLease<'_, U>,
     ) {
-        let lanes = 16 / mem::size_of::<T>();
+        let lanes = 16 / size_of::<T>();
         let pitch = BN + lanes;
         const {
             assert!(
-                BM * (BN + 16 / mem::size_of::<T>()) * mem::size_of::<T>() <= mem::size_of::<U>(),
+                BM * (BN + 16 / size_of::<T>()) * size_of::<T>() <= size_of::<U>(),
                 "the leased storage holds the staged tile"
             );
             assert!(
-                BN.is_multiple_of(16 / mem::size_of::<T>())
-                    && BM.is_multiple_of(16 / mem::size_of::<T>()),
+                BN.is_multiple_of(16 / size_of::<T>()) && BM.is_multiple_of(16 / size_of::<T>()),
                 "staged tiles hold whole 16-byte chunks"
             );
         };
@@ -65,7 +62,7 @@ impl<T: OutputElement, const BM: usize, const BN: usize> OutputTile<'_, T, BM, B
         match self.contiguous {
             Contiguity::Rows => {
                 let width = BN / lanes;
-                for step in 0..const { (BM * BN / (16 / mem::size_of::<T>())).div_ceil(THREADS) } {
+                for step in 0..const { (BM * BN / (16 / size_of::<T>())).div_ceil(THREADS) } {
                     let chunk = step.wrapping_mul(THREADS).wrapping_add(thread);
                     if chunk >= BM * width {
                         break;
@@ -79,7 +76,7 @@ impl<T: OutputElement, const BM: usize, const BN: usize> OutputTile<'_, T, BM, B
             }
             Contiguity::Columns => {
                 let height = BM / lanes;
-                for step in 0..const { (BM * BN / (16 / mem::size_of::<T>())).div_ceil(THREADS) } {
+                for step in 0..const { (BM * BN / (16 / size_of::<T>())).div_ceil(THREADS) } {
                     let chunk = step.wrapping_mul(THREADS).wrapping_add(thread);
                     if chunk >= BN * height {
                         break;
@@ -93,7 +90,7 @@ impl<T: OutputElement, const BM: usize, const BN: usize> OutputTile<'_, T, BM, B
                         unsafe {
                             elements
                                 .add(lane)
-                                .write(staging.add((row + lane) * pitch + column).read())
+                                .write(staging.add((row + lane) * pitch + column).read());
                         };
                     }
                     self.write_chunk(chunk, [row, column], [1, 0], pointer);
@@ -111,7 +108,7 @@ impl<T: OutputElement, const BM: usize, const BN: usize> OutputTile<'_, T, BM, B
                         unsafe {
                             pointer
                                 .add(index)
-                                .write(staging.add(row * pitch + column).read())
+                                .write(staging.add(row * pitch + column).read());
                         };
                     }
                 }
@@ -130,7 +127,7 @@ impl<T: OutputElement, const BM: usize, const BN: usize> OutputTile<'_, T, BM, B
         [down, across]: [usize; 2],
         pointer: *mut T,
     ) {
-        let lanes = 16 / mem::size_of::<T>();
+        let lanes = 16 / size_of::<T>();
         let last = lanes - 1;
         match (
             self.index(row, column),
@@ -140,7 +137,7 @@ impl<T: OutputElement, const BM: usize, const BN: usize> OutputTile<'_, T, BM, B
             // whole chunk is, and its index is a multiple of the chunk's elements.
             (None, _) => {}
             (Some(index), Some(_)) if index.is_multiple_of(lanes) => unsafe {
-                pointer.add(index).cast::<Vector4>().write(chunk)
+                pointer.add(index).cast::<Vector4>().write(chunk);
             },
             _ => {
                 let elements = (&raw const chunk).cast::<T>();

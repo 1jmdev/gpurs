@@ -85,7 +85,7 @@ impl Place {
     }
 }
 
-impl<'sess> FunctionBuilder<'_, 'sess> {
+impl FunctionBuilder<'_, '_> {
     pub fn place(&mut self, place: &gpurs_rustc::Place) -> Place {
         let mut current = self.locals[place.local].clone();
         for element in &place.projection {
@@ -258,7 +258,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
         match (&operand.value, operand.shape.repr()) {
             (Value::Zst, _) => {}
             (Value::Scalar(value), ValueRepr::Scalar(scalar)) => {
-                self.store_scalar(place.pointer.clone(), value.clone(), *scalar, place.align)
+                self.store_scalar(place.pointer.clone(), value.clone(), *scalar, place.align);
             }
             (
                 Value::Pair(a, b),
@@ -329,16 +329,18 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
     pub fn load_scalar(&mut self, pointer: IRValue, scalar: Scalar, align: u64) -> IRValue {
         let ty = layout::memory_type(layout::primitive(scalar));
         let value = self.ir.load(ty, pointer, align, Access::Plain);
-        match layout::is_bool(scalar) {
-            true => self.ir.cast(Conversion::Trunc, value, Type::I1),
-            false => value,
+        if layout::is_bool(scalar) {
+            self.ir.cast(Conversion::Trunc, value, Type::I1)
+        } else {
+            value
         }
     }
 
     pub fn store_scalar(&mut self, pointer: IRValue, value: IRValue, scalar: Scalar, align: u64) {
-        let value = match layout::is_bool(scalar) {
-            true => self.ir.cast(Conversion::ZExt, value, Type::I8),
-            false => value,
+        let value = if layout::is_bool(scalar) {
+            self.ir.cast(Conversion::ZExt, value, Type::I8)
+        } else {
+            value
         };
         self.ir.store(value, pointer, align, Access::Plain);
     }

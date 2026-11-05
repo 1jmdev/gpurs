@@ -11,7 +11,7 @@ use super::{
     place::{Operand, Place, Value},
 };
 
-impl<'sess> FunctionBuilder<'_, 'sess> {
+impl FunctionBuilder<'_, '_> {
     pub fn constant(&mut self, constant: &ConstOperand) -> Operand {
         let ty = constant.const_.ty();
         let shape = self.shape_of(ty);
@@ -58,12 +58,11 @@ impl ModuleBuilder<'_> {
         let width = (ty.bits() as usize).div_ceil(8);
         let value = session::allocation_bytes(allocation)
             .get(offset..offset + width)
-            .map(|slice| {
+            .map_or(0, |slice| {
                 let mut buffer = [0u8; 16];
                 buffer[..width].copy_from_slice(slice);
                 u128::from_le_bytes(buffer)
-            })
-            .unwrap_or(0);
+            });
         let provenance = allocation
             .provenance
             .ptrs
@@ -73,7 +72,7 @@ impl ModuleBuilder<'_> {
             return self.global_pointer(provenance.0, value as u64);
         }
         match ty {
-            Type::Float => IRValue::float(ty, f32::from_bits(value as u32) as f64),
+            Type::Float => IRValue::float(ty, f64::from(f32::from_bits(value as u32))),
             Type::Double => IRValue::float(ty, f64::from_bits(value as u64)),
             ty if ty.is_pointer() => IRValue::address(value as u64),
             ty => IRValue::int(ty, value),

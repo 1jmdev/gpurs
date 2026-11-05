@@ -26,7 +26,7 @@ impl Module {
         let mut raw = ptr::null_mut();
         // SAFETY: `image` is a complete CUBIN image that outlives the call.
         ffi::result(
-            unsafe { ffi::cuModuleLoadData(&mut raw, image.as_ptr().cast()) },
+            unsafe { ffi::cuModuleLoadData(&raw mut raw, image.as_ptr().cast()) },
             "cuModuleLoadData",
         )?;
         Ok(Module { raw, context })
@@ -57,7 +57,7 @@ impl Module {
         let mut raw = ptr::null_mut();
         // SAFETY: the module is loaded and `name` is NUL-terminated.
         ffi::result(
-            unsafe { ffi::cuModuleGetFunction(&mut raw, self.raw, name.as_ptr()) },
+            unsafe { ffi::cuModuleGetFunction(&raw mut raw, self.raw, name.as_ptr()) },
             "cuModuleGetFunction",
         )?;
         Ok(Function { raw })
@@ -99,7 +99,7 @@ impl Function {
         parameters: &mut [*mut c_void],
     ) {
         unsafe { self.try_launch_parameters(grid, block, shared_bytes, stream, parameters) }
-            .unwrap_or_else(|error| panic!("{error}"))
+            .unwrap_or_else(|error| panic!("{error}"));
     }
 
     /// # Safety
@@ -133,7 +133,7 @@ impl Function {
         Ok(())
     }
 
-    /// CUDA function attribute identifier, as defined by CUfunction_attribute.
+    /// CUDA function attribute identifier, as defined by `CUfunction_attribute`.
     pub fn attribute(&self, attribute: i32) -> i32 {
         self.try_attribute(attribute)
             .unwrap_or_else(|error| panic!("{error}"))
@@ -142,7 +142,7 @@ impl Function {
     pub fn try_attribute(&self, attribute: i32) -> Result<i32> {
         let mut value = 0;
         ffi::result(
-            unsafe { ffi::cuFuncGetAttribute(&mut value, attribute, self.raw) },
+            unsafe { ffi::cuFuncGetAttribute(&raw mut value, attribute, self.raw) },
             "cuFuncGetAttribute",
         )?;
         Ok(value)
@@ -161,7 +161,7 @@ impl Function {
         ffi::result(
             unsafe {
                 ffi::cuOccupancyMaxActiveBlocksPerMultiprocessor(
-                    &mut blocks,
+                    &raw mut blocks,
                     self.raw,
                     block_size as i32,
                     shared_bytes,
@@ -183,7 +183,14 @@ impl Function {
         // SAFETY: out-pointers reference valid locals and the function is live.
         ffi::result(
             unsafe {
-                ffi::cuOccupancyMaxPotentialBlockSize(&mut grid, &mut block, self.raw, None, 0, 0)
+                ffi::cuOccupancyMaxPotentialBlockSize(
+                    &raw mut grid,
+                    &raw mut block,
+                    self.raw,
+                    None,
+                    0,
+                    0,
+                )
             },
             "cuOccupancyMaxPotentialBlockSize",
         )?;
@@ -194,7 +201,7 @@ impl Function {
     #[track_caller]
     pub fn reserve_shared(&self, bytes: u32) {
         self.try_reserve_shared(bytes)
-            .unwrap_or_else(|error| panic!("{error}"))
+            .unwrap_or_else(|error| panic!("{error}"));
     }
 
     pub fn try_reserve_shared(&self, bytes: u32) -> Result<()> {
@@ -226,7 +233,7 @@ impl Function {
         arguments: &mut [MaybeUninit<u8>],
     ) {
         unsafe { self.try_launch(grid, block, shared_bytes, stream, arguments) }
-            .unwrap_or_else(|error| panic!("{error}"))
+            .unwrap_or_else(|error| panic!("{error}"));
     }
 
     /// # Safety

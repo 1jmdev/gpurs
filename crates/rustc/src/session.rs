@@ -430,7 +430,7 @@ impl<'tcx> Session<'tcx> {
         };
         let nameable = args
             .iter()
-            .flat_map(|arg| arg.walk())
+            .flat_map(ty::GenericArg::walk)
             .all(|arg| match arg.kind() {
                 GenericArgKind::Type(ty) => match ty.kind() {
                     ty::Adt(adt, _) => visible(adt.did()),
@@ -688,10 +688,9 @@ impl<'tcx> Session<'tcx> {
                 return None;
             };
             let inner = allocation_bytes(&inner);
-            let length = bytes
-                .get(8..16)
-                .map(|length| u64::from_le_bytes(length.try_into().unwrap()) as usize)
-                .unwrap_or(inner.len());
+            let length = bytes.get(8..16).map_or(inner.len(), |length| {
+                u64::from_le_bytes(length.try_into().unwrap()) as usize
+            });
             let start = *offset;
             return String::from_utf8(inner.get(start..start + length)?.to_vec()).ok();
         }

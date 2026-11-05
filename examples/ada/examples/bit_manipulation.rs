@@ -18,7 +18,7 @@ fn unpack_colors(packed: &[u32], channels: &mut [u32]) {
     }
 }
 
-fn main() -> gpurs::Result<()> {
+fn main() -> Result<()> {
     let gpu = Gpu::new(0)?;
     let stream = gpu.stream()?;
 

@@ -1,10 +1,4 @@
-use std::{
-    alloc::Layout,
-    collections::HashSet,
-    mem::{self, MaybeUninit},
-    rc::Rc,
-    slice,
-};
+use std::{alloc::Layout, collections::HashSet, mem::MaybeUninit, rc::Rc, slice};
 
 use gpurs_driver::Module;
 
@@ -224,7 +218,7 @@ impl<T> DeviceScatter<T> {
             Access::read(source.allocation, source.bytes::<usize>()),
             Access::recovering(
                 &self.indices.allocation,
-                self.indices.offset..self.indices.offset + self.len() * mem::size_of::<usize>(),
+                self.indices.offset..self.indices.offset + self.len() * size_of::<usize>(),
             ),
             Access::recovering(&snapshot.allocation, 0..snapshot.allocation.bytes),
             Access::recovering(&owners.allocation, 0..owners.allocation.bytes),

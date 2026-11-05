@@ -1,6 +1,6 @@
-//! Caller-managed global-to-shared asynchronous copies (sm_80+).
+//! Caller-managed global-to-shared asynchronous copies (`sm_80`+).
 //!
-//! Groups are private to the issuing thread. Commit after issuing a batch; wait_group_N waits
+//! Groups are private to the issuing thread. Commit after issuing a batch; `wait_group_N` waits
 //! until at most N committed groups remain. Complete every copy before reading or reusing its
 //! destination, releasing its source, or exiting the block. Waiting establishes visibility for
 //! the issuing thread only; synchronize participating consumers separately. Copies within a

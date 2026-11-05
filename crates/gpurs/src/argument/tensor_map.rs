@@ -1,4 +1,4 @@
-use std::{marker::PhantomData, mem, ops::Range, rc::Rc, slice};
+use std::{marker::PhantomData, ops::Range, rc::Rc, slice};
 
 use gpurs_driver as driver;
 
@@ -35,9 +35,9 @@ impl<T: Element, const ROWS: usize, const COLUMNS: usize> DeviceTensorMap<T, ROW
         const { TensorMap::<T, ROWS, COLUMNS>::validate() };
         let span = source.span();
         if !Rc::ptr_eq(&stream.device, &span.allocation.device)
-            || !rows
+            || rows
                 .checked_mul(columns)
-                .is_some_and(|elements| elements <= span.len)
+                .is_none_or(|elements| elements > span.len)
         {
             return Err(Error::InvalidOperation(
                 "tensor map dimensions exceed the source range or belong to another GPU".to_owned(),
@@ -47,7 +47,7 @@ impl<T: Element, const ROWS: usize, const COLUMNS: usize> DeviceTensorMap<T, ROW
         let map = TensorMap::<T, ROWS, COLUMNS> {
             descriptor: driver::try_tensor_map(
                 T::TENSOR_MAP_TYPE,
-                mem::size_of::<T>() as u64,
+                size_of::<T>() as u64,
                 address,
                 [rows as u64, columns as u64],
                 [ROWS as u32, COLUMNS as u32],
@@ -75,10 +75,10 @@ impl<T: Element, const ROWS: usize, const COLUMNS: usize> DeviceTensorMap<T, ROW
         columns: usize,
     ) -> Result<Transfer<PinnedBuffer<TensorMap<T, ROWS, COLUMNS>>>> {
         let _context = self.source.device.context.try_enter()?;
-        if !rows
+        if rows
             .checked_mul(columns)
-            .and_then(|elements| elements.checked_mul(mem::size_of::<T>()))
-            .is_some_and(|bytes| bytes <= self.range.len())
+            .and_then(|elements| elements.checked_mul(size_of::<T>()))
+            .is_none_or(|bytes| bytes > self.range.len())
         {
             return Err(Error::InvalidOperation(
                 "tensor map dimensions exceed the retained source range".to_owned(),
@@ -87,7 +87,7 @@ impl<T: Element, const ROWS: usize, const COLUMNS: usize> DeviceTensorMap<T, ROW
         let map = TensorMap::<T, ROWS, COLUMNS> {
             descriptor: driver::try_tensor_map(
                 T::TENSOR_MAP_TYPE,
-                mem::size_of::<T>() as u64,
+                size_of::<T>() as u64,
                 self.source.pointer + self.range.start as u64,
                 [rows as u64, columns as u64],
                 [ROWS as u32, COLUMNS as u32],

@@ -7,7 +7,7 @@ use super::{
     place::{Operand, Place, Value},
 };
 
-impl<'sess> FunctionBuilder<'_, 'sess> {
+impl FunctionBuilder<'_, '_> {
     pub fn call(
         &mut self,
         function: &gpurs_rustc::Operand,
@@ -83,8 +83,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
         let mut arguments = arguments.to_vec();
         let spreads = instance
             .body()
-            .map(|body| body.spread_arg().is_some())
-            .unwrap_or(false);
+            .is_some_and(|body| body.spread_arg().is_some());
         if !spreads
             && let Some(last) = arguments.last()
             && let TyKind::RigidTy(RigidTy::Tuple(fields)) = last.shape.ty.kind()

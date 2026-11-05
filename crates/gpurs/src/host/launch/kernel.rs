@@ -180,15 +180,15 @@ impl<S: Launch> KernelLaunch<'_, S> {
             let leaf = |variable: &Variable| match *variable {
                 Variable::BlockDimension(axis) => config.block[axis] as i128,
                 Variable::GridDimension(axis) => config.grid[axis] as i128,
-                Variable::Length(parameter) => self.lengths[parameter] as i128,
+                Variable::Length(parameter) => i128::from(self.lengths[parameter]),
                 Variable::Scalar(parameter) => {
                     let Parameter::Value(value) = metadata.parameters[parameter] else {
                         unreachable!("scalar launch variables are value parameters")
                     };
-                    self.scalar(parameter, 0, value.size.min(8) as usize) as i128
+                    i128::from(self.scalar(parameter, 0, value.size.min(8) as usize))
                 }
                 Variable::ScalarElement(parameter, offset, size) => {
-                    self.scalar(parameter, offset, size) as i128
+                    i128::from(self.scalar(parameter, offset, size))
                 }
                 Variable::Quotient(..) | Variable::Remainder(..) => {
                     unreachable!("quotients are evaluated by the polynomial")
@@ -228,12 +228,12 @@ impl<S: Launch> KernelLaunch<'_, S> {
             .map(|value| {
                 assert_eq!(
                     value.size,
-                    mem::size_of::<R>() as u64,
+                    size_of::<R>() as u64,
                     "result layout of `{}` changed",
                     metadata.name
                 );
                 let count = if explicit.is_some() { threads } else { 1 };
-                let bytes = count.checked_mul(mem::size_of::<R>()).ok_or_else(|| {
+                let bytes = count.checked_mul(size_of::<R>()).ok_or_else(|| {
                     Error::InvalidOperation(
                         "GPU result size exceeds the addressable byte count".to_owned(),
                     )
@@ -334,7 +334,7 @@ impl<S: Launch> KernelLaunch<'_, S> {
         let offset = self.kernel.offsets[parameter] as usize + offset;
         (0..size).fold(0, |word, byte| {
             // SAFETY: integer scalar parameters are fully initialized.
-            word | (unsafe { self.arguments[offset + byte].assume_init() } as u64) << (8 * byte)
+            word | u64::from(unsafe { self.arguments[offset + byte].assume_init() }) << (8 * byte)
         })
     }
 
@@ -384,8 +384,7 @@ pub(crate) fn try_verified<T>(device: &Device) -> Result<&TransferType> {
         .iter()
         .find(|descriptor| descriptor.name == name)
         .filter(|descriptor| {
-            descriptor.size == mem::size_of::<T>() as u64
-                && descriptor.align == mem::align_of::<T>() as u64
+            descriptor.size == size_of::<T>() as u64 && descriptor.align == align_of::<T>() as u64
         })
         .ok_or_else(|| {
             Error::InvalidOperation(format!(

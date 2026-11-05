@@ -89,9 +89,9 @@ impl GraphExec {
         }
         let result = self.raw.try_update(&graph.0.raw)?;
         if result == 0 {
-            self.graph = graph.clone();
+            self.graph.clone_from(graph);
             self.replacements = (0..graph.0.nodes.len()).map(|_| None).collect();
-            self.accesses = graph.0.accesses.clone();
+            self.accesses.clone_from(&graph.0.accesses);
         }
         Ok(result)
     }

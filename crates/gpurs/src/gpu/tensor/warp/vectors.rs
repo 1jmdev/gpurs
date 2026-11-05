@@ -1,7 +1,5 @@
 //! Values per row or column of a warp region, loaded from vectors for epilogues.
 
-use std::mem;
-
 use gpurs_macros::primitive;
 
 use super::WarpRegion;
@@ -42,7 +40,7 @@ impl<const BM: usize, const BN: usize, const FM: usize, const FN: usize>
         first: usize,
     ) -> ColumnValues<FN> {
         let data = vector.data();
-        let paired = (data.as_ptr() as usize).is_multiple_of(2 * mem::size_of::<T>());
+        let paired = (data.as_ptr() as usize).is_multiple_of(2 * size_of::<T>());
         let mut values = [[0.0; 2]; FN];
         for j in 0..FN {
             let column = first

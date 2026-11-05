@@ -1,7 +1,5 @@
 //! Output matrices and the tiles of them that scheduled blocks write.
 
-use std::mem;
-
 use crate::gpu::tensor::{Complete, Depth, OutputElement, Tile};
 
 /// An `rows`x`columns` output in the kernel's coordinates, element (r, c) of batch `b` at
@@ -167,7 +165,7 @@ impl<'a, T: OutputElement> OutputMatrix<'a, T> {
         };
         let base = base.unwrap_or(0);
         let address = self.data.as_ptr() as usize;
-        let lanes = 16 / mem::size_of::<T>();
+        let lanes = 16 / size_of::<T>();
         let aligned = address.is_multiple_of(16) && base.is_multiple_of(lanes);
         let contiguous = if aligned && column_stride == 1 && row_stride.is_multiple_of(lanes) {
             Contiguity::Rows
@@ -190,7 +188,7 @@ impl<'a, T: OutputElement> OutputMatrix<'a, T> {
             paired: column_stride == 1
                 && row_stride.is_multiple_of(2)
                 && base.is_multiple_of(2)
-                && address.is_multiple_of(2 * mem::size_of::<T>()),
+                && address.is_multiple_of(2 * size_of::<T>()),
             contiguous,
         }
     }

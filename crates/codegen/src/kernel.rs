@@ -28,7 +28,7 @@ pub fn generate(sess: Session<'_>, plan: KernelPlan) -> GeneratedKernel {
     GeneratedKernel { kernel, fragment }
 }
 
-impl<'sess> ModuleBuilder<'sess> {
+impl ModuleBuilder<'_> {
     pub fn kernel(&mut self, plan: KernelPlan) -> Kernel {
         let mut hasher = DefaultHasher::new();
         plan.key.hash(&mut hasher);

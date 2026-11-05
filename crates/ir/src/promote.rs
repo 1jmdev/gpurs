@@ -399,7 +399,9 @@ fn terminator_operands(terminator: &mut Terminator, mut visit: impl FnMut(&mut V
         Terminator::Conditional(value, ..) | Terminator::Return(Some(value)) => visit(value),
         Terminator::Switch(value, _, cases) => {
             visit(value);
-            cases.iter_mut().for_each(|(case, _)| visit(case));
+            for (case, _) in cases {
+                visit(case);
+            }
         }
         Terminator::Branch(_) | Terminator::Return(None) | Terminator::Unreachable => {}
     }

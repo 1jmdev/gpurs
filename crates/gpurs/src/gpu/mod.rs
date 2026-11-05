@@ -3,6 +3,8 @@
 //! The gpurs compiler recognizes these functions by their resolved identity. Calling them from
 //! host code panics.
 
+#![allow(clippy::needless_range_loop)]
+
 /// Declares inline-PTX primitives, each as convergence, minimum architecture, PTX text, LLVM
 /// constraints, and signature. Without convergence they are pure.
 macro_rules! assembly {

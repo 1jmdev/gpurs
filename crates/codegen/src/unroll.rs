@@ -225,7 +225,7 @@ impl<'body> Definitions<'body> {
                 _ => None,
             },
             Operand::Move(place) | Operand::Copy(place) => self.range(local(place)?, depth - 1),
-            _ => None,
+            Operand::RuntimeChecks(_) => None,
         }
     }
 

@@ -79,7 +79,7 @@ impl Element for BFloat16 {
 }
 
 /// An accumulator element for products of `T` operands: f32 for f16 and bf16, and f16 for f16,
-/// which GeForce GPUs run at twice the f32 rate.
+/// which `GeForce` GPUs run at twice the f32 rate.
 pub trait Accumulation<T: Element>: Copy + Default + Sealed {
     #[doc(hidden)]
     fn multiply_accumulate(c: &mut Accumulator<Self>, a: &FragmentA<T>, b: &FragmentB<T>);
@@ -97,8 +97,8 @@ impl Accumulation<Half> for Half {
     fn multiply_accumulate(c: &mut Accumulator<Half>, a: &FragmentA<Half>, b: &FragmentB<Half>) {
         let [w, x, y, z] = c.values;
         let packed = [
-            w.0 as u32 | (x.0 as u32) << 16,
-            y.0 as u32 | (z.0 as u32) << 16,
+            u32::from(w.0) | u32::from(x.0) << 16,
+            u32::from(y.0) | u32::from(z.0) << 16,
         ];
         let [w, x, y, z] = unpack(instruction::multiply_accumulate_f16_f16(*a, *b, packed));
         c.values = [Half(w), Half(x), Half(y), Half(z)];
@@ -129,7 +129,7 @@ pub trait OutputElement: Copy + Default + 'static + Sealed {
 impl OutputElement for f32 {
     #[inline]
     unsafe fn write_pair(pointer: *mut Self, [low, high]: [Self; 2]) {
-        let bits = low.to_bits() as u64 | (high.to_bits() as u64) << 32;
+        let bits = u64::from(low.to_bits()) | u64::from(high.to_bits()) << 32;
         // SAFETY: guaranteed by the caller.
         unsafe { pointer.cast::<u64>().write(bits) }
     }

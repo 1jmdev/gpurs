@@ -1,4 +1,4 @@
-//! Raw sm_90a warpgroup FP8 products.
+//! Raw `sm_90a` warpgroup FP8 products.
 
 use gpurs_macros::primitive;
 

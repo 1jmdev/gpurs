@@ -1,8 +1,4 @@
-use std::{
-    mem::{self, MaybeUninit},
-    rc::Rc,
-    slice,
-};
+use std::{mem::MaybeUninit, rc::Rc, slice};
 
 use gpurs_artifact::Parameter;
 
@@ -45,8 +41,8 @@ impl<S: Launch> KernelLaunch<'_, S> {
         // SAFETY: kernel parameter types are verified transfer types.
         let bytes = unsafe {
             slice::from_raw_parts(
-                (argument as *const T).cast::<MaybeUninit<u8>>(),
-                mem::size_of::<T>(),
+                std::ptr::from_ref::<T>(argument).cast::<MaybeUninit<u8>>(),
+                size_of::<T>(),
             )
         };
         self.arguments[offset..offset + bytes.len()].copy_from_slice(bytes);
@@ -107,7 +103,7 @@ impl<S: Launch> KernelLaunch<'_, S> {
         );
         self.accesses.push(Access {
             allocation: value.buffer().allocation.clone(),
-            range: value.buffer().offset..value.buffer().offset + mem::size_of::<T>(),
+            range: value.buffer().offset..value.buffer().offset + size_of::<T>(),
             write: effect,
             recovers: false,
         });

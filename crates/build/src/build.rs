@@ -43,8 +43,7 @@ impl Mode {
             name: arguments
                 .windows(2)
                 .find(|pair| pair[0] == "--crate-name")
-                .map(|pair| pair[1].to_string_lossy().into_owned())
-                .unwrap_or_default(),
+                .map_or_default(|pair| pair[1].to_string_lossy().into_owned()),
         };
         let target = configuration.targets.contains(&current);
         match configuration.stage {
@@ -166,8 +165,7 @@ fn build(architectures: &[&str]) -> Result<()> {
     if !image.exists() || fs::read_to_string(&identity_path).ok() != Some(identity.clone()) {
         let compiler = crates
             .first()
-            .map(|lowered| lowered.compiler.as_str())
-            .unwrap_or_default();
+            .map_or_default(|lowered| lowered.compiler.as_str());
         let mut compiled = thread::scope(|scope| {
             architectures
                 .iter()

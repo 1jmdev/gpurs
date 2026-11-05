@@ -182,7 +182,7 @@ impl OutputMatrix<'_, f32> {
                             reduce_add(
                                 pointer.add(position) as u64,
                                 values.fragments()[i][j].values[index],
-                            )
+                            );
                         };
                     }
                 }

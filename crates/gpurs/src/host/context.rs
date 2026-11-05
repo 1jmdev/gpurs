@@ -148,7 +148,7 @@ impl Gpu {
 
     pub(crate) fn copy<T>(&self, data: &[T]) -> Result<Buffer<T>> {
         let _context = self.device.context.try_enter()?;
-        let bytes = mem::size_of_val(data);
+        let bytes = size_of_val(data);
         let pointer = driver::try_allocate_async(bytes, &self.device.transfer)?;
         let allocation = Rc::new(Allocation::new(self.device.clone(), pointer, bytes));
         tracking::complete(
@@ -176,7 +176,7 @@ impl Gpu {
                 descriptor.name
             )));
         }
-        let bytes = len.checked_mul(mem::size_of::<T>()).ok_or_else(|| {
+        let bytes = len.checked_mul(size_of::<T>()).ok_or_else(|| {
             Error::InvalidOperation("GPU buffer size exceeds the addressable byte count".to_owned())
         })?;
         let pointer = driver::try_allocate_async(bytes, &self.device.transfer)?;
@@ -226,10 +226,10 @@ impl Device {
             )));
         };
         if self.modules[index].get().is_none() {
-            let module = if !self.artifact.modules[index].cubin.is_empty() {
-                Module::try_load(&self.artifact.modules[index].cubin)?
-            } else {
+            let module = if self.artifact.modules[index].cubin.is_empty() {
                 Module::try_load_ptx(&self.artifact.modules[index].ptx)?
+            } else {
+                Module::try_load(&self.artifact.modules[index].cubin)?
             };
             let _ = self.modules[index].set(module);
         }
@@ -331,7 +331,7 @@ fn embedded_artifact(capability: u32) -> Result<Artifact> {
     let images = unsafe {
         slice::from_raw_parts(
             start.cast::<&[u8]>(),
-            (end as usize - start as usize) / mem::size_of::<&[u8]>(),
+            (end as usize - start as usize) / size_of::<&[u8]>(),
         )
     };
     let mut merged = Artifact::default();

@@ -23,7 +23,7 @@ fn copy_counts(input: &[AtomicU32], output: &[AtomicU32]) {
     }
 }
 
-fn main() -> gpurs::Result<()> {
+fn main() -> Result<()> {
     let gpu = Gpu::new(0)?;
     let first_stream = gpu.stream()?;
     let second_stream = gpu.stream()?;
@@ -49,7 +49,7 @@ fn main() -> gpurs::Result<()> {
     let counts = output
         .download()?
         .into_iter()
-        .map(|value| value.into_inner())
+        .map(AtomicU32::into_inner)
         .collect::<Vec<_>>();
 
     assert_eq!(counts, vec![512; BIN_COUNT]);

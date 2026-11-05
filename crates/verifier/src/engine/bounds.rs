@@ -241,8 +241,7 @@ impl Engine<'_> {
                         .multiply(&Polynomial::atom(Atom::GridDimension(axis)))
                 })
                 .and_then(|count| count.offset(-1))
-                .map(|bound| vec![(bound, none())])
-                .unwrap_or_default(),
+                .map_or_default(|bound| vec![(bound, none())]),
             (Atom::Variable(variable), direction) => {
                 self.dependencies.touch(*variable);
                 let info = &self.variables[*variable];
@@ -251,8 +250,7 @@ impl Engine<'_> {
                     Direction::Upper => info.upper.as_ref(),
                 };
                 let mut bounds: Vec<_> = bound
-                    .map(|bound| self.structural(bound, direction, depth + 1))
-                    .unwrap_or_default()
+                    .map_or_default(|bound| self.structural(bound, direction, depth + 1))
                     .into_iter()
                     .map(|(bound, requirement)| {
                         (bound, solver::union(&requirement, &info.requirement))

@@ -13,7 +13,7 @@ pub fn try_allocate(bytes: usize) -> Result<DevicePointer> {
     let mut pointer = 0;
     // SAFETY: the out-pointer references a valid local.
     ffi::result(
-        unsafe { ffi::cuMemAlloc_v2(&mut pointer, bytes.max(1)) },
+        unsafe { ffi::cuMemAlloc_v2(&raw mut pointer, bytes.max(1)) },
         "cuMemAlloc",
     )?;
     Ok(pointer)
@@ -22,7 +22,7 @@ pub fn try_allocate(bytes: usize) -> Result<DevicePointer> {
 /// # Safety
 /// No queued or future device work may access `pointer`.
 pub unsafe fn free(pointer: DevicePointer) {
-    unsafe { try_free(pointer) }.unwrap_or_else(|error| panic!("{error}"))
+    unsafe { try_free(pointer) }.unwrap_or_else(|error| panic!("{error}"));
 }
 
 /// # Safety
@@ -42,7 +42,7 @@ pub fn try_allocate_async(bytes: usize, stream: &Stream) -> Result<DevicePointer
     let mut pointer = 0;
     // SAFETY: the out-pointer references a valid local.
     ffi::result(
-        unsafe { ffi::cuMemAllocAsync(&mut pointer, bytes.max(1), stream.raw) },
+        unsafe { ffi::cuMemAllocAsync(&raw mut pointer, bytes.max(1), stream.raw) },
         "cuMemAllocAsync",
     )?;
     Ok(pointer)
@@ -51,7 +51,7 @@ pub fn try_allocate_async(bytes: usize, stream: &Stream) -> Result<DevicePointer
 /// # Safety
 /// All work accessing `pointer` must be ordered before `stream`'s current position.
 pub unsafe fn free_async(pointer: DevicePointer, stream: &Stream) {
-    unsafe { try_free_async(pointer, stream) }.unwrap_or_else(|error| panic!("{error}"))
+    unsafe { try_free_async(pointer, stream) }.unwrap_or_else(|error| panic!("{error}"));
 }
 
 /// # Safety
@@ -76,7 +76,7 @@ pub unsafe fn copy_to_device_async(
     stream: &Stream,
 ) {
     unsafe { try_copy_to_device_async(destination, source, stream) }
-        .unwrap_or_else(|error| panic!("{error}"))
+        .unwrap_or_else(|error| panic!("{error}"));
 }
 
 /// # Safety
@@ -112,7 +112,7 @@ pub unsafe fn copy_from_device_async(
     stream: &Stream,
 ) {
     unsafe { try_copy_from_device_async(destination, source, stream) }
-        .unwrap_or_else(|error| panic!("{error}"))
+        .unwrap_or_else(|error| panic!("{error}"));
 }
 
 /// # Safety
@@ -145,7 +145,7 @@ pub unsafe fn try_copy_from_device_async(
 /// # Safety
 /// `source` must reference at least `destination.len()` readable device bytes.
 pub unsafe fn copy_from_device(destination: &mut [MaybeUninit<u8>], source: DevicePointer) {
-    unsafe { try_copy_from_device(destination, source) }.unwrap_or_else(|error| panic!("{error}"))
+    unsafe { try_copy_from_device(destination, source) }.unwrap_or_else(|error| panic!("{error}"));
 }
 
 /// # Safety
@@ -174,7 +174,7 @@ pub unsafe fn try_copy_from_device(
 /// `destination` must hold `bytes` bytes until the fill completes.
 pub unsafe fn fill_async(destination: DevicePointer, value: u8, bytes: usize, stream: &Stream) {
     unsafe { try_fill_async(destination, value, bytes, stream) }
-        .unwrap_or_else(|error| panic!("{error}"))
+        .unwrap_or_else(|error| panic!("{error}"));
 }
 
 /// # Safety
@@ -205,7 +205,7 @@ pub unsafe fn copy_device_async(
     stream: &Stream,
 ) {
     unsafe { try_copy_device_async(destination, source, bytes, stream) }
-        .unwrap_or_else(|error| panic!("{error}"))
+        .unwrap_or_else(|error| panic!("{error}"));
 }
 
 /// # Safety
@@ -233,7 +233,7 @@ pub unsafe fn fill_words_async(
     stream: &Stream,
 ) {
     unsafe { try_fill_words_async(destination, value, count, stream) }
-        .unwrap_or_else(|error| panic!("{error}"))
+        .unwrap_or_else(|error| panic!("{error}"));
 }
 
 /// # Safety
@@ -260,7 +260,7 @@ pub fn try_allocate_host(bytes: usize) -> Result<*mut c_void> {
     let mut pointer = ptr::null_mut();
     // SAFETY: the out-pointer references a valid local; portable storage works across contexts.
     ffi::result(
-        unsafe { ffi::cuMemHostAlloc(&mut pointer, bytes.max(1), 1) },
+        unsafe { ffi::cuMemHostAlloc(&raw mut pointer, bytes.max(1), 1) },
         "cuMemHostAlloc",
     )?;
     Ok(pointer)
@@ -276,7 +276,7 @@ pub unsafe fn free_host(pointer: *mut c_void) {
 /// # Safety
 /// The range must remain allocated at this address until unregistered.
 pub unsafe fn register_host(pointer: *mut c_void, bytes: usize) {
-    unsafe { try_register_host(pointer, bytes) }.unwrap_or_else(|error| panic!("{error}"))
+    unsafe { try_register_host(pointer, bytes) }.unwrap_or_else(|error| panic!("{error}"));
 }
 
 /// # Safety
@@ -334,7 +334,7 @@ pub fn try_tensor_map(
     ffi::result(
         unsafe {
             ffi::cuTensorMapEncodeTiled(
-                &mut map,
+                &raw mut map,
                 element_type,
                 2,
                 address,

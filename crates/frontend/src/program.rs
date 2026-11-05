@@ -83,7 +83,7 @@ pub fn analyze(sess: Session<'_>) -> Program {
                             argument.clone()
                         }
                     }
-                    argument => argument.clone(),
+                    argument @ GenericArgKind::Lifetime(_) => argument.clone(),
                 })
                 .collect(),
         );

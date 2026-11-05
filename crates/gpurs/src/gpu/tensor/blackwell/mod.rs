@@ -1,4 +1,4 @@
-//! sm_100a tensor cores: `tcgen05.mma` accumulators in tensor memory, filled from
+//! `sm_100a` tensor cores: `tcgen05.mma` accumulators in tensor memory, filled from
 //! [`TensorRing`](super::hopper::TensorRing)s and stored through output tiles.
 
 pub mod instruction;

@@ -1,4 +1,4 @@
-use std::{ffi::c_void, mem, rc::Rc, time::Duration};
+use std::{ffi::c_void, rc::Rc, time::Duration};
 
 use gpurs_driver as driver;
 
@@ -18,7 +18,7 @@ impl ExternalAccess {
         let span = storage.span();
         Self(Access::read(
             span.allocation,
-            span.start..span.start + span.len * mem::size_of::<T>(),
+            span.start..span.start + span.len * size_of::<T>(),
         ))
     }
 

@@ -103,10 +103,7 @@ impl Engine<'_> {
                     return Some(Proof::fixed(requirement));
                 }
                 let positive = self.nonnegative(&goal.polynomial.offset(-1)?, &facts);
-                if positive
-                    .as_ref()
-                    .is_some_and(|requirement| requirement.is_empty())
-                {
+                if positive.as_ref().is_some_and(Proof::is_empty) {
                     return positive;
                 }
                 let negative = self.nonnegative(&goal.polynomial.scale(-1)?.offset(-1)?, &facts);

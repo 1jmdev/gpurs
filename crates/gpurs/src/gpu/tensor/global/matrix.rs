@@ -1,6 +1,6 @@
 //! Operand matrices in GPU memory.
 
-use std::{marker::PhantomData, mem, ops::Range};
+use std::{marker::PhantomData, ops::Range};
 
 use super::{
     GatheredMatrix, TileCursor,
@@ -127,7 +127,7 @@ impl<'a, T, L: Layout> GlobalMatrix<'a, T, L> {
             Chunks::strided::<T, R, C, L, G>(self.data, group.thread(), [base, self.stride, limit]);
         let line = if L::DEPTH_MAJOR { 1 } else { self.stride };
         TileCursor::new(
-            Steps::new(length, tile_depth, line.wrapping_mul(mem::size_of::<T>())),
+            Steps::new(length, tile_depth, line.wrapping_mul(size_of::<T>())),
             chunks,
         )
     }

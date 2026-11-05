@@ -62,7 +62,7 @@ impl Compiler {
             let result = entry!(b"nvvmGetCompiledResult": Handle, *mut c_char);
 
             let mut handle = ptr::null_mut();
-            check(create(&mut handle))?;
+            check(create(&raw mut handle))?;
             let program = Program { handle, destroy };
             check(add(handle, ir.as_ptr().cast(), ir.len(), c"gpurs".as_ptr()))?;
             check(lazy(
@@ -89,12 +89,11 @@ impl Compiler {
                 |size: unsafe extern "C" fn(Handle, *mut usize) -> c_int,
                  get: unsafe extern "C" fn(Handle, *mut c_char) -> c_int| {
                     let mut length = 0;
-                    check(size(program.handle, &mut length))?;
+                    check(size(program.handle, &raw mut length))?;
                     let mut buffer = vec![0u8; length.max(1)];
                     check(get(program.handle, buffer.as_mut_ptr().cast()))?;
                     Ok(CStr::from_bytes_until_nul(&buffer)
-                        .map(|text| text.to_string_lossy().into_owned())
-                        .unwrap_or_default())
+                        .map_or_default(|text| text.to_string_lossy().into_owned()))
                 };
             match status {
                 0 => read(result_size, result),
@@ -110,7 +109,7 @@ impl Compiler {
 impl Drop for Program {
     fn drop(&mut self) {
         // SAFETY: the handle belongs to this program and its library is still loaded.
-        unsafe { (self.destroy)(&mut self.handle) };
+        unsafe { (self.destroy)(&raw mut self.handle) };
     }
 }
 

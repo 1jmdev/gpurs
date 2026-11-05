@@ -100,7 +100,7 @@ impl<const THREADS: usize> Block<THREADS> {
             assert!(
                 PRODUCERS > 0 && PRODUCERS * 32 < THREADS,
                 "a specialized block holds producer and consumer warps"
-            )
+            );
         };
         if self.warp() < PRODUCERS {
             Role::Producer(Producer(()))

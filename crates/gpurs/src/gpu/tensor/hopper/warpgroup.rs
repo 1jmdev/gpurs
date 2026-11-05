@@ -13,7 +13,7 @@ use crate::gpu::{
 /// The 128-byte swizzle mode of a `wgmma` matrix descriptor.
 const SWIZZLE: u64 = 1 << 62;
 
-/// A warpgroup's 64x256 f32 product, accumulated in registers by asynchronous sm_90a `wgmma`
+/// A warpgroup's 64x256 f32 product, accumulated in registers by asynchronous `sm_90a` `wgmma`
 /// from [`TensorRing`](super::TensorRing) stages. Warp `w` of the block holds rows
 /// `16 * w..16 * w + 16` of the block's product: the region of a 1x32-fragment
 /// [`WarpRegion`](crate::gpu::tensor::WarpRegion) of the block's tile.
@@ -47,7 +47,7 @@ impl WarpgroupAccumulator {
             assert!(
                 THREADS % 128 == 0 && ROWS == THREADS / 128 * 64,
                 "each warpgroup multiplies 64 rows of `a`"
-            )
+            );
         };
         let row = block.thread() / 128 * 64;
         intrinsics::warpgroup_fence();

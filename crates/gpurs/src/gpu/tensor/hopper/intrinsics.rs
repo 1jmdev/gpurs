@@ -1,4 +1,4 @@
-//! sm_90 mbarrier, TMA, and `wgmma` instructions.
+//! `sm_90` mbarrier, TMA, and `wgmma` instructions.
 
 use gpurs_macros::primitive;
 

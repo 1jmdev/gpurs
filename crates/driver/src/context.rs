@@ -45,13 +45,13 @@ impl Context {
             ffi::result(ffi::cuInit(0), "cuInit")?;
             ffi::result(
                 ffi::cuDeviceGet(
-                    &mut device,
+                    &raw mut device,
                     i32::try_from(ordinal).map_err(|_| crate::Error::new("cuDeviceGet", 101))?,
                 ),
                 "cuDeviceGet",
             )?;
             ffi::result(
-                ffi::cuDevicePrimaryCtxRetain(&mut raw, device),
+                ffi::cuDevicePrimaryCtxRetain(&raw mut raw, device),
                 "cuDevicePrimaryCtxRetain",
             )?;
         }
@@ -79,9 +79,9 @@ impl Context {
         let mut previous = ptr::null_mut();
         let mut device = 0;
         unsafe {
-            ffi::result(ffi::cuCtxGetCurrent(&mut previous), "cuCtxGetCurrent")?;
+            ffi::result(ffi::cuCtxGetCurrent(&raw mut previous), "cuCtxGetCurrent")?;
             ffi::result(ffi::cuCtxSetCurrent(raw), "cuCtxSetCurrent")?;
-            let result = ffi::cuCtxGetDevice(&mut device);
+            let result = ffi::cuCtxGetDevice(&raw mut device);
             ffi::result(ffi::cuCtxSetCurrent(previous), "cuCtxSetCurrent")?;
             ffi::result(result, "cuCtxGetDevice")?;
         }
@@ -100,7 +100,7 @@ impl Context {
     pub(crate) fn try_current() -> Result<Self> {
         let mut raw = ptr::null_mut();
         Ok(unsafe {
-            ffi::result(ffi::cuCtxGetCurrent(&mut raw), "cuCtxGetCurrent")?;
+            ffi::result(ffi::cuCtxGetCurrent(&raw mut raw), "cuCtxGetCurrent")?;
             Self::try_from_raw(raw, Ownership::Borrowed)?
         })
     }
@@ -120,7 +120,7 @@ impl Context {
 
     pub fn try_enter(&self) -> Result<ContextGuard> {
         let mut previous = ptr::null_mut();
-        unsafe { ffi::result(ffi::cuCtxGetCurrent(&mut previous), "cuCtxGetCurrent")? };
+        unsafe { ffi::result(ffi::cuCtxGetCurrent(&raw mut previous), "cuCtxGetCurrent")? };
         self.try_make_current()?;
         Ok(ContextGuard {
             previous,
@@ -130,7 +130,7 @@ impl Context {
 
     pub fn make_current(&self) {
         self.try_make_current()
-            .unwrap_or_else(|error| panic!("{error}"))
+            .unwrap_or_else(|error| panic!("{error}"));
     }
 
     pub fn try_make_current(&self) -> Result<()> {
@@ -141,7 +141,7 @@ impl Context {
         Ok(())
     }
 
-    /// CUDA device attribute identifier, as defined by CUdevice_attribute.
+    /// CUDA device attribute identifier, as defined by `CUdevice_attribute`.
     pub fn attribute(&self, attribute: i32) -> i32 {
         self.try_attribute(attribute)
             .unwrap_or_else(|error| panic!("{error}"))
@@ -150,7 +150,7 @@ impl Context {
     pub fn try_attribute(&self, attribute: i32) -> Result<i32> {
         let mut value = 0;
         ffi::result(
-            unsafe { ffi::cuDeviceGetAttribute(&mut value, attribute, self.0.device) },
+            unsafe { ffi::cuDeviceGetAttribute(&raw mut value, attribute, self.0.device) },
             "cuDeviceGetAttribute",
         )?;
         Ok(value)
@@ -194,7 +194,7 @@ impl Context {
         let _context = self.try_enter()?;
         let (mut free, mut total) = (0, 0);
         ffi::result(
-            unsafe { ffi::cuMemGetInfo_v2(&mut free, &mut total) },
+            unsafe { ffi::cuMemGetInfo_v2(&raw mut free, &raw mut total) },
             "cuMemGetInfo",
         )?;
         Ok((free, total))
@@ -206,7 +206,7 @@ impl Context {
         let mut bytes = bytes;
         unsafe {
             ffi::result(
-                ffi::cuDeviceGetDefaultMemPool(&mut pool, self.0.device),
+                ffi::cuDeviceGetDefaultMemPool(&raw mut pool, self.0.device),
                 "cuDeviceGetDefaultMemPool",
             )?;
             ffi::result(
@@ -221,7 +221,7 @@ impl Context {
         let mut pool = ptr::null_mut();
         unsafe {
             ffi::result(
-                ffi::cuDeviceGetDefaultMemPool(&mut pool, self.0.device),
+                ffi::cuDeviceGetDefaultMemPool(&raw mut pool, self.0.device),
                 "cuDeviceGetDefaultMemPool",
             )?;
             ffi::result(ffi::cuMemPoolTrimTo(pool, bytes), "cuMemPoolTrimTo")
@@ -238,7 +238,7 @@ impl Context {
         let _context = self.try_enter()?;
         let (mut least, mut greatest) = (0, 0);
         ffi::result(
-            unsafe { ffi::cuCtxGetStreamPriorityRange(&mut least, &mut greatest) },
+            unsafe { ffi::cuCtxGetStreamPriorityRange(&raw mut least, &raw mut greatest) },
             "cuCtxGetStreamPriorityRange",
         )?;
         Ok((least, greatest))
@@ -246,7 +246,7 @@ impl Context {
 
     pub fn synchronize(&self) {
         self.try_synchronize()
-            .unwrap_or_else(|error| panic!("{error}"))
+            .unwrap_or_else(|error| panic!("{error}"));
     }
 
     pub fn try_synchronize(&self) -> Result<()> {

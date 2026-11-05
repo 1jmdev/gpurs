@@ -1,4 +1,4 @@
-//! Tensor-core matrix products for sm_80 and later, built from primitives the kernel composes
+//! Tensor-core matrix products for `sm_80` and later, built from primitives the kernel composes
 //! itself: no part of the library runs a whole product.
 //!
 //! - A scheduler ([`Grid`], [`SplitDepth`], [`Persistent`], [`StreamK`], [`Grouped`]) hands the
@@ -13,7 +13,7 @@
 //!   staged through the ring's [`SharedLease`]; depth slices combine under a [`TileLock`] or
 //!   by atomic accumulation.
 //!
-//! The [`hopper`] and [`blackwell`] modules provide the same pieces for sm_90a and sm_100a:
+//! The [`hopper`] and [`blackwell`] modules provide the same pieces for `sm_90a` and `sm_100a`:
 //! TMA cursors and rings, and `wgmma` or `tcgen05.mma` accumulators.
 //!
 //! Each operation lowers to the instructions a hand-written CUDA kernel uses, and its safety

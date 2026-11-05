@@ -271,8 +271,9 @@ fn annotate(attributes: &mut Vec<syn::Attribute>, annotation: Annotation) {
 
 pub(crate) fn tool_meta(annotation: &Annotation) -> Tokens {
     let name = format_ident!("{}", annotation.kind().name());
-    match annotation.value() {
-        Some(value) => quote!(gpurs_tool::#name = #value),
-        None => quote!(gpurs_tool::#name),
+    if let Some(value) = annotation.value() {
+        quote!(gpurs_tool::#name = #value)
+    } else {
+        quote!(gpurs_tool::#name)
     }
 }

@@ -51,7 +51,7 @@ fn normalized_quotient(value: u32, divisor: u32) -> u32 {
     value / divisor.max(1)
 }
 
-fn main() -> gpurs::Result<()> {
+fn main() -> Result<()> {
     let gpu = Gpu::new(0)?;
     let stream = gpu.stream()?;
     for divisor in [0, 1, 7] {

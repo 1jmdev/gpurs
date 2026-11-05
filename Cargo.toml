@@ -37,5 +37,17 @@ unsafe_op_in_unsafe_fn = "warn"
 unused_qualifications = "warn"
 
 [workspace.lints.clippy]
-all = { level = "warn", priority = -1 }
-pedantic = { level = "warn", priority = -1 }
+assigning_clones = "warn"
+borrow_as_ptr = "warn"
+doc_markdown = "warn"
+elidable_lifetime_names = "warn"
+implicit_clone = "warn"
+manual_let_else = "warn"
+map_unwrap_or = "warn"
+match_wildcard_for_single_variants = "warn"
+needless_for_each = "warn"
+redundant_closure_for_method_calls = "warn"
+ref_as_ptr = "warn"
+semicolon_if_nothing_returned = "warn"
+stable_sort_primitive = "warn"
+unnested_or_patterns = "warn"

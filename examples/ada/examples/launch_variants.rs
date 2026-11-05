@@ -46,11 +46,11 @@ fn block_sum(input: &[f32], output: &mut [f32]) {
     }
 }
 
-fn fails<T>(operation: impl FnOnce() -> gpurs::Result<T>) -> bool {
+fn fails<T>(operation: impl FnOnce() -> Result<T>) -> bool {
     operation().is_err()
 }
 
-fn main() -> gpurs::Result<()> {
+fn main() -> Result<()> {
     let gpu = Gpu::new(0)?;
     let stream = gpu.stream()?;
     let values = (0..1000).map(|value| value as f32).collect::<Vec<_>>();

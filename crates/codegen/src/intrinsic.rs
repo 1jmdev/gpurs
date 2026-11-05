@@ -16,7 +16,7 @@ use super::{
     place::{Operand, Place, Value},
 };
 
-impl<'sess> FunctionBuilder<'_, 'sess> {
+impl FunctionBuilder<'_, '_> {
     pub fn intrinsic(
         &mut self,
         instance: Instance,
@@ -109,7 +109,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
             "rotate_left" | "rotate_right" => {
                 let value = arguments[0].scalar();
                 let ty = value.ty.clone();
-                let mask = IRValue::int(ty.clone(), ty.bits() as u128 - 1);
+                let mask = IRValue::int(ty.clone(), u128::from(ty.bits()) - 1);
                 let shift = self.ir.resize(arguments[1].scalar(), ty.clone(), false);
                 let shift = self
                     .ir
@@ -421,9 +421,10 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                         .iter()
                         .map(|(_, scalar)| layout::immediate_type(*scalar))
                         .collect();
-                    let result = match types.is_empty() {
-                        true => Type::Void,
-                        false => Type::Struct(types),
+                    let result = if types.is_empty() {
+                        Type::Void
+                    } else {
+                        Type::Struct(types)
                     };
                     let result = self
                         .ir
@@ -658,16 +659,19 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
         let pointer_value = layout::immediate_type(scalar).is_pointer();
         let values: Vec<_> = arguments[1..]
             .iter()
-            .map(|argument| match pointer_value {
-                true => self
-                    .ir
-                    .cast(Conversion::PtrToInt, argument.scalar(), Type::I64),
-                false => argument.scalar(),
+            .map(|argument| {
+                if pointer_value {
+                    self.ir
+                        .cast(Conversion::PtrToInt, argument.scalar(), Type::I64)
+                } else {
+                    argument.scalar()
+                }
             })
             .collect();
-        let ty = match pointer_value {
-            true => Type::I64,
-            false => layout::memory_type(layout::primitive(scalar)),
+        let ty = if pointer_value {
+            Type::I64
+        } else {
+            layout::memory_type(layout::primitive(scalar))
         };
         let pointer = arguments[0].scalar();
         if ty == Type::Integer(16)
@@ -781,11 +785,11 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                     name == "atomic_cxchgweak",
                 );
                 let value = self.ir.extract(result.clone(), 0);
-                let value = match pointer_value {
-                    true => self
-                        .ir
-                        .cast(Conversion::IntToPtr, value, Type::byte_pointer()),
-                    false => value,
+                let value = if pointer_value {
+                    self.ir
+                        .cast(Conversion::IntToPtr, value, Type::byte_pointer())
+                } else {
+                    value
                 };
                 let success = self.ir.extract(result, 1);
                 return self.assign(destination, Value::Pair(value, success));
@@ -808,11 +812,11 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                 self.ir.modify(operation, pointer, values[0].clone(), order)
             }
         };
-        let value = match pointer_value {
-            true => self
-                .ir
-                .cast(Conversion::IntToPtr, value, Type::byte_pointer()),
-            false => value,
+        let value = if pointer_value {
+            self.ir
+                .cast(Conversion::IntToPtr, value, Type::byte_pointer())
+        } else {
+            value
         };
         self.assign(destination, Value::Scalar(value));
     }

@@ -1,6 +1,6 @@
 //! Ring storage handed to epilogues once no copy or read of it remains.
 
-use std::{marker::PhantomData, mem};
+use std::marker::PhantomData;
 
 /// The block-shared storage of a ring, a `U`, after [`GroupRing::release`](super::GroupRing)
 /// completed every copy into it and every thread passed a block barrier. It borrows the ring,
@@ -21,11 +21,11 @@ impl<U> SharedLease<'_, U> {
 
     /// The bytes of the leased storage.
     pub const fn len(&self) -> usize {
-        mem::size_of::<U>()
+        size_of::<U>()
     }
 
     pub const fn is_empty(&self) -> bool {
-        mem::size_of::<U>() == 0
+        size_of::<U>() == 0
     }
 
     /// The generic address of the leased storage.

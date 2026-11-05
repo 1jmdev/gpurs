@@ -1,4 +1,4 @@
-//! sm_100a `tcgen05` instructions.
+//! `sm_100a` `tcgen05` instructions.
 
 use gpurs_macros::primitive;
 

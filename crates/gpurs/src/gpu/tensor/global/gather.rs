@@ -1,6 +1,6 @@
 //! Operands whose rows are gathered by device indices, such as the tokens routed to an expert.
 
-use std::{marker::PhantomData, mem, ops::Range};
+use std::{marker::PhantomData, ops::Range};
 
 use gpurs_macros::primitive;
 
@@ -55,7 +55,7 @@ impl<'a, T> GatheredMatrix<'a, T> {
             });
         GatherCursor {
             data: PhantomData,
-            steps: Steps::new(length, C, mem::size_of::<T>()),
+            steps: Steps::new(length, C, size_of::<T>()),
             chunks,
         }
     }
@@ -71,8 +71,8 @@ pub struct GatherCursor<'a, T, const THREADS: usize, const R: usize, const C: us
     chunks: Chunks<Gathered>,
 }
 
-impl<'a, T: Element, const THREADS: usize, const R: usize, const C: usize>
-    GatherCursor<'a, T, THREADS, R, C>
+impl<T: Element, const THREADS: usize, const R: usize, const C: usize>
+    GatherCursor<'_, T, THREADS, R, C>
 {
     /// The copies that hold the depth range: the stages a kernel multiplies.
     pub fn steps(&self) -> usize {
@@ -94,7 +94,7 @@ impl<'a, T: Element, const THREADS: usize, const R: usize, const C: usize>
     ) -> Initialized<'s, SharedTile<T, R, C, DepthMajor>> {
         unsafe {
             self.chunks
-                .copy::<T, R, C, DepthMajor, Block<THREADS>>(writer.tile, &mut self.steps)
+                .copy::<T, R, C, DepthMajor, Block<THREADS>>(writer.tile, &mut self.steps);
         };
         Initialized::new()
     }

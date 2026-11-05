@@ -1,8 +1,6 @@
 //! The classic multistage `cp.async` ring: one commit group per stage and one block barrier
 //! per consumed stage.
 
-use std::mem;
-
 use gpurs_macros::primitive;
 
 use super::{Asynchronous, SharedLease, Stage, stage::Initialize};
@@ -145,7 +143,7 @@ impl<S: Stage<Asynchronous>, const STAGES: usize> GroupRing<S, STAGES> {
     fn zero(&mut self) {
         let slot = self.slot(self.filled).cast::<Zero>();
         let mut chunk = gpu::thread_id().x;
-        while chunk < mem::size_of::<S>() / 16 {
+        while chunk < size_of::<S>() / 16 {
             // SAFETY: the chunk lies inside a free stage, and tiles are 128-byte aligned.
             unsafe { slot.add(chunk).write(Zero([0; 4])) };
             chunk += gpu::block_dim().x;
@@ -158,7 +156,7 @@ impl<S: Stage<Asynchronous>, const STAGES: usize> GroupRing<S, STAGES> {
             assert!(
                 STAGES >= 2 && STAGES <= 8,
                 "cp.async rings hold 2 to 8 stages"
-            )
+            );
         };
         // SAFETY: the storage holds `STAGES` stages.
         unsafe { self.storage.cast::<S>().add(index as usize % STAGES) }

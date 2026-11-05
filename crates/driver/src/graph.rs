@@ -15,7 +15,7 @@ pub struct GraphExec {
     context: Context,
 }
 
-/// CUDA_KERNEL_NODE_PARAMS_v1, using CUDA's individual-parameter pointer ABI.
+/// `CUDA_KERNEL_NODE_PARAMS_v1`, using CUDA's individual-parameter pointer ABI.
 #[repr(C)]
 #[derive(Debug)]
 pub struct KernelNodeParameters {
@@ -38,11 +38,11 @@ impl Graph {
             unsafe {
                 ffi::cuStreamGetCaptureInfo_v2(
                     stream.raw,
-                    &mut status,
+                    &raw mut status,
                     ptr::null_mut(),
                     ptr::null_mut(),
-                    &mut dependencies,
-                    &mut count,
+                    &raw mut dependencies,
+                    &raw mut count,
                 )
             },
             "cuStreamGetCaptureInfo",
@@ -84,7 +84,7 @@ impl Graph {
         let submitted = submit();
         let mut raw = ptr::null_mut();
         let ended = ffi::result(
-            unsafe { ffi::cuStreamEndCapture(stream.raw, &mut raw) },
+            unsafe { ffi::cuStreamEndCapture(stream.raw, &raw mut raw) },
             "cuStreamEndCapture",
         );
         if submitted.is_err() || ended.is_err() {
@@ -125,7 +125,7 @@ impl Graph {
         let _context = self.context.try_enter()?;
         let mut raw = ptr::null_mut();
         ffi::result(
-            unsafe { ffi::cuGraphInstantiateWithFlags(&mut raw, self.raw, 0) },
+            unsafe { ffi::cuGraphInstantiateWithFlags(&raw mut raw, self.raw, 0) },
             "cuGraphInstantiateWithFlags",
         )?;
         Ok(GraphExec {
@@ -143,12 +143,12 @@ impl Graph {
         let _context = self.context.try_enter()?;
         let mut count = 0;
         ffi::result(
-            unsafe { ffi::cuGraphGetNodes(self.raw, ptr::null_mut(), &mut count) },
+            unsafe { ffi::cuGraphGetNodes(self.raw, ptr::null_mut(), &raw mut count) },
             "cuGraphGetNodes",
         )?;
         let mut nodes = vec![ptr::null_mut(); count];
         ffi::result(
-            unsafe { ffi::cuGraphGetNodes(self.raw, nodes.as_mut_ptr(), &mut count) },
+            unsafe { ffi::cuGraphGetNodes(self.raw, nodes.as_mut_ptr(), &raw mut count) },
             "cuGraphGetNodes",
         )?;
         nodes.truncate(count);
@@ -156,7 +156,7 @@ impl Graph {
         for node in nodes {
             let mut kind = 0;
             ffi::result(
-                unsafe { ffi::cuGraphNodeGetType(node, &mut kind) },
+                unsafe { ffi::cuGraphNodeGetType(node, &raw mut kind) },
                 "cuGraphNodeGetType",
             )?;
             if kind == 0 {
@@ -188,7 +188,7 @@ impl GraphExec {
     /// # Safety
     /// The graph's resources and its memory-safety obligations must hold for this replay.
     pub unsafe fn launch(&self, stream: &Stream) {
-        unsafe { self.try_launch(stream) }.unwrap_or_else(|error| panic!("{error}"))
+        unsafe { self.try_launch(stream) }.unwrap_or_else(|error| panic!("{error}"));
     }
 
     /// # Safety
@@ -212,7 +212,8 @@ impl GraphExec {
         let _context = self.context.try_enter()?;
         let mut node = ptr::null_mut();
         let mut result = 0;
-        let error = unsafe { ffi::cuGraphExecUpdate(self.raw, graph.raw, &mut node, &mut result) };
+        let error =
+            unsafe { ffi::cuGraphExecUpdate(self.raw, graph.raw, &raw mut node, &raw mut result) };
         if error != 910 {
             ffi::result(error, "cuGraphExecUpdate")?;
         }
@@ -223,7 +224,7 @@ impl GraphExec {
     /// The node must belong to the instantiating graph. Parameters must satisfy its ABI,
     /// safety obligations, CUDA update restrictions, and resource lifetime requirements.
     pub unsafe fn set_kernel(&mut self, node: *mut c_void, parameters: &KernelNodeParameters) {
-        unsafe { self.try_set_kernel(node, parameters) }.unwrap_or_else(|error| panic!("{error}"))
+        unsafe { self.try_set_kernel(node, parameters) }.unwrap_or_else(|error| panic!("{error}"));
     }
 
     /// # Safety

@@ -1,9 +1,9 @@
 //! Explicit vector transfers and compile-time cache policies. Vectors contain raw words so
 //! FP16/BF16/FP8 and integer/f32 payloads retain exact bits. Vector2/Vector4 require 8/16-byte
-//! alignment; Vector2Wide requires 16 bytes. A vector instruction is not an atomic transaction.
+//! alignment; `Vector2Wide` requires 16 bytes. A vector instruction is not an atomic transaction.
 //! Consecutive lanes should address consecutive vectors for coalescing; lane mapping is caller
 //! controlled. Shared operations take a shared-space byte offset, global operations a typed
-//! DeviceAddress. Cache hints do not synchronize, order, or make races valid. ReadOnly uses
+//! `DeviceAddress`. Cache hints do not synchronize, order, or make races valid. `ReadOnly` uses
 //! the noncoherent cache: data must stay immutable throughout the kernel, including aliases.
 //!
 //! Raw transfers are unsafe: retain storage on the correct GPU and register queued dependency

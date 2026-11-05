@@ -2,7 +2,7 @@
 //! saturation, preserving signed zero and subnormals. E4M3 has finite range ±448, no infinity,
 //! and NaN at magnitude 0x7f. E5M2 has finite range ±57344, infinities at magnitude 0x7c and
 //! NaNs above it. Saturating conversion maps infinities to the largest finite value and NaNs
-//! to canonical NaN. Storage/host conversions need no GPU; native conversion needs sm_89.
+//! to canonical NaN. Storage/host conversions need no GPU; native conversion needs `sm_89`.
 //! There is no generic FP8 arithmetic API. Numerical equality uses `to_f32`; derives compare bits.
 
 #[cfg(gpurs_device)]
@@ -43,7 +43,7 @@ impl E4M3 {
                 }
             }
             if low < 126 {
-                let midpoint = (Self(low).to_f32() + Self(low + 1).to_f32()) * 0.5;
+                let midpoint = f32::midpoint(Self(low).to_f32(), Self(low + 1).to_f32());
                 if magnitude > midpoint || (magnitude == midpoint && low & 1 != 0) {
                     low += 1;
                 }
@@ -60,16 +60,16 @@ impl E4M3 {
         #[cfg(not(gpurs_device))]
         {
             let magnitude = self.0 & 0x7f;
-            let sign = (self.0 as u32 & 0x80) << 24;
+            let sign = (u32::from(self.0) & 0x80) << 24;
             if magnitude == 127 {
                 return f32::from_bits(sign | 0x7fc0_0000);
             }
             let exponent = magnitude >> 3;
             let fraction = magnitude & 7;
             let value = if exponent == 0 {
-                fraction as f32 * f32::from_bits(118 << 23)
+                f32::from(fraction) * f32::from_bits(118 << 23)
             } else {
-                f32::from_bits(((exponent as u32 + 120) << 23) | (fraction as u32) << 20)
+                f32::from_bits(((u32::from(exponent) + 120) << 23) | u32::from(fraction) << 20)
             };
             f32::from_bits(sign | value.to_bits())
         }
@@ -156,7 +156,7 @@ impl E5M2 {
                 }
             }
             if low < 123 {
-                let midpoint = (Self(low).to_f32() + Self(low + 1).to_f32()) * 0.5;
+                let midpoint = f32::midpoint(Self(low).to_f32(), Self(low + 1).to_f32());
                 if magnitude > midpoint || (magnitude == midpoint && low & 1 != 0) {
                     low += 1;
                 }
@@ -173,7 +173,7 @@ impl E5M2 {
         #[cfg(not(gpurs_device))]
         {
             let magnitude = self.0 & 0x7f;
-            let sign = (self.0 as u32 & 0x80) << 24;
+            let sign = (u32::from(self.0) & 0x80) << 24;
             if magnitude >= 124 {
                 return f32::from_bits(
                     sign | if magnitude == 124 {
@@ -186,9 +186,9 @@ impl E5M2 {
             let exponent = magnitude >> 2;
             let fraction = magnitude & 3;
             let value = if exponent == 0 {
-                fraction as f32 * f32::from_bits(111 << 23)
+                f32::from(fraction) * f32::from_bits(111 << 23)
             } else {
-                f32::from_bits(((exponent as u32 + 112) << 23) | (fraction as u32) << 21)
+                f32::from_bits(((u32::from(exponent) + 112) << 23) | u32::from(fraction) << 21)
             };
             f32::from_bits(sign | value.to_bits())
         }
@@ -242,8 +242,8 @@ impl E5M2x2 {
     pub fn to_half2(self) -> Half2;
 }
 
-/// Opaque TensorFloat32 registers. PTX leaves the encoding implementation-defined; host
-/// construction and to_f32 model NVIDIA's current f32-compatible encoding. Construct device
+/// Opaque `TensorFloat32` registers. PTX leaves the encoding implementation-defined; host
+/// construction and `to_f32` model NVIDIA's current f32-compatible encoding. Construct device
 /// MMA operands with the device conversion. Construction is an explicit precision choice.
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]

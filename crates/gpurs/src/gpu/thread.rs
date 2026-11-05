@@ -112,7 +112,7 @@ impl<const THREADS: usize> Block<THREADS> {
             assert!(
                 THREADS > 0 && THREADS % 32 == 0 && THREADS <= 1024,
                 "a block holds between 32 and 1024 threads in complete warps"
-            )
+            );
         };
         Block(())
     }

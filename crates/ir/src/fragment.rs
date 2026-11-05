@@ -62,9 +62,10 @@ impl Module {
             .iter()
             .map(|function| {
                 let text = function.to_string();
-                let definition = match function.comment.is_empty() {
-                    true => text,
-                    false => text.split_once('\n').unwrap().1.to_owned(),
+                let definition = if function.comment.is_empty() {
+                    text
+                } else {
+                    text.split_once('\n').unwrap().1.to_owned()
                 };
                 (function.name.as_str(), definition)
             })
@@ -99,9 +100,10 @@ impl Module {
                 ));
             }
             if defined.insert(name.clone()) {
-                let comment = match function.comment.is_empty() {
-                    true => String::new(),
-                    false => format!("; {}\n", function.comment),
+                let comment = if function.comment.is_empty() {
+                    String::new()
+                } else {
+                    format!("; {}\n", function.comment)
                 };
                 let definition = substitute(&definitions[function.name.as_str()], |symbol| {
                     names.get(symbol).map(String::as_str)
@@ -151,9 +153,12 @@ fn content_name(
             content_name(callee, definitions, internal, names);
         }
     }
-    let anonymous = substitute(definition, |symbol| match symbol == function {
-        true => Some(""),
-        false => names.get(symbol).map(String::as_str),
+    let anonymous = substitute(definition, |symbol| {
+        if symbol == function {
+            Some("")
+        } else {
+            names.get(symbol).map(String::as_str)
+        }
     });
     names.insert(
         function.to_owned(),

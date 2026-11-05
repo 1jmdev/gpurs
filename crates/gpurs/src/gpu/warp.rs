@@ -106,8 +106,8 @@ impl Shuffle for f32 {
 impl Shuffle for u64 {
     #[inline]
     fn shuffle(self, exchange: Exchange, operand: u32) -> Self {
-        let low = (self as u32).shuffle(exchange, operand) as u64;
-        let high = ((self >> 32) as u32).shuffle(exchange, operand) as u64;
+        let low = u64::from((self as u32).shuffle(exchange, operand));
+        let high = u64::from(((self >> 32) as u32).shuffle(exchange, operand));
         high << 32 | low
     }
 }

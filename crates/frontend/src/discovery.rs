@@ -200,7 +200,7 @@ fn string(sess: Session<'_>, body: &Body, operand: &Operand) -> Option<String> {
                     }
                 });
         }
-        _ => return None,
+        Operand::RuntimeChecks(_) => return None,
     };
     sess.string_constant(constant)
 }

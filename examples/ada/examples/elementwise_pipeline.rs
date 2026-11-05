@@ -23,7 +23,7 @@ fn scale(values: &mut [f32], factor: f32) {
     }
 }
 
-fn main() -> gpurs::Result<()> {
+fn main() -> Result<()> {
     let gpu = Gpu::new(0)?;
     let stream = gpu.stream()?;
 

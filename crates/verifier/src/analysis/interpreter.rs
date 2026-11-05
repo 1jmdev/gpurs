@@ -188,7 +188,7 @@ impl<'a, 'sess> Analysis<'a, 'sess> {
             self.program.successors[caller] = vec![offset];
             for (block, data) in body.blocks.iter().enumerate() {
                 if matches!(data.terminator.kind, TerminatorKind::Return) {
-                    self.program.successors[offset + block] = continuation.clone();
+                    self.program.successors[offset + block].clone_from(&continuation);
                 }
             }
         }

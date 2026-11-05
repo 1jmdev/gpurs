@@ -1,4 +1,4 @@
-//! Lets the library find librustc_driver in the toolchain sysroot when loaded, and detects
+//! Lets the library find `librustc_driver` in the toolchain sysroot when loaded, and detects
 //! which `rustc_public` API shape the user's compiler provides.
 
 use std::{

@@ -18,7 +18,7 @@ fn add_bias(input: &[f32], output: &mut [f32], bias: f32) {
     }
 }
 
-fn main() -> gpurs::Result<()> {
+fn main() -> Result<()> {
     let gpu = Gpu::new(0)?;
     let first_stream = gpu.stream()?;
     let second_stream = gpu.stream()?;

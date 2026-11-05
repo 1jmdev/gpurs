@@ -10,7 +10,7 @@ use super::{
     place::{Operand, Place, Value},
 };
 
-impl<'sess> FunctionBuilder<'_, 'sess> {
+impl FunctionBuilder<'_, '_> {
     pub fn rvalue(&mut self, destination: &Place, rvalue: &Rvalue) {
         let operand = match rvalue {
             Rvalue::Use(operand, _) => self.operand(operand),
@@ -154,12 +154,11 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
             None => destination.clone(),
         };
         for (index, operand) in operands.iter().enumerate() {
-            let place = match kind {
-                AggregateKind::Array(_) => self.index(&target, IRValue::i64(index as u64)),
-                _ => {
-                    let field = active.unwrap_or(index);
-                    self.field_place(&target, field)
-                }
+            let place = if let AggregateKind::Array(_) = kind {
+                self.index(&target, IRValue::i64(index as u64))
+            } else {
+                let field = active.unwrap_or(index);
+                self.field_place(&target, field)
             };
             self.store(&place, operand);
         }
@@ -317,7 +316,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
         let amount = self.ir.resize(right.scalar(), ty.clone(), false);
         match operation {
             BinOp::Shl | BinOp::Shr => {
-                let mask = IRValue::int(ty.clone(), ty.bits() as u128 - 1);
+                let mask = IRValue::int(ty.clone(), u128::from(ty.bits()) - 1);
                 self.ir.binary(Binary::And, Flags::empty(), amount, mask)
             }
             _ => amount,
@@ -333,7 +332,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
         };
         let is_less = self.ir.compare(less, a.clone(), b.clone());
         let is_equal = self.ir.compare(equal, a, b);
-        let byte = |value| IRValue::int(Type::I8, value as u128);
+        let byte = |value| IRValue::int(Type::I8, u128::from(value));
         let not_less = self.ir.select(is_equal, byte(0), byte(1));
         self.ir.select(is_less, byte(-1i8 as u8), not_less)
     }
