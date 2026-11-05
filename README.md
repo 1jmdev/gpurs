@@ -7,6 +7,7 @@ Write NVIDIA GPU kernels in Rust and launch them from Rust.
 - An NVIDIA GPU and driver.
 - The CUDA toolkit, including libNVVM and `ptxas`. gpurs searches `CUDA_PATH`, `CUDA_HOME`, `/opt/cuda`, and `/usr/local/cuda`.
 - Rust `1.99` or newer (stable or nightly) with the `rustc-dev` component installed. No pinned toolchain is required.
+- Linux only currently
 
 ## Setup
 
@@ -31,7 +32,7 @@ fn main() {
 Chain kernels on the same stream:
 
 ```rust
-use gpurs::{DeviceSlice, Gpu, Result, gpu, kernel};
+use gpurs::{DeviceSlice, Gpu, Result, gpu};
 
 #[gpu]
 fn adjust(value: f32, offset: f32) -> f32 {
@@ -40,7 +41,7 @@ fn adjust(value: f32, offset: f32) -> f32 {
 
 #[gpu]
 fn add_offset(values: &mut [f32], offset: f32) {
-    let index = kernel::index();
+    let index = gpu::index();
     if index < values.len() {
         values[index] = adjust(values[index], offset);
     }
@@ -48,7 +49,7 @@ fn add_offset(values: &mut [f32], offset: f32) {
 
 #[gpu]
 fn double(values: &mut [f32]) {
-    let index = kernel::index();
+    let index = gpu::index();
     if index < values.len() {
         values[index] *= 2.0;
     }
@@ -155,11 +156,11 @@ println!("{:?}", values.download()?);
 Set explicit launch dimensions:
 
 ```rust
-use gpurs::{DeviceSlice, Gpu, LaunchConfig, Result, gpu, kernel};
+use gpurs::{DeviceSlice, Gpu, LaunchConfig, Result, gpu};
 
 #[gpu]
 fn position(origin: f32, step: f32) -> f32 {
-    origin + kernel::index() as f32 * step
+    origin + gpu::index() as f32 * step
 }
 
 fn main() -> Result<()> {
