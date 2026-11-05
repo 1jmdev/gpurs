@@ -399,12 +399,10 @@ impl<'tcx> Session<'tcx> {
                         .then(|| self.associated_path(item, args, host))
                         .flatten()
                 });
-            // The gpurs source view opens every file with one extra line.
-            let line = location.line - 1;
             for statement in imports.into_iter().chain(items) {
                 references.push(Reference {
                     file: file.display().to_string(),
-                    line,
+                    line: location.line,
                     statement,
                 });
             }

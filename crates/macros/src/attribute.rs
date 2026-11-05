@@ -1,6 +1,7 @@
-use std::{env, fs};
+use std::fs;
 
 use gpurs_artifact::Reference;
+use proc_macro::tracked;
 use proc_macro2::{Span, TokenStream as Tokens};
 use quote::{ToTokens, format_ident, quote};
 use syn::{
@@ -74,8 +75,13 @@ pub(crate) fn expand_function(function: ItemFn) -> Tokens {
         .local_file()
         .and_then(|path| fs::canonicalize(path).ok())
         .map(|path| path.display().to_string());
-    let recorded: Vec<Reference> = env::var_os("GPURS_REFERENCES")
-        .and_then(|path| fs::read(path).ok())
+    // Tracked, so a cached expansion is redone when the device stage records new references.
+    let recorded: Vec<Reference> = tracked::env_var("GPURS_REFERENCES")
+        .ok()
+        .and_then(|path| {
+            tracked::path(&path);
+            fs::read(path).ok()
+        })
         .map_or_default(|bytes| serde_json::from_slice(&bytes).unwrap());
     let device = recorded
         .into_iter()

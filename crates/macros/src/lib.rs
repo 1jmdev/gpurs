@@ -4,6 +4,8 @@
 //! their device bodies in a separate source view. Annotated methods keep their implementation
 //! and gain launchers on `DeviceValue<Self>`.
 
+#![feature(proc_macro_tracked_env, proc_macro_tracked_path)]
+
 mod attribute;
 mod compilation;
 mod launcher;
