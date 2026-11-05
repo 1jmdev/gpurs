@@ -40,6 +40,7 @@ impl Depth for Partial {}
 /// A `BM`x`BN` output tile assigned to this block by a scheduler. Every thread of the block
 /// holds the same tile, and no other block holds a [`Complete`] tile at the same position.
 #[derive(Debug)]
+#[cfg_attr(gpurs_device, rustc_diagnostic_item = "gpurs_tile")]
 pub struct Tile<const BM: usize, const BN: usize, D = Complete> {
     row: usize,
     column: usize,

@@ -17,6 +17,7 @@ pub mod attributes;
 pub mod call_graph;
 pub mod driver;
 mod graph;
+mod item;
 pub mod layout;
 mod policy;
 pub mod session;
@@ -25,6 +26,7 @@ mod source;
 pub use arguments::device_arguments;
 pub use driver::{run, version};
 pub use graph::Graph;
+pub use item::Item;
 pub use layout::{PassMode, Shape, Signature, is_bfloat, pass_mode};
 pub use policy::Policy;
 pub use rustc_data_structures::{

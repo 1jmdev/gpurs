@@ -3,6 +3,7 @@ use gpurs_macros::primitive;
 use crate::DeviceAddress;
 
 #[repr(C)]
+#[cfg_attr(gpurs_device, rustc_diagnostic_item = "gpurs_scatter")]
 pub struct Scatter<T> {
     pub(crate) target: DeviceAddress<T>,
     pub(crate) indices: DeviceAddress<usize>,
@@ -19,6 +20,7 @@ impl<T: Copy> Scatter<T> {
         self.len == 0
     }
 
+    #[cfg_attr(gpurs_device, rustc_diagnostic_item = "gpurs_scatter_load")]
     #[primitive(
         lowering = Body,
         architecture = 0,
@@ -36,6 +38,7 @@ impl<T: Copy> Scatter<T> {
         None
     }
 
+    #[cfg_attr(gpurs_device, rustc_diagnostic_item = "gpurs_scatter_store")]
     #[primitive(
         lowering = Body,
         architecture = 0,

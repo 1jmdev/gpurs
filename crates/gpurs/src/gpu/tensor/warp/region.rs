@@ -6,6 +6,7 @@ use crate::gpu::{tensor::ThreadGroup, warp};
 /// regions of a thread group's warps partition the tile, numbered along each row of regions;
 /// a region is obtained only from a [`Tile`](super::super::Tile), so warps never overlap.
 #[derive(Clone, Copy, Debug)]
+#[cfg_attr(gpurs_device, rustc_diagnostic_item = "gpurs_warp_region")]
 pub struct WarpRegion<const BM: usize, const BN: usize, const FM: usize, const FN: usize> {
     row: usize,
     column: usize,

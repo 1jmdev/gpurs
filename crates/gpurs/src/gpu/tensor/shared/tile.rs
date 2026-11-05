@@ -15,6 +15,7 @@ use crate::gpu::{self, warp};
 /// least 16, and coordinates are taken modulo them. Tiles filled by TMA use the 128-byte
 /// swizzle of the copy instead.
 #[repr(C, align(128))]
+#[cfg_attr(gpurs_device, rustc_diagnostic_item = "gpurs_shared_tile")]
 pub struct SharedTile<T, const ROWS: usize, const COLUMNS: usize, L = DepthMajor> {
     elements: [[T; COLUMNS]; ROWS],
     layout: PhantomData<L>,

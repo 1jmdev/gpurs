@@ -4,6 +4,7 @@ use crate::DeviceAddress;
 
 /// An immutable indirect view whose indices are clamped to its retained source range.
 #[repr(C)]
+#[cfg_attr(gpurs_device, rustc_diagnostic_item = "gpurs_indexed")]
 pub struct Indexed<T> {
     pub(crate) source: DeviceAddress<T>,
     pub(crate) indices: DeviceAddress<usize>,

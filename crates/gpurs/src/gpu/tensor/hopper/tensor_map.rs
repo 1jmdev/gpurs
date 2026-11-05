@@ -7,6 +7,7 @@ use std::{marker::PhantomData, mem};
 /// shape. Created on the host by [`DeviceTensorMap::new`](crate::DeviceTensorMap::new) and passed to
 /// kernels as `&TensorMap`; every launch taking it reads the matrix it describes.
 #[repr(C, align(64))]
+#[cfg_attr(gpurs_device, rustc_diagnostic_item = "gpurs_tensor_map")]
 pub struct TensorMap<T, const ROWS: usize, const COLUMNS: usize> {
     pub(crate) descriptor: [u64; 16],
     pub(crate) element: PhantomData<T>,

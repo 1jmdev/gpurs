@@ -79,6 +79,7 @@ pub struct TileWriter<'a, T, const ROWS: usize, const COLUMNS: usize, L, M: Mech
 
 /// Proof that a writer initialized its tile during this ring operation.
 #[derive(Debug)]
+#[cfg_attr(gpurs_device, rustc_diagnostic_item = "gpurs_initialized")]
 pub struct Initialized<'a, S> {
     stage: PhantomData<fn(&'a mut S) -> &'a mut S>,
 }

@@ -55,6 +55,7 @@ impl KernelCache {
 }
 
 #[track_caller]
+#[cfg_attr(gpurs_device, rustc_diagnostic_item = "gpurs_launch")]
 pub fn kernel<'a, S: Launch, G>(
     stream: &'a S,
     module: &'static str,
@@ -374,6 +375,7 @@ fn reject_aliasing(accesses: &[Access], kernel: &str) -> Result<()> {
 
 #[inline(never)]
 #[track_caller]
+#[cfg_attr(gpurs_device, rustc_diagnostic_item = "gpurs_transfer_type")]
 pub(crate) fn try_verified<T>(device: &Device) -> Result<&TransferType> {
     let name = any::type_name::<T>();
     device

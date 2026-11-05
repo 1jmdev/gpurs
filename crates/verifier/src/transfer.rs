@@ -1,53 +1,36 @@
 //! Transfer-type verification.
 
-use std::rc::Rc;
-
 use gpurs_artifact::TransferType;
-use gpurs_rustc::{AdtKind, CrateDef, RigidTy, Session, Ty, TyKind};
+use gpurs_rustc::{AdtKind, CrateDef, Item, RigidTy, Session, Ty, TyKind};
 
 pub fn opaque_descriptor(sess: Session<'_>, ty: Ty) -> bool {
     matches!(
-        adt_path(sess, ty).as_deref(),
-        Some(
-            "gpurs::gpu::tensor::hopper::tensor_map::TensorMap"
-                | "gpurs::gpu::strided::Strided"
-                | "gpurs::gpu::indexed::Indexed"
-                | "gpurs::gpu::scatter::Scatter"
-        )
+        item(sess, ty),
+        Some(Item::TensorMap | Item::Strided | Item::Indexed | Item::Scatter)
     )
 }
 
-fn adt_path(sess: Session<'_>, ty: Ty) -> Option<Rc<str>> {
+fn item(sess: Session<'_>, ty: Ty) -> Option<Item> {
     match ty.kind() {
-        TyKind::RigidTy(RigidTy::Adt(definition, _)) => Some(sess.path(definition.def_id())),
+        TyKind::RigidTy(RigidTy::Adt(definition, _)) => sess.item(definition.def_id()),
         _ => None,
     }
 }
 
 /// Rejects types that cannot be copied bytewise between host and device.
 pub fn check(sess: Session<'_>, ty: Ty) -> Result<(), String> {
-    match adt_path(sess, ty).as_deref() {
-        Some(
-            "gpurs::gpu::tensor::hopper::tensor_map::TensorMap"
-            | "gpurs::gpu::strided::Strided"
-            | "gpurs::gpu::indexed::Indexed"
-            | "gpurs::gpu::scatter::Scatter",
-        ) => {
+    match item(sess, ty) {
+        Some(Item::TensorMap | Item::Strided | Item::Indexed | Item::Scatter) => {
             return Err(format!(
                 "`{}` is an opaque GPU descriptor; construct it with Gpu and pass it by shared \
                  reference",
                 sess.type_name(ty)
             ));
         }
-        Some("gpurs::gpu::tensor::shared::tile::SharedTile") => {
+        Some(Item::SharedTile) => {
             return Err("block-shared tiles are created only by GPU pipelines".to_owned());
         }
-        Some(
-            "gpurs::gpu::thread::Block"
-            | "gpurs::gpu::tensor::shared::stage::Initialized"
-            | "gpurs::gpu::tensor::schedule::Tile"
-            | "gpurs::gpu::tensor::warp::region::WarpRegion",
-        ) => {
+        Some(Item::Block | Item::Initialized | Item::Tile | Item::WarpRegion) => {
             return Err("GPU execution proofs cannot be transferred from the host".to_owned());
         }
         _ => {}

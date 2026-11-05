@@ -4,7 +4,7 @@ use std::ops::ControlFlow;
 
 use gpurs_artifact::TransferType;
 use gpurs_rustc::{
-    Body, ClosureKind, ConstOperand, CrateDef, FxHashSet, Instance, InstanceKind, Location,
+    Body, ClosureKind, ConstOperand, CrateDef, FxHashSet, Instance, InstanceKind, Item, Location,
     MirVisitor, Operand, ProjectionElem, RigidTy, Rvalue, Session, StatementKind, TerminatorKind,
     Ty, TyKind, Visitable, Visitor,
 };
@@ -77,7 +77,7 @@ impl HostView {
 
     fn scan(&mut self, sess: Session<'_>, instance: Instance) {
         let def = instance.def.def_id();
-        if sess.is(def, "gpurs::host::launch::kernel::try_verified") {
+        if sess.item(def) == Some(Item::TransferType) {
             let arguments = instance.args();
             let Some(ty) = arguments.0.first().and_then(|argument| argument.ty()) else {
                 return;
@@ -119,7 +119,7 @@ impl HostView {
             let Some((callee, callee_args)) = kind.fn_def() else {
                 continue;
             };
-            if !sess.is(callee.def_id(), "gpurs::host::launch::kernel::kernel") {
+            if sess.item(callee.def_id()) != Some(Item::Launch) {
                 continue;
             }
             let Some(generic_types) = callee_args.0.get(1).and_then(|argument| argument.ty())
@@ -149,7 +149,7 @@ impl HostView {
                 .and_then(|argument| argument.ty())
                 .is_some_and(|stream| {
                     matches!(stream.kind(), TyKind::RigidTy(RigidTy::Adt(adt, _))
-                        if sess.is(adt.def_id(), "gpurs::host::graph::capture::Capture"))
+                        if sess.item(adt.def_id()) == Some(Item::Capture))
                 });
             let launch = Launch {
                 key: format!("{module}::{tail}{suffix}"),

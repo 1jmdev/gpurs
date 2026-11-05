@@ -1,5 +1,5 @@
 use gpurs_artifact::{Convergence, Memory, Primitive, Proof};
-use gpurs_rustc::{CrateDef, Instance};
+use gpurs_rustc::{CrateDef, Instance, Item};
 
 use super::{Analysis, Origin, Pointer, Region, State, Value, ValueData, state};
 use crate::symbolic::{Atom, Polynomial, Predicate, Relation};
@@ -12,14 +12,13 @@ impl Analysis<'_, '_> {
         arguments: &[Value],
         state: &mut State,
     ) -> Value {
-        let path = self.sess.path(instance.def.def_id());
-        if path.starts_with("gpurs::gpu::scatter::")
-            && (path.ends_with("::store") || path.ends_with("::load"))
+        let item = self.sess.item(instance.def.def_id());
+        if matches!(item, Some(Item::ScatterLoad | Item::ScatterStore))
             && let Some(Pointer::Memory(mut origin)) = arguments[0].pointer.clone()
         {
             origin.index = arguments[1].integer.clone();
             origin.inner = false;
-            self.access(&origin, path.ends_with("::store"), false, state);
+            self.access(&origin, item == Some(Item::ScatterStore), false, state);
         }
         match primitive.memory {
             Memory::Read | Memory::Write | Memory::Atomic => {

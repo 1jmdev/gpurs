@@ -4,6 +4,7 @@ use crate::DeviceAddress;
 
 /// Host-validated, immutable strided storage, passed to kernels by shared reference.
 #[repr(C)]
+#[cfg_attr(gpurs_device, rustc_diagnostic_item = "gpurs_strided")]
 pub struct Strided<T, const N: usize> {
     pub(crate) address: DeviceAddress<T>,
     pub(crate) shape: [usize; N],

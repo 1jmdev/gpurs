@@ -90,6 +90,7 @@ pub fn block_uniform<T: Copy>(value: T) -> T {
 /// Proof that every block has `THREADS` threads along x and one along y and z. The host checks
 /// the launch geometry against it before every launch.
 #[derive(Clone, Copy, Debug)]
+#[cfg_attr(gpurs_device, rustc_diagnostic_item = "gpurs_block")]
 pub struct Block<const THREADS: usize>(());
 
 impl<const THREADS: usize> Default for Block<THREADS> {

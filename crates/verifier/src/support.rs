@@ -1,7 +1,7 @@
 use gpurs_artifact::{Compatibility, Lowering};
 use gpurs_rustc::{
-    CrateDef, FxHashSet, Graph, Instance, InstanceKind, RigidTy, Session, Span, TerminatorKind,
-    TyKind, attributes, call_graph,
+    CrateDef, FxHashSet, Graph, Instance, InstanceKind, Item, RigidTy, Session, Span,
+    TerminatorKind, TyKind, attributes, call_graph,
 };
 
 #[derive(Default)]
@@ -166,8 +166,8 @@ fn allowed(sess: Session<'_>, instance: Instance, span: Span) -> bool {
     let approved = attributes::is_device(sess, instance.def.def_id())
         || attributes::primitive(sess, instance.def.def_id()).is_some()
         || call_graph::leaf(sess, instance)
-        || path.starts_with("gpurs::gpu::")
-        || path.starts_with("gpurs::argument::address::")
+        || sess.within(instance.def.def_id(), Item::DeviceModule)
+        || sess.within(instance.def.def_id(), Item::AddressModule)
         || [
             "core::ops::",
             "core::iter::",

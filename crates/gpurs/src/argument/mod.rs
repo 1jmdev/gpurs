@@ -1,5 +1,6 @@
 //! Retained device arguments and their allocation dependencies.
 
+#[cfg_attr(gpurs_device, rustc_diagnostic_item = "gpurs_address_module")]
 mod address;
 mod indexed;
 pub(crate) mod reference;

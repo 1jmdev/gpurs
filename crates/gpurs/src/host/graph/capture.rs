@@ -96,6 +96,7 @@ impl CapturedOperation {
     }
 }
 
+#[cfg_attr(gpurs_device, rustc_diagnostic_item = "gpurs_capture")]
 pub struct Capture<'a> {
     pub(crate) stream: &'a Stream,
     pub(crate) config: Option<LaunchConfig>,

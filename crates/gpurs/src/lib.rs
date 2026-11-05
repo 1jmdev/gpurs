@@ -22,6 +22,7 @@
 
 mod argument;
 mod error;
+#[cfg_attr(gpurs_device, rustc_diagnostic_item = "gpurs_device_module")]
 pub mod gpu;
 mod host;
 pub mod raw;

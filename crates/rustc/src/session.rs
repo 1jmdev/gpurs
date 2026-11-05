@@ -39,7 +39,7 @@ use rustc_span::{self, FileName, Symbol, kw};
 
 use crate::{
     Allocation, Body, ConstOperand, ConstantKind, CrateDef, CrateItem, DefId, GlobalAlloc,
-    Instance, Location, MirVisitor, Policy, RigidTy, Span, Ty, TyKind, VariantIdx,
+    Instance, Item, Location, MirVisitor, Policy, RigidTy, Span, Ty, TyKind, VariantIdx,
     call_graph::Function, layout::Signature,
 };
 
@@ -112,6 +112,15 @@ pub struct Session<'tcx> {
 
 impl<'tcx> Session<'tcx> {
     pub(crate) fn new(tcx: TyCtxt<'tcx>, target: Target, policy: Policy) -> Self {
+        let missing: Vec<_> = Item::ALL
+            .iter()
+            .map(|item| item.name())
+            .filter(|name| tcx.get_diagnostic_item(Symbol::intern(name)).is_none())
+            .collect();
+        if !missing.is_empty() && missing.len() < Item::ALL.len() {
+            tcx.dcx()
+                .fatal(format!("gpurs does not declare `{}`", missing.join("`, `")));
+        }
         Session {
             tcx,
             target,
@@ -493,8 +502,25 @@ impl<'tcx> Session<'tcx> {
 
     pub fn is_runtime(&self, def: DefId) -> bool {
         self.tcx
-            .get_diagnostic_item(Symbol::intern("gpurs_runtime"))
+            .get_diagnostic_item(Symbol::intern(Item::Runtime.name()))
             .is_some_and(|runtime| runtime.krate == self.internal_def(def).krate)
+    }
+
+    pub fn item(&self, def: DefId) -> Option<Item> {
+        let name = self.tcx.get_diagnostic_name(self.internal_def(def))?;
+        Item::ALL
+            .iter()
+            .copied()
+            .find(|item| item.name() == name.as_str())
+    }
+
+    /// Whether `def` is the module `item` or is defined inside it.
+    pub fn within(&self, def: DefId, item: Item) -> bool {
+        let name = Symbol::intern(item.name());
+        iter::successors(Some(self.internal_def(def)), |def| {
+            self.tcx.opt_parent(*def)
+        })
+        .any(|def| self.tcx.is_diagnostic_item(name, def))
     }
 
     pub fn crate_name(&self, def: DefId) -> String {
