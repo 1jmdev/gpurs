@@ -7,22 +7,19 @@ use std::{
 };
 
 use gpurs_artifact::{
-    BuildConfiguration, CONFIGURATION, CONFIGURATION_VARIABLE, LoweredCrate, LoweredTarget, Stage,
+    BuildConfiguration, CONFIGURATION_VARIABLE, LoweredCrate, LoweredTarget, Stage,
 };
 use gpurs_rustc::{Session, driver};
 
 use crate::cache::Cache;
 
-pub fn analyze(sess: Session<'_>) {
-    if let Err(message) = compile(sess) {
+pub fn analyze(sess: Session<'_>, configuration: &BuildConfiguration) {
+    if let Err(message) = compile(sess, configuration) {
         sess.err(message);
     }
 }
 
-fn compile(sess: Session<'_>) -> Result<(), String> {
-    let configuration = CONFIGURATION
-        .as_ref()
-        .expect("the device stage has a configuration");
+fn compile(sess: Session<'_>, configuration: &BuildConfiguration) -> Result<(), String> {
     match &configuration.stage {
         Stage::Device { output } => {
             let lowered = LoweredCrate {

@@ -3,7 +3,7 @@
 use std::ffi::{CStr, c_char, c_int};
 
 use gpurs_artifact::CONFIGURATION;
-use gpurs_rustc::{arguments, driver};
+use gpurs_rustc::{Policy, arguments, driver};
 
 use crate::device;
 
@@ -29,7 +29,13 @@ pub unsafe extern "C" fn gpurs_compiler_main(
     driver::run(
         &arguments::device_arguments(&arguments[1..], &configuration.artifacts),
         source,
-        Some(device::analyze),
+        Some((
+            configuration.architectures[0]
+                .parse()
+                .expect("the build script validated the target architecture"),
+            Policy::new(configuration),
+            &|sess| device::analyze(sess, configuration),
+        )),
     )
 }
 

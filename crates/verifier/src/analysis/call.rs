@@ -3,7 +3,7 @@ use std::rc::Rc;
 use gpurs_rustc::{CrateDef, Instance, Operand, Place, RigidTy, TyKind, attributes, call_graph};
 
 use super::{Analysis, Kind, Obligation, State, Value, ValueData, program::Callee, state};
-use crate::{policy, symbolic::Polynomial};
+use crate::symbolic::Polynomial;
 
 const DEPTH: usize = 48;
 
@@ -95,7 +95,9 @@ impl Analysis<'_, '_> {
             })
             .map(|name| {
                 Value::from(ValueData {
-                    integer: Some(Polynomial::constant(policy::intrinsic_check(name) as i128)),
+                    integer: Some(Polynomial::constant(
+                        self.sess.policy.intrinsic_check(name) as i128
+                    )),
                     domain: Some(2),
                     ..ValueData::default()
                 })

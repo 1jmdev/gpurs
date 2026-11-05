@@ -7,19 +7,17 @@
 //! launch preconditions that the host evaluates before every launch, or residual. A kernel
 //! whose residual obligations are all data-dependent arithmetic gets a certified entry point
 //! without memory-safety branches; any other residual obligation leaves the kernel with only
-//! its instrumented entry point, as [`policy::Strictness`] allows. The host re-evaluates every
+//! its instrumented entry point, as the configured strictness allows. The host re-evaluates every
 //! precondition, so a wrong static bound yields a rejected launch rather than an out-of-bounds
 //! access.
 //!
-//! [`transfer`] rejects types that cannot cross the host-device boundary, and [`policy`]
-//! decides which runtime checks generated code carries.
+//! [`transfer`] rejects types that cannot cross the host-device boundary.
 #![feature(rustc_private)]
 
 mod analysis;
 mod diagnostic;
 mod engine;
 mod kernel;
-pub mod policy;
 mod proof;
 mod render;
 mod shared;

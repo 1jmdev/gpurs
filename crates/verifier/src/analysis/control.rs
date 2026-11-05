@@ -2,10 +2,7 @@ use fixedbitset::FixedBitSet;
 use gpurs_rustc::{AssertMessage, BinOp, FxHashSet, TerminatorKind};
 
 use super::{Analysis, Kind, Obligation, Region, State, Value, arithmetic, program};
-use crate::{
-    policy,
-    symbolic::{Atom, Fact, Polynomial, Predicate, Relation, Requirement},
-};
+use crate::symbolic::{Atom, Fact, Polynomial, Predicate, Relation, Requirement};
 
 impl Analysis<'_, '_> {
     /// The successors of `block` with the facts each edge adds. Records the obligation of the
@@ -82,7 +79,7 @@ impl Analysis<'_, '_> {
                 target,
                 ..
             } => {
-                if policy::unchecked_overflow(msg) {
+                if self.sess.policy.unchecked_overflow(msg) {
                     return vec![(*target, Vec::new())];
                 }
                 let condition = self.operand(cond, state);

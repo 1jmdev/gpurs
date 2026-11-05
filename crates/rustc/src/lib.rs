@@ -18,6 +18,7 @@ pub mod call_graph;
 pub mod driver;
 mod graph;
 pub mod layout;
+mod policy;
 pub mod session;
 mod source;
 
@@ -25,6 +26,7 @@ pub use arguments::device_arguments;
 pub use driver::{run, version};
 pub use graph::Graph;
 pub use layout::{PassMode, Shape, Signature, is_bfloat, pass_mode};
+pub use policy::Policy;
 pub use rustc_data_structures::{
     fx::{FxHashMap, FxHashSet},
     graph::dominators::Dominators,

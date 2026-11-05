@@ -6,7 +6,7 @@
 
 use std::{cell::RefCell, fs, iter, ops::ControlFlow, rc::Rc};
 
-use gpurs_artifact::{Annotation, AnnotationKind, CONFIGURATION, Primitive, Reference, Target};
+use gpurs_artifact::{Annotation, AnnotationKind, Primitive, Reference, Target};
 use rustc_abi::{self, FieldIdx};
 #[cfg(gpurs_api_value_repr)]
 use rustc_ast::attr::AttributeExt;
@@ -39,8 +39,8 @@ use rustc_span::{self, FileName, Symbol, kw};
 
 use crate::{
     Allocation, Body, ConstOperand, ConstantKind, CrateDef, CrateItem, DefId, GlobalAlloc,
-    Instance, Location, MirVisitor, RigidTy, Span, Ty, TyKind, VariantIdx, call_graph::Function,
-    layout::Signature,
+    Instance, Location, MirVisitor, Policy, RigidTy, Span, Ty, TyKind, VariantIdx,
+    call_graph::Function, layout::Signature,
 };
 
 /// Per-session caches of derived queries, keyed by stable-interface identities.
@@ -107,18 +107,15 @@ pub fn rigid(ty: Ty) -> RigidTy {
 pub struct Session<'tcx> {
     tcx: TyCtxt<'tcx>,
     pub target: Target,
+    pub policy: Policy,
 }
 
 impl<'tcx> Session<'tcx> {
-    pub(crate) fn new(tcx: TyCtxt<'tcx>) -> Self {
+    pub(crate) fn new(tcx: TyCtxt<'tcx>, target: Target, policy: Policy) -> Self {
         Session {
             tcx,
-            target: CONFIGURATION
-                .as_ref()
-                .expect("GPU compilation has a configuration")
-                .architectures[0]
-                .parse()
-                .expect("the build script validated the target architecture"),
+            target,
+            policy,
         }
     }
 

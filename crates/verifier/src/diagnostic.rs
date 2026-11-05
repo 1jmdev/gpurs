@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 
+use gpurs_artifact::Strictness;
 use gpurs_rustc::{CrateDef, Instance, Session};
 use serde::{Deserialize, Serialize};
 
@@ -8,7 +9,6 @@ use super::{
     render,
     symbolic::Clause,
 };
-use crate::policy::{self, Strictness};
 
 #[derive(Serialize, Deserialize)]
 pub struct Warning {
@@ -36,7 +36,7 @@ impl Warning {
                     })
             },
         );
-        match policy::strictness() {
+        match sess.policy.strictness {
             Strictness::Error => sess.error_notes(span, self.message.clone(), &self.notes),
             _ => sess.warning_notes(span, self.message.clone(), &self.notes),
         }
@@ -46,7 +46,7 @@ impl Warning {
 /// One diagnostic per obligation that could not be discharged.
 pub(super) fn report(analysis: &Analysis<'_, '_>, residual: &[&Obligation]) -> Vec<Warning> {
     let kernel = analysis.kernel.name();
-    let consequence = match policy::strictness() {
+    let consequence = match analysis.sess.policy.strictness {
         Strictness::Error => format!("kernel `{kernel}` has no certified entry point"),
         _ => format!(
             "kernel `{kernel}` keeps every runtime check; set GPURS_STRICTNESS=omit to silence \

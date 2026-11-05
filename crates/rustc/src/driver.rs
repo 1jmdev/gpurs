@@ -3,6 +3,7 @@ use std::{
     process::ExitCode,
 };
 
+use gpurs_artifact::Target;
 use rustc_driver::{self, Callbacks, Compilation};
 use rustc_interface::{
     interface::{Compiler, Config},
@@ -10,14 +11,16 @@ use rustc_interface::{
 };
 use rustc_middle::ty::TyCtxt;
 
-use crate::{Session, session, source::Source};
+use crate::{Policy, Session, session, source::Source};
 
-struct CompilationCallbacks {
+type Analyze<'a> = (Target, Policy, &'a (dyn for<'tcx> Fn(Session<'tcx>) + Sync));
+
+struct CompilationCallbacks<'a> {
     transform: fn(&str, &str) -> String,
-    analyze: Option<for<'tcx> fn(Session<'tcx>)>,
+    analyze: Option<Analyze<'a>>,
 }
 
-impl Callbacks for CompilationCallbacks {
+impl Callbacks for CompilationCallbacks<'_> {
     fn config(&mut self, config: &mut Config) {
         config.file_loader = Some(Box::new(Source {
             transform: self.transform,
@@ -25,11 +28,11 @@ impl Callbacks for CompilationCallbacks {
     }
 
     fn after_analysis(&mut self, _: &Compiler, tcx: TyCtxt<'_>) -> Compilation {
-        let Some(analyze) = self.analyze else {
+        let Some((target, policy, analyze)) = self.analyze else {
             return Compilation::Continue;
         };
         session::enter(tcx, || {
-            let session = Session::new(tcx);
+            let session = Session::new(tcx, target, policy);
             analyze(session);
             session.abort_if_errors();
         });
@@ -40,7 +43,7 @@ impl Callbacks for CompilationCallbacks {
 pub fn run(
     arguments: &[String],
     transform: fn(&str, &str) -> String,
-    analyze: Option<for<'tcx> fn(Session<'tcx>)>,
+    analyze: Option<Analyze<'_>>,
 ) -> i32 {
     let result = panic::catch_unwind(AssertUnwindSafe(|| {
         rustc_driver::catch_with_exit_code(|| {

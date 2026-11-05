@@ -9,7 +9,6 @@ use gpurs_rustc::{
     BinOp, CrateDef, GenericArgKind, Instance, RigidTy, Scalar, Ty, TyConst, TyConstKind, TyKind,
     ValueRepr, attributes, call_graph, session,
 };
-use gpurs_verifier::policy;
 
 use super::{
     function::FunctionBuilder,
@@ -59,7 +58,7 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                 return true;
             }
             "ub_checks" | "contract_checks" | "overflow_checks" => {
-                Value::Scalar(IRValue::bool(policy::intrinsic_check(name)))
+                Value::Scalar(IRValue::bool(self.sess.policy.intrinsic_check(name)))
             }
             "black_box" | "likely" | "unlikely" => arguments[0].value.clone(),
             "read_via_copy" => {

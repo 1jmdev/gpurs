@@ -8,7 +8,7 @@ use gpurs_rustc::{
     RigidTy, Rvalue, Session, Span, StatementKind, TerminatorKind, Ty, ValueRepr, attributes,
     session,
 };
-use gpurs_verifier::{Certificate, policy};
+use gpurs_verifier::Certificate;
 
 use super::{
     layout::{self, PassMode, Shape},
@@ -449,7 +449,7 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
                 target,
                 ..
             } => {
-                if policy::unchecked_overflow(msg) || self.discharged() {
+                if self.sess.policy.unchecked_overflow(msg) || self.discharged() {
                     return self.branch(*target);
                 }
                 let record = self
@@ -574,7 +574,7 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
                 let next = match &block.terminator.kind {
                     TerminatorKind::Goto { target } => *target,
                     TerminatorKind::Assert { msg, target, .. }
-                        if policy::unchecked_overflow(msg) =>
+                        if self.sess.policy.unchecked_overflow(msg) =>
                     {
                         *target
                     }
@@ -671,7 +671,7 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
             }
             MirOperand::Constant(constant) => self.constant(constant),
             MirOperand::RuntimeChecks(checks) => {
-                let value = policy::runtime_check(checks);
+                let value = self.sess.policy.runtime_check(checks);
                 Operand::immediate(IRValue::bool(value), self.shape_of(Ty::bool_ty()))
             }
         }

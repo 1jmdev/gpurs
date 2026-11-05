@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use gpurs_artifact::{self as artifact, Access, Extent, Parameter, Value};
+use gpurs_artifact::{self as artifact, Access, Extent, Parameter, Strictness, Value};
 use gpurs_rustc::{
     CrateDef, Instance, Mutability, RigidTy, Session, Shape, TyKind, layout, session,
 };
@@ -8,7 +8,6 @@ use gpurs_rustc::{
 use crate::{
     analysis::{Analysis, Kind, Obligation},
     diagnostic::{self, Warning},
-    policy::{self, Strictness},
     render, support,
     symbolic::{self, Clause},
     transfer,
@@ -175,7 +174,7 @@ pub fn kernel(
              cannot skip collective tensor cleanup",
         );
     }
-    let warnings = if !certified && policy::strictness() != Strictness::Omit {
+    let warnings = if !certified && sess.policy.strictness != Strictness::Omit {
         diagnostic::report(&analysis, &residual)
     } else {
         Vec::new()
@@ -227,7 +226,7 @@ pub fn kernel(
         },
         certificate,
         status,
-        instrumented: !effects.tensor && (!certified || policy::instrumented()),
+        instrumented: !effects.tensor && (!certified || sess.policy.instrumented),
         uses_index: analysis.findings.uses_index,
         asynchronous: effects.asynchronous,
     };
