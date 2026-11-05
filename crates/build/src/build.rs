@@ -9,7 +9,7 @@ use std::{
 };
 
 use gpurs_artifact::{
-    BuildConfiguration, CONFIGURATION, CONFIGURATION_VARIABLE, Libraries, LoweredCrate, Reference,
+    BuildConfiguration, CONFIGURATION, CONFIGURATION_VARIABLE, Crate, Libraries, LoweredCrate,
     Stage, Strictness, Target,
 };
 use gpurs_nvvm::TOOLKIT_ENVIRONMENT;
@@ -38,19 +38,17 @@ impl Mode {
         if arguments.len() < 2 {
             return Mode::NestedBuildScript;
         }
-        let package = env::var("CARGO_PKG_NAME").unwrap_or_default();
-        let target = package == configuration.package
-            && !arguments.iter().any(|argument| {
-                argument == "build_script_build"
-                    || argument.to_string_lossy().starts_with("--print")
-            });
+        let current = Crate {
+            package: env::var("CARGO_PKG_NAME").unwrap_or_default(),
+            name: arguments
+                .windows(2)
+                .find(|pair| pair[0] == "--crate-name")
+                .map(|pair| pair[1].to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        };
+        let target = configuration.targets.contains(&current);
         match configuration.stage {
-            Stage::LibraryView
-                if !package.starts_with("gpurs")
-                    && arguments.windows(2).any(|pair| {
-                        pair[0] == "--extern" && pair[1].to_string_lossy().starts_with("gpurs=")
-                    }) =>
-            {
+            Stage::LibraryView if configuration.library_view.contains(&current) => {
                 Mode::LibraryView
             }
             Stage::Discovery if target => Mode::Discovery,
@@ -109,6 +107,7 @@ fn build(architectures: &[&str]) -> Result<()> {
     let compiler = Path::new(COMPILER_LIBRARY).parent().unwrap();
     let cache = compiler.join("cache");
     fs::create_dir_all(&cache)?;
+    let selection = metadata::select()?;
     let mut configuration = BuildConfiguration {
         stage: Stage::LibraryView,
         architectures: architectures.iter().map(|&name| name.to_owned()).collect(),
@@ -122,10 +121,10 @@ fn build(architectures: &[&str]) -> Result<()> {
         compiler: cache::content_hash(fs::read(COMPILER_LIBRARY)?),
         artifacts: artifacts.clone(),
         cache: cache.clone(),
-        package: env::var("CARGO_PKG_NAME")?,
+        library_view: selection.library_view.clone(),
+        targets: selection.targets.clone(),
         libraries: Libraries::default(),
     };
-    let selection = metadata::select()?;
     configuration.libraries = library::view(&selection, compiler, &configuration)?;
     configuration.stage = Stage::Discovery;
     discovery::discover(&selection, compiler, &configuration)?;
@@ -140,36 +139,43 @@ fn build(architectures: &[&str]) -> Result<()> {
     paths.retain(|path| path.extension().is_some_and(|extension| extension == "bin"));
     paths.sort();
     let mut inputs = Vec::new();
-    let mut references = Vec::<Reference>::new();
     for path in paths {
         let name = path.file_name().unwrap().to_string_lossy();
         if sources.contains(name.split_once('-').unwrap().0) {
-            if let Ok(bytes) = fs::read(path.with_extension("references")) {
-                references.extend(serde_json::from_slice::<Vec<Reference>>(&bytes)?);
-            }
             inputs.push(fs::read(&path)?);
         } else {
             fs::remove_file(&path)?;
         }
     }
+    let crates = inputs
+        .iter()
+        .map(|bytes| Ok(postcard::from_bytes::<LoweredCrate>(bytes)?))
+        .collect::<Result<Vec<_>>>()?;
+    let references: Vec<_> = crates
+        .iter()
+        .flat_map(|lowered| &lowered.references)
+        .collect();
     let references_path = directory.join("gpurs_references.json");
     fs::write(&references_path, serde_json::to_vec(&references)?)?;
     let image = directory.join("gpurs_artifact.bin");
     let identity_path = directory.join("gpurs_artifact.identity");
     let identity = cache::image_identity(&inputs, architectures);
     if !image.exists() || fs::read_to_string(&identity_path).ok() != Some(identity.clone()) {
-        let crates = inputs
-            .iter()
-            .map(|bytes| Ok(postcard::from_bytes::<Vec<LoweredCrate>>(bytes)?))
-            .collect::<Result<Vec<_>>>()?;
+        let compiler = crates
+            .first()
+            .map(|lowered| lowered.compiler.as_str())
+            .unwrap_or_default();
         let mut compiled = thread::scope(|scope| {
             architectures
                 .iter()
                 .enumerate()
                 .map(|(index, architecture)| {
-                    let lowered: Vec<_> = crates.iter().map(|lowered| &lowered[index]).collect();
+                    let lowered: Vec<_> = crates
+                        .iter()
+                        .map(|lowered| &lowered.targets[index])
+                        .collect();
                     let cache = &cache;
-                    scope.spawn(move || link::link(&lowered, architecture, cache))
+                    scope.spawn(move || link::link(&lowered, compiler, architecture, cache))
                 })
                 .collect::<Vec<_>>()
                 .into_iter()
@@ -180,6 +186,14 @@ fn build(architectures: &[&str]) -> Result<()> {
         let mut artifact = compiled.next().unwrap();
         artifact.alternatives = compiled.collect();
         fs::write(&image, artifact.encode())?;
+        fs::write(
+            directory.join("gpurs_preconditions.txt"),
+            crates
+                .iter()
+                .flat_map(|lowered| &lowered.targets)
+                .map(|target| format!("{}\n{}", target.architecture, target.preconditions))
+                .collect::<String>(),
+        )?;
         fs::write(&identity_path, identity)?;
     }
     println!(

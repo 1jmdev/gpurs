@@ -7,7 +7,7 @@ use std::{
     thread,
 };
 
-use gpurs_artifact::{self as artifact, Artifact, Fragment, Kernel, LoweredCrate, Module};
+use gpurs_artifact::{self as artifact, Artifact, Fragment, Kernel, LoweredTarget, Module};
 use gpurs_nvvm::Toolkit;
 
 use crate::{
@@ -16,7 +16,8 @@ use crate::{
 };
 
 pub(crate) fn link(
-    lowered: &[&LoweredCrate],
+    lowered: &[&LoweredTarget],
+    compiler: &str,
     architecture: &str,
     cache: &Path,
 ) -> Result<Artifact> {
@@ -37,10 +38,7 @@ pub(crate) fn link(
         }
     }
     let mut artifact = Artifact {
-        compiler: lowered
-            .first()
-            .map(|lowered| lowered.compiler.clone())
-            .unwrap_or_default(),
+        compiler: compiler.to_owned(),
         architecture: architecture.to_owned(),
         types,
         ..Artifact::default()

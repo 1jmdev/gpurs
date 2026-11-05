@@ -14,9 +14,23 @@ pub struct Artifact {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct LoweredCrate {
     pub compiler: String,
+    pub references: Vec<Reference>,
+    pub targets: Vec<LoweredTarget>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct LoweredTarget {
     pub architecture: String,
     pub kernels: Vec<(Kernel, String)>,
     pub types: Vec<TransferType>,
+    pub preconditions: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Reference {
+    pub file: String,
+    pub line: usize,
+    pub statement: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Default)]

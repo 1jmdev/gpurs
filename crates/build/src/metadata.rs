@@ -4,6 +4,7 @@ use std::{
     path::PathBuf,
 };
 
+use gpurs_artifact::Crate;
 use serde::Deserialize;
 
 use crate::{build::Result, wrapper};
@@ -61,6 +62,17 @@ pub(crate) struct Selection {
     pub features: Vec<String>,
     pub flag: &'static str,
     pub roots: Vec<PathBuf>,
+    pub library_view: BTreeSet<Crate>,
+    pub targets: BTreeSet<Crate>,
+}
+
+impl Target {
+    fn identify(&self, package: &Package) -> Crate {
+        Crate {
+            package: package.name.clone(),
+            name: self.name.replace('-', "_"),
+        }
+    }
 }
 
 impl Dependency {
@@ -93,12 +105,17 @@ pub(crate) fn select() -> Result<Selection> {
         .iter()
         .find(|package| package.name == name)
         .unwrap();
+    let runtime = &packages
+        .iter()
+        .find(|package| package.name == "gpurs")
+        .unwrap()
+        .id;
     let kind = package
         .targets
         .iter()
         .map(|target| target.kind[0].as_str())
         .min_by_key(|kind| match *kind {
-            "lib" | "rlib" | "dylib" | "cdylib" | "staticlib" => 0,
+            kind if library(kind) => 0,
             "bin" => 1,
             "example" => 2,
             _ => 3,
@@ -147,14 +164,26 @@ pub(crate) fn select() -> Result<Selection> {
     for path in watched {
         println!("cargo::rerun-if-changed={}", path.display());
     }
+    let library_view = resolve
+        .nodes
+        .iter()
+        .filter(|node| {
+            node.deps.iter().any(|dependency| {
+                dependency.pkg == *runtime && dependency.name == "gpurs" && dependency.normal(false)
+            })
+        })
+        .flat_map(|node| {
+            let package = find(&node.id);
+            package
+                .targets
+                .iter()
+                .filter(|target| library(&target.kind[0]))
+                .map(|target| target.identify(package))
+        })
+        .collect();
     Ok(Selection {
         package: package.clone(),
-        runtime: packages
-            .iter()
-            .find(|package| package.name == "gpurs")
-            .unwrap()
-            .id
-            .clone(),
+        runtime: runtime.clone(),
         dependencies: dependencies(package)
             .iter()
             .filter(|dependency| dependency.normal(example))
@@ -181,5 +210,14 @@ pub(crate) fn select() -> Result<Selection> {
             .iter()
             .map(|target| target.src_path.clone())
             .collect(),
+        library_view,
+        targets: selected
+            .iter()
+            .map(|target| target.identify(package))
+            .collect(),
     })
+}
+
+fn library(kind: &str) -> bool {
+    matches!(kind, "lib" | "rlib" | "dylib" | "cdylib" | "staticlib")
 }

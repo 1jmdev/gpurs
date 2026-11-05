@@ -10,11 +10,11 @@ mod target;
 
 pub use annotation::{Annotation, AnnotationKind};
 pub use configuration::{
-    BuildConfiguration, CONFIGURATION, CONFIGURATION_VARIABLE, DEVICE_FLAGS, Libraries, Reference,
+    BuildConfiguration, CONFIGURATION, CONFIGURATION_VARIABLE, Crate, DEVICE_FLAGS, Libraries,
     Stage, Strictness,
 };
 pub use fragment::{Fragment, link};
-pub use image::{Artifact, LoweredCrate, Module};
+pub use image::{Artifact, LoweredCrate, LoweredTarget, Module, Reference};
 pub use kernel::{
     Access, Clause, Entry, Extent, Failure, Kernel, PARAMETERS_OFFSET, Parameter, Polynomial,
     Predicate, RESULT_OFFSET, Relation, STATUS_OFFSET, SharedMemory, TransferType, Value, Variable,

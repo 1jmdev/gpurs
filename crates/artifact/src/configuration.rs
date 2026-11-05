@@ -37,23 +37,23 @@ pub struct BuildConfiguration {
     pub compiler: String,
     pub artifacts: PathBuf,
     pub cache: PathBuf,
-    pub package: String,
+    pub library_view: BTreeSet<Crate>,
+    pub targets: BTreeSet<Crate>,
     pub libraries: Libraries,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Crate {
+    pub package: String,
+    pub name: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum Stage {
     LibraryView,
     Discovery,
-    Device {
-        output: PathBuf,
-    },
-    Shard {
-        architecture: String,
-        index: usize,
-        count: usize,
-        keys: PathBuf,
-    },
+    Device { output: PathBuf },
+    Shard { architecture: String },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -68,13 +68,6 @@ pub enum Strictness {
 pub struct Libraries {
     pub externs: BTreeMap<String, PathBuf>,
     pub directories: BTreeSet<PathBuf>,
-}
-
-#[derive(Serialize, Deserialize, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Reference {
-    pub file: String,
-    pub line: usize,
-    pub statement: String,
 }
 
 impl BuildConfiguration {
