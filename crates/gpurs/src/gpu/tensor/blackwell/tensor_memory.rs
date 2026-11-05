@@ -8,8 +8,9 @@ use super::{instruction, intrinsics};
 use crate::gpu::{
     self, Block,
     tensor::{
-        Accumulator, Element, OutputElement, OutputTile, TensorTile, hopper::Consumer,
-        hopper::intrinsics as hopper_intrinsics, sealed::Sealed,
+        Accumulator, Element, OutputElement, OutputTile, TensorTile,
+        hopper::{Consumer, intrinsics as hopper_intrinsics},
+        sealed::Sealed,
     },
 };
 

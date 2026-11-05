@@ -61,7 +61,6 @@ impl Steps {
     pub(super) fn steps(&self) -> usize {
         self.steps as usize
     }
-
 }
 
 /// The source of each of a thread's chunks.
@@ -369,10 +368,7 @@ impl<'a, T: Element, L: Layout, G: ThreadGroup, const R: usize, const C: usize>
 
     /// Copies the next depth step into the tile behind `tile`.
     fn transfer(&mut self, tile: *mut SharedTile<T, R, C, L>) {
-        unsafe {
-            self.chunks
-                .copy::<T, R, C, L, G>(tile, &mut self.steps)
-        };
+        unsafe { self.chunks.copy::<T, R, C, L, G>(tile, &mut self.steps) };
     }
 }
 

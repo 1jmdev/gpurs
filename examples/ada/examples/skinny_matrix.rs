@@ -33,23 +33,14 @@ type Stage = (
 );
 
 #[gpu(threads = 128)]
-fn project(
-    input: &[Half],
-    weight: &[Half],
-    bias: &[f32],
-    output: &mut [f32],
-    locks: &[AtomicU32],
-) {
+fn project(input: &[Half], weight: &[Half], bias: &[f32], output: &mut [f32], locks: &[AtomicU32]) {
     let block = Block::<THREADS>::new();
     let tile = SplitDepth::tile::<TILE_ROWS, TILE_COLUMNS>([COLUMNS, TOKENS], DEPTH, SPLITS);
     let warp = tile.warp::<1, 2>(&block);
     let mut left =
         GlobalMatrix::depth_major(weight, COLUMNS, DEPTH).cursor(&block, tile.row(), tile.depth());
-    let mut right = GlobalMatrix::depth_major(input, TOKENS, DEPTH).cursor(
-        &block,
-        tile.column(),
-        tile.depth(),
-    );
+    let mut right =
+        GlobalMatrix::depth_major(input, TOKENS, DEPTH).cursor(&block, tile.column(), tile.depth());
     let mut ring = GroupRing::<Stage, STAGES>::new();
     for _ in 0..STAGES - 1 {
         ring.issue(|(a, b)| (left.copy(a), right.copy(b)));

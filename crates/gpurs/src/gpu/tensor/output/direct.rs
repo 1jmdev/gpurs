@@ -92,7 +92,10 @@ impl<T: OutputElement, const BM: usize, const BN: usize> OutputTile<'_, T, BM, B
             // SAFETY: present elements lie inside `data`.
             index.map_or(T::default(), |index| unsafe { pointer.add(index).read() })
         };
-        match (self.index(row, column), self.index(row, column.wrapping_add(1))) {
+        match (
+            self.index(row, column),
+            self.index(row, column.wrapping_add(1)),
+        ) {
             // SAFETY: as in `write`.
             (Some(index), Some(_)) if self.paired => unsafe { T::read_pair(pointer.add(index)) },
             (first, second) => [element(first), element(second)],

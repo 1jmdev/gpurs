@@ -95,9 +95,7 @@ impl Analysis<'_, '_> {
             })
             .map(|name| {
                 Value::from(ValueData {
-                    integer: Some(Polynomial::constant(
-                        policy::intrinsic_check(name) as i128,
-                    )),
+                    integer: Some(Polynomial::constant(policy::intrinsic_check(name) as i128)),
                     domain: Some(2),
                     ..ValueData::default()
                 })
@@ -108,9 +106,7 @@ impl Analysis<'_, '_> {
                     .as_deref()
                     .is_some_and(|name| name == "arith_offset" || PURE.contains(&name))
                     .then(|| {
-                        Value::varying(
-                            values.iter().map(|value| value.variance).max().unwrap_or(0),
-                        )
+                        Value::varying(values.iter().map(|value| value.variance).max().unwrap_or(0))
                     })
             });
         let model = match &callee.primitive {

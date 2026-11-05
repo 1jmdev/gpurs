@@ -2,8 +2,8 @@
 
 use gpurs_macros::primitive;
 
-use crate::gpu::tensor::Accumulator;
 pub use crate::gpu::intrinsics::barrier_fence_initialization;
+use crate::gpu::tensor::Accumulator;
 
 macro_rules! encapsulated {
     ($($convergence:ident $architecture:literal $compatibility:ident $text:literal $constraints:literal

@@ -96,12 +96,7 @@ impl<S: Stage<Bulk>, const STAGES: usize, C: Consumer> TensorRing<S, STAGES, C> 
         proof = Uniform
     )]
     pub fn new<const THREADS: usize>(block: &Block<THREADS>) -> Self {
-        const {
-            assert!(
-                STAGES >= 2 && STAGES <= 16,
-                "TMA rings hold 2 to 16 stages"
-            )
-        };
+        const { assert!(STAGES >= 2 && STAGES <= 16, "TMA rings hold 2 to 16 stages") };
         let ring = Self::allocate();
         if block.thread() == 0 {
             for index in 0..STAGES as u32 {

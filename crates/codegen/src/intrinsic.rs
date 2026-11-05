@@ -377,9 +377,9 @@ impl<'sess> FunctionBuilder<'_, 'sess> {
                     arguments[0].scalar(),
                     Type::byte_pointer(),
                 );
-                let shared = self
-                    .ir
-                    .cast(Conversion::AddrSpaceCast, pointer, Type::I8.pointer_in(3));
+                let shared =
+                    self.ir
+                        .cast(Conversion::AddrSpaceCast, pointer, Type::I8.pointer_in(3));
                 self.ir.cast(Conversion::PtrToInt, shared, Type::I64)
             }
             Lowering::Call { symbol, operands } => {

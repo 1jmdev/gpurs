@@ -6,9 +6,7 @@ use gpurs::{
     DeviceSlice, Gpu, LaunchConfig, gpu,
     gpu::{
         Block, Half,
-        tensor::{
-            AccumulatorTile, GlobalMatrix, GroupRing, Grouped, OutputMatrix, SharedTile,
-        },
+        tensor::{AccumulatorTile, GlobalMatrix, GroupRing, Grouped, OutputMatrix, SharedTile},
     },
 };
 
@@ -30,13 +28,7 @@ type Stage = (
 /// `output[r] = input[routes[r]] @ weight[e]ᵀ` for the rows `r` routed to expert `e`, which
 /// `offsets[e]..offsets[e + 1]` delimit.
 #[gpu(threads = 128)]
-fn experts(
-    input: &[Half],
-    routes: &[u32],
-    offsets: &[u32],
-    weight: &[Half],
-    output: &mut [Half],
-) {
+fn experts(input: &[Half], routes: &[u32], offsets: &[u32], weight: &[Half], output: &mut [Half]) {
     let block = Block::<THREADS>::new();
     let Some(tile) = Grouped::tile::<TILE_ROWS, TILE_COLUMNS>(offsets, COLUMNS) else {
         return;
@@ -77,7 +69,9 @@ fn main() -> gpurs::Result<()> {
     let weight_host: Vec<Half> = (0..EXPERTS * COLUMNS * DEPTH)
         .map(|index| Half::from_f32((index * 7 % 29) as f32 / 64.0 - 0.25))
         .collect();
-    let routes_host: Vec<u32> = (0..TOKENS as u32).map(|row| row * 37 % TOKENS as u32).collect();
+    let routes_host: Vec<u32> = (0..TOKENS as u32)
+        .map(|row| row * 37 % TOKENS as u32)
+        .collect();
     let counts = [100, 0, 237, 64, 1, 300, 150, 148];
     let offsets_host: Vec<u32> = [0]
         .into_iter()

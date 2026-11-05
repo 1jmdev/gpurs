@@ -48,15 +48,15 @@ impl<const BM: usize, const BN: usize, const FM: usize, const FN: usize>
             let column = first
                 .wrapping_add(self.column())
                 .wrapping_add(j * 8 + warp::lane_id() % 4 * 2);
-            values[j] = if paired && column.is_multiple_of(2) && column < data.len().saturating_sub(1)
-            {
-                // SAFETY: both elements lie in the slice, and an even column of an aligned
-                // slice is aligned to the pair.
-                let [low, high] = unsafe { T::read_pair(data.as_ptr().add(column)) };
-                [low.widen(), high.widen()]
-            } else {
-                [element(data, column), element(data, column.wrapping_add(1))]
-            };
+            values[j] =
+                if paired && column.is_multiple_of(2) && column < data.len().saturating_sub(1) {
+                    // SAFETY: both elements lie in the slice, and an even column of an aligned
+                    // slice is aligned to the pair.
+                    let [low, high] = unsafe { T::read_pair(data.as_ptr().add(column)) };
+                    [low.widen(), high.widen()]
+                } else {
+                    [element(data, column), element(data, column.wrapping_add(1))]
+                };
         }
         ColumnValues { values }
     }

@@ -66,7 +66,11 @@ impl Analysis<'_, '_> {
             let variance = left.variance.max(right.variance);
             let maximum = Polynomial::constant(arithmetic::range(kind).1);
             let (lower, upper) = if path.ends_with("min") {
-                let bound = if second.value().is_some() { second } else { first };
+                let bound = if second.value().is_some() {
+                    second
+                } else {
+                    first
+                };
                 (Polynomial::default(), bound.clone())
             } else {
                 (first.clone(), maximum)

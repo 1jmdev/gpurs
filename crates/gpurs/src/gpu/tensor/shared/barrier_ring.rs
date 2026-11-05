@@ -121,7 +121,10 @@ impl<S: Stage<Produced>, const STAGES: usize, const PRODUCERS: usize>
         memory = Encapsulated,
         proof = Uniform
     )]
-    pub fn consume<const THREADS: usize>(&mut self, consumers: &Consumers<PRODUCERS, THREADS>) -> &S {
+    pub fn consume<const THREADS: usize>(
+        &mut self,
+        consumers: &Consumers<PRODUCERS, THREADS>,
+    ) -> &S {
         let _ = consumers;
         let index = self.consumed;
         // SAFETY: the barriers were initialized by `new`; every consumer thread arrives once

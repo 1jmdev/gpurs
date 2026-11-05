@@ -104,7 +104,10 @@ impl<const BM: usize, const BN: usize, const FM: usize, const FN: usize>
     ) -> [FragmentA<T>; FM] {
         const {
             assert!(A::EXTENT == BM, "`A` tiles span the rows of the block tile");
-            assert!(A::DEPTH.is_multiple_of(16), "tiles hold whole 16-deep slices");
+            assert!(
+                A::DEPTH.is_multiple_of(16),
+                "tiles hold whole 16-deep slices"
+            );
         };
         let mut fragments = [FragmentA::default(); FM];
         for i in 0..FM {
@@ -122,8 +125,14 @@ impl<const BM: usize, const BN: usize, const FM: usize, const FN: usize>
         slice: usize,
     ) -> [FragmentB<T>; FN] {
         const {
-            assert!(B::EXTENT == BN, "`B` tiles span the columns of the block tile");
-            assert!(B::DEPTH.is_multiple_of(16), "tiles hold whole 16-deep slices");
+            assert!(
+                B::EXTENT == BN,
+                "`B` tiles span the columns of the block tile"
+            );
+            assert!(
+                B::DEPTH.is_multiple_of(16),
+                "tiles hold whole 16-deep slices"
+            );
         };
         let mut fragments = [FragmentB::default(); FN];
         for pair in 0..FN / 2 {

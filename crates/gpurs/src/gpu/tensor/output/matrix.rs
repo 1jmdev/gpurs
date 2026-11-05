@@ -25,12 +25,21 @@ pub struct OutputMatrix<'a, T> {
 pub struct OutputTile<'a, T, const BM: usize, const BN: usize> {
     // The verifier identifies the partition by the first five fields, those of the matrix.
     pub(super) data: &'a mut [T],
-    #[expect(dead_code, reason = "the verifier reads the partition from these fields")]
+    #[expect(
+        dead_code,
+        reason = "the verifier reads the partition from these fields"
+    )]
     rows: usize,
-    #[expect(dead_code, reason = "the verifier reads the partition from these fields")]
+    #[expect(
+        dead_code,
+        reason = "the verifier reads the partition from these fields"
+    )]
     columns: usize,
     pub(super) strides: [usize; 3],
-    #[expect(dead_code, reason = "the verifier reads the partition from these fields")]
+    #[expect(
+        dead_code,
+        reason = "the verifier reads the partition from these fields"
+    )]
     offset: usize,
     pub(super) row: usize,
     pub(super) column: usize,
@@ -122,7 +131,8 @@ impl<'a, T: OutputElement> OutputMatrix<'a, T> {
             )
         } else {
             (
-                self.rows.min(column_stride.checked_div(row_stride).unwrap_or(0)),
+                self.rows
+                    .min(column_stride.checked_div(row_stride).unwrap_or(0)),
                 self.columns,
             )
         };

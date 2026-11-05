@@ -3,8 +3,8 @@ use std::{env, fs};
 use proc_macro2::{Span, TokenStream as Tokens};
 use quote::{ToTokens, format_ident, quote};
 use syn::{
-    Attribute, Error, GenericParam, ImplItem, ItemFn, ItemImpl, LitInt, Meta, ReceiverKind,
-    Result, Safety, Signature, parse::Parser, spanned::Spanned, visit::Visit,
+    Attribute, Error, GenericParam, ImplItem, ItemFn, ItemImpl, LitInt, Meta, ReceiverKind, Result,
+    Safety, Signature, parse::Parser, spanned::Spanned, visit::Visit,
 };
 
 use crate::{launcher, references::References};
@@ -40,9 +40,7 @@ pub(crate) fn options(attribute: Tokens) -> Result<Options> {
         } else if meta.path.is_ident("minimum_blocks") {
             options.minimum_blocks = Some(meta.value()?.parse::<LitInt>()?.base10_parse()?);
         } else {
-            return Err(meta.error(
-                "expected `fast_math`, `threads = N`, or `minimum_blocks = N`",
-            ));
+            return Err(meta.error("expected `fast_math`, `threads = N`, or `minimum_blocks = N`"));
         }
         Ok(())
     });

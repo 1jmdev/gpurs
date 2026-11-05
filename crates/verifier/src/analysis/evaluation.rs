@@ -217,9 +217,7 @@ impl Analysis<'_, '_> {
                 self.aggregate_constant(ty, &allocation)
             }
             Operand::RuntimeChecks(checks) => Value::from(ValueData {
-                integer: Some(Polynomial::constant(
-                    policy::runtime_check(checks) as i128,
-                )),
+                integer: Some(Polynomial::constant(policy::runtime_check(checks) as i128)),
                 domain: Some(2),
                 ..ValueData::default()
             }),

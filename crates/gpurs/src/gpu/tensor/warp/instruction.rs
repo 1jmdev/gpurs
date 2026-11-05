@@ -74,7 +74,8 @@ multiply_accumulate!(
     memory = None,
     proof = Varying
 )]
-pub fn multiply_accumulate_f16_f16(a: FragmentA<Half>, b: FragmentB<Half>, c: [u32; 2]) -> [u32; 2];
+pub fn multiply_accumulate_f16_f16(a: FragmentA<Half>, b: FragmentB<Half>, c: [u32; 2])
+-> [u32; 2];
 
 macro_rules! load_matrices {
     ($($name:ident $result:ty, $text:literal, $constraints:literal;)*) => {

@@ -72,7 +72,8 @@ impl<T: OutputElement, const BM: usize, const BN: usize> OutputTile<'_, T, BM, B
                     }
                     let (row, column) = (chunk / width, chunk % width * lanes);
                     // SAFETY: the chunk lies in the staged tile, whose rows are 16-byte aligned.
-                    let chunk = unsafe { staging.add(row * pitch + column).cast::<Vector4>().read() };
+                    let chunk =
+                        unsafe { staging.add(row * pitch + column).cast::<Vector4>().read() };
                     self.write_chunk(chunk, [row, column], [0, 1], pointer);
                 }
             }
@@ -107,7 +108,11 @@ impl<T: OutputElement, const BM: usize, const BN: usize> OutputTile<'_, T, BM, B
                     let (row, column) = (element / BN, element % BN);
                     if let Some(index) = self.index(row, column) {
                         // SAFETY: the element lies in the staged tile and in `data`.
-                        unsafe { pointer.add(index).write(staging.add(row * pitch + column).read()) };
+                        unsafe {
+                            pointer
+                                .add(index)
+                                .write(staging.add(row * pitch + column).read())
+                        };
                     }
                 }
             }

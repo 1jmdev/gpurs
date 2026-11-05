@@ -52,7 +52,12 @@ impl<T: Element, const ROWS: usize, const COLUMNS: usize, L> SharedTile<T, ROWS,
     /// The address this lane names to a four-matrix `ldmatrix` of the 16x16 block at (`row`,
     /// `column`). Lanes `8 * i..8 * i + 8` name the rows of 8x8 matrix `i`; the matrices are
     /// ordered down the block's rows first, or across its columns first when `across`.
-    pub(in crate::gpu::tensor) fn lane_address(&self, row: usize, column: usize, across: bool) -> u32 {
+    pub(in crate::gpu::tensor) fn lane_address(
+        &self,
+        row: usize,
+        column: usize,
+        across: bool,
+    ) -> u32 {
         let lane = warp::lane_id();
         let (row, chunk) = if across {
             (
@@ -60,7 +65,10 @@ impl<T: Element, const ROWS: usize, const COLUMNS: usize, L> SharedTile<T, ROWS,
                 column / Self::LANES + lane / 8 % 2,
             )
         } else {
-            (row.wrapping_add(lane % 16), column / Self::LANES + lane / 16)
+            (
+                row.wrapping_add(lane % 16),
+                column / Self::LANES + lane / 16,
+            )
         };
         self.address() + gpu::intrinsics::pin_register(Self::offset(row, chunk))
     }

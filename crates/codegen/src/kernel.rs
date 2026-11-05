@@ -34,7 +34,11 @@ impl<'sess> ModuleBuilder<'sess> {
         plan.key.hash(&mut hasher);
         let name = plan.instance.name();
         let function = name.split('<').next().unwrap_or_default();
-        let function = function.trim_end_matches("::").rsplit("::").next().unwrap_or_default();
+        let function = function
+            .trim_end_matches("::")
+            .rsplit("::")
+            .next()
+            .unwrap_or_default();
         let symbol = format!("{SYMBOL}_{function}_{:016x}", hasher.finish());
         let certified = plan.certificate.clone().map(|certificate| {
             let root = self.function(plan.instance, Some(certificate.clone()), false);
@@ -170,7 +174,10 @@ impl<'sess> ModuleBuilder<'sess> {
             attributes::launch_bounds(function.module.sess, plan.instance.def.def_id())
         {
             function.ir.annotations.push(("reqntidx", threads));
-            function.ir.annotations.extend((blocks > 0).then_some(("minctasm", blocks)));
+            function
+                .ir
+                .annotations
+                .extend((blocks > 0).then_some(("minctasm", blocks)));
         }
         let FunctionBuilder { module, ir, .. } = function;
         module.ir.define(ir);

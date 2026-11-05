@@ -89,7 +89,10 @@ impl Analysis<'_, '_> {
             },
             write,
             atomic: false,
-            partition: Some((partition_type(self.sess.body(instance).arg_locals()[0].ty), layout)),
+            partition: Some((
+                partition_type(self.sess.body(instance).arg_locals()[0].ty),
+                layout,
+            )),
             block: self.kernel_block(),
             facts: state.facts.clone(),
             span: self.span,

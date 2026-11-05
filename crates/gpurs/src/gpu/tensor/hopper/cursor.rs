@@ -69,7 +69,9 @@ impl<T: Element, const ROWS: usize, const COLUMNS: usize> TensorCursor<'_, T, RO
         self.step = step.wrapping_add(1);
         // Coordinates at or beyond `i32::MAX` name boxes outside the matrix, which read as zero.
         let column = if step < self.steps {
-            self.begin.wrapping_add(step.wrapping_mul(COLUMNS)).min(i32::MAX as usize)
+            self.begin
+                .wrapping_add(step.wrapping_mul(COLUMNS))
+                .min(i32::MAX as usize)
         } else {
             i32::MAX as usize
         };

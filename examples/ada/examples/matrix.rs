@@ -5,7 +5,9 @@ use gpurs::{
     DeviceSlice, Gpu, LaunchConfig, gpu,
     gpu::{
         Block, Half,
-        tensor::{AccumulatorTile, GlobalMatrix, Grid, GroupRing, OutputMatrix, SharedTile, Swizzle},
+        tensor::{
+            AccumulatorTile, GlobalMatrix, Grid, GroupRing, OutputMatrix, SharedTile, Swizzle,
+        },
     },
 };
 
@@ -29,8 +31,7 @@ fn multiply(left: &[Half], right_transposed: &[Half], output: &mut [f32]) {
     let block = Block::<THREADS>::new();
     let tile = Grid::<Swizzle<8>>::tile::<TILE_ROWS, TILE_COLUMNS>([SIZE, SIZE]);
     let warp = tile.warp::<4, 8>(&block);
-    let mut left =
-        GlobalMatrix::depth_major(left, SIZE, SIZE).cursor(&block, tile.row(), 0..SIZE);
+    let mut left = GlobalMatrix::depth_major(left, SIZE, SIZE).cursor(&block, tile.row(), 0..SIZE);
     let mut right = GlobalMatrix::depth_major(right_transposed, SIZE, SIZE).cursor(
         &block,
         tile.column(),

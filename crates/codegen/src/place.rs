@@ -1,7 +1,7 @@
 use gpurs_ir::{Access, Binary, Conversion, Flags, Transfer, Type, Value as IRValue};
 use gpurs_rustc::{
-    AdtKind, FieldsShape, MachineSize, ProjectionElem, RigidTy, Scalar, Ty, TyKind,
-    ValueRepr, VariantIdx, session,
+    AdtKind, FieldsShape, MachineSize, ProjectionElem, RigidTy, Scalar, Ty, TyKind, ValueRepr,
+    VariantIdx, session,
 };
 
 use super::{
