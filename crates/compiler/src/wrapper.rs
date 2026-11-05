@@ -1,10 +1,8 @@
 //! Entry point used by `gpurs-build` when this library acts as the rustc wrapper.
 
-use std::{
-    env,
-    ffi::{CStr, c_char, c_int},
-};
+use std::ffi::{CStr, c_char, c_int};
 
+use gpurs_artifact::CONFIGURATION;
 use gpurs_rustc::{arguments, driver};
 
 use crate::device;
@@ -25,8 +23,11 @@ pub unsafe extern "C" fn gpurs_compiler_main(
         })
         .collect();
     // `arguments[0]` is the wrapper and `arguments[1]` the rustc that Cargo would have run.
+    let configuration = CONFIGURATION
+        .as_ref()
+        .expect("the device stage has a configuration");
     driver::run(
-        &arguments::device_arguments(&arguments[1..], &env::var("GPURS_ARTIFACTS").unwrap()),
+        &arguments::device_arguments(&arguments[1..], &configuration.artifacts),
         source,
         Some(device::analyze),
     )

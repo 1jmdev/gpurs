@@ -83,6 +83,7 @@ dependencies = [
  "gpurs-nvvm",
  "libloading",
  "postcard",
+ "serde",
  "serde_json",
 ]
 
@@ -107,6 +108,7 @@ dependencies = [
  "gpurs-verifier",
  "postcard",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

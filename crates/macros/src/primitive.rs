@@ -1,5 +1,3 @@
-use std::env;
-
 use gpurs_artifact::{Lowering, Memory, Primitive, Proof};
 use proc_macro2::TokenStream as Tokens;
 use quote::quote;
@@ -11,6 +9,8 @@ use syn::{
     punctuated::Punctuated,
     spanned::Spanned,
 };
+
+use crate::launcher;
 
 pub(crate) fn expand(attribute: Tokens, item: Tokens) -> Result<Tokens> {
     declaration(attribute, item, false)
@@ -95,7 +95,7 @@ fn declaration(attribute: Tokens, item: Tokens, extension: bool) -> Result<Token
     };
     let encoded = primitive.encode();
     let documentation = format!("<!-- gpurs::primitive={encoded} -->");
-    let attribute = if extension && env::var_os("GPURS_DEVICE_BUILD").is_some() {
+    let attribute = if extension && launcher::device_build() {
         quote!(#[gpurs_tool::unsafe_primitive = #encoded])
     } else if extension {
         quote!(#[cfg_attr(gpurs_device, gpurs_tool::unsafe_primitive = #encoded)])

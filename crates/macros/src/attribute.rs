@@ -1,5 +1,6 @@
 use std::{env, fs};
 
+use gpurs_artifact::Reference;
 use proc_macro2::{Span, TokenStream as Tokens};
 use quote::{ToTokens, format_ident, quote};
 use syn::{
@@ -68,22 +69,19 @@ pub(crate) fn expand_function(function: ItemFn) -> Tokens {
         let name = path.segments[0].ident.to_string();
         references.types.contains(&name) && !references.bindings.contains(&name)
     });
-    // The device build records what the body uses through types, which host lints cannot see.
     let span = function.sig.ident.span().unwrap();
     let file = span
         .local_file()
         .and_then(|path| fs::canonicalize(path).ok())
         .map(|path| path.display().to_string());
-    let line = span.line().to_string();
-    let device = env::var_os("GPURS_REFERENCES")
-        .and_then(|path| fs::read_to_string(path).ok())
+    let recorded: Vec<Reference> = env::var_os("GPURS_REFERENCES")
+        .and_then(|path| fs::read(path).ok())
+        .map(|bytes| serde_json::from_slice(&bytes).unwrap())
         .unwrap_or_default();
-    let device = device.lines().filter_map(|entry| {
-        let mut fields = entry.splitn(3, '\t');
-        (fields.next() == file.as_deref() && fields.next() == Some(&line))
-            .then(|| fields.next()?.parse::<Tokens>().ok())
-            .flatten()
-    });
+    let device = recorded
+        .into_iter()
+        .filter(|reference| Some(&reference.file) == file.as_ref() && reference.line == span.line())
+        .filter_map(|reference| reference.statement.parse::<Tokens>().ok());
     let launcher = launcher::launcher(
         &function.sig,
         None,

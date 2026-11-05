@@ -20,3 +20,4 @@ gpurs-rustc.workspace = true
 gpurs-verifier.workspace = true
 postcard.workspace = true
 serde.workspace = true
+serde_json.workspace = true

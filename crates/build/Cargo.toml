@@ -11,6 +11,7 @@ gpurs-artifact.workspace = true
 gpurs-nvvm.workspace = true
 libloading.workspace = true
 postcard.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 
 [lints]

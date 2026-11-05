@@ -5,15 +5,15 @@
 //! follows the profile of the calling crate, as it does for host code: a release build wraps, a
 //! debug build checks. Division and remainder by zero are always checked.
 
-use std::{env, sync::LazyLock};
-
+use gpurs_artifact::CONFIGURATION;
+pub use gpurs_artifact::Strictness;
 use gpurs_rustc::{AssertMessage, RuntimeChecks};
 
-/// Whether unchecked arithmetic is instrumented. `GPURS_OVERFLOW_CHECKS` overrides the profile.
+/// Whether unchecked arithmetic is instrumented, following the profile of the build.
 pub fn overflow_checks() -> bool {
-    static CHECKS: LazyLock<bool> =
-        LazyLock::new(|| env::var("GPURS_OVERFLOW_CHECKS").map_or(true, |value| value != "0"));
-    *CHECKS
+    CONFIGURATION
+        .as_ref()
+        .is_none_or(|configuration| configuration.overflow_checks)
 }
 
 /// Whether this assertion is an arithmetic overflow check that the profile leaves unchecked.
@@ -43,30 +43,17 @@ pub fn intrinsic_check(name: &str) -> bool {
     })
 }
 
-/// How the compiler treats a kernel whose memory-safety or panic obligations are not all
-/// discharged. `GPURS_STRICTNESS` selects `warn` (the default), `error`, or `omit`.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Strictness {
-    /// One warning per residual obligation; the kernel keeps only its instrumented entry point.
-    Warn,
-    /// Residual obligations are compile errors.
-    Error,
-    /// The kernel silently keeps only its instrumented entry point.
-    Omit,
-}
-
 pub fn strictness() -> Strictness {
-    static STRICTNESS: LazyLock<Strictness> =
-        LazyLock::new(|| match env::var("GPURS_STRICTNESS").as_deref() {
-            Ok("error") => Strictness::Error,
-            Ok("omit") => Strictness::Omit,
-            _ => Strictness::Warn,
-        });
-    *STRICTNESS
+    CONFIGURATION
+        .as_ref()
+        .map_or(Strictness::Warn, |configuration| configuration.strictness)
 }
 
 /// Whether every kernel also gets an instrumented entry point: in debug builds, or when
 /// `GPURS_INSTRUMENTED=1`.
 pub fn instrumented() -> bool {
-    overflow_checks() || env::var("GPURS_INSTRUMENTED").is_ok_and(|value| value == "1")
+    overflow_checks()
+        || CONFIGURATION
+            .as_ref()
+            .is_some_and(|configuration| configuration.instrumented)
 }

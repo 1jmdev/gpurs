@@ -1,5 +1,4 @@
-use std::env;
-
+use gpurs_artifact::{CONFIGURATION, Stage};
 use proc_macro2::{Delimiter, Group, TokenStream as Tokens, TokenTree};
 use quote::{ToTokens, format_ident, quote};
 use syn::{FnArg, GenericParam, Generics, ReceiverKind, ReturnType, Signature, Type};
@@ -28,7 +27,7 @@ pub(crate) fn root(
     receiver: Option<&Type>,
     tail: &str,
 ) -> Tokens {
-    if !generics.is_empty() || env::var_os("GPURS_DEVICE_BUILD").is_none() {
+    if !generics.is_empty() || !device_build() {
         return Tokens::new();
     }
     let name = &signature.ident;
@@ -150,9 +149,7 @@ pub(crate) fn launcher(
             quote!(__launch.finish_unit()),
         ),
     };
-    let artifact = if env::var_os("GPURS_DEVICE_BUILD").is_none()
-        && env::var_os("GPURS_LIBRARY_VIEW").is_none()
-    {
+    let artifact = if CONFIGURATION.is_none() {
         quote! {
             #[used]
             #[unsafe(link_section = "gpurs_artifacts")]
@@ -221,4 +218,10 @@ pub(crate) fn replace_self(tokens: Tokens, self_type: &Type) -> Tokens {
             token => token,
         })
         .collect()
+}
+
+pub(crate) fn device_build() -> bool {
+    CONFIGURATION
+        .as_ref()
+        .is_some_and(|configuration| !matches!(configuration.stage, Stage::LibraryView))
 }

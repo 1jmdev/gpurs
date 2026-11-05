@@ -4,11 +4,8 @@
 use std::{env, path::PathBuf, process::Command};
 
 fn main() {
-    // Kernel discovery and library views run build scripts only to list launches, so they
-    // never load the compiler.
-    println!("cargo::rerun-if-env-changed=GPURS_PRECOMPILE");
-    println!("cargo::rerun-if-env-changed=GPURS_LIBRARY_VIEW");
-    if env::var_os("GPURS_PRECOMPILE").is_some() || env::var_os("GPURS_LIBRARY_VIEW").is_some() {
+    // Nested builds never load the compiler.
+    if env::var_os("GPURS_BUILD").is_some() {
         println!("cargo::rustc-env=GPURS_COMPILER_LIBRARY=");
         return;
     }

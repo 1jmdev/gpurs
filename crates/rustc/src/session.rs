@@ -4,9 +4,9 @@
 //! interface does not yet expose (reachable instances, stable fingerprints, definition paths,
 //! type printing, diagnostics) go through the bridge in this module and nowhere else.
 
-use std::{cell::RefCell, env, fs, iter, ops::ControlFlow, rc::Rc};
+use std::{cell::RefCell, fs, iter, ops::ControlFlow, rc::Rc};
 
-use gpurs_artifact::{Primitive, Target};
+use gpurs_artifact::{CONFIGURATION, Primitive, Reference, Target};
 use rustc_abi::{self, FieldIdx};
 #[cfg(gpurs_api_value_repr)]
 use rustc_ast::attr::AttributeExt;
@@ -113,11 +113,10 @@ impl<'tcx> Session<'tcx> {
     pub(crate) fn new(tcx: TyCtxt<'tcx>) -> Self {
         Session {
             tcx,
-            target: env::var("GPURS_ARCHITECTURE")
-                .expect("GPU compilation has a target architecture")
-                .split(',')
-                .next()
-                .expect("at least one architecture")
+            target: CONFIGURATION
+                .as_ref()
+                .expect("GPU compilation has a configuration")
+                .architectures[0]
                 .parse()
                 .expect("the build script validated the target architecture"),
         }
@@ -313,7 +312,7 @@ impl<'tcx> Session<'tcx> {
     /// Statements that show host lints what each device function body uses, since host builds
     /// drop those bodies: its module's trait imports and the local associated items its types
     /// resolve. Entries are keyed by the source file and line of the function name.
-    pub fn host_references(&self) -> Vec<(String, u32, String)> {
+    pub fn host_references(&self) -> Vec<Reference> {
         let tcx = self.tcx;
         let mut references = Vec::new();
         for def in tcx.hir_body_owners() {
@@ -380,9 +379,13 @@ impl<'tcx> Session<'tcx> {
                         .flatten()
                 });
             // The gpurs source view opens every file with one extra line.
-            let line = location.line as u32 - 1;
+            let line = location.line - 1;
             for statement in imports.into_iter().chain(items) {
-                references.push((file.display().to_string(), line, statement));
+                references.push(Reference {
+                    file: file.display().to_string(),
+                    line,
+                    statement,
+                });
             }
         }
         references.sort();

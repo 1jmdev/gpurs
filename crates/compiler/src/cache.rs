@@ -1,10 +1,10 @@
 use std::{
-    env, fs,
+    fs,
     hash::{DefaultHasher, Hash, Hasher},
     path::PathBuf,
 };
 
-use gpurs_artifact::Kernel;
+use gpurs_artifact::{BuildConfiguration, Kernel};
 use gpurs_codegen::{self as codegen, GeneratedKernel};
 use gpurs_rustc::{FxHashMap, FxHashSet, Instance, Session, call_graph, driver};
 use gpurs_verifier::{self as verifier, Verification, Warning};
@@ -25,19 +25,20 @@ pub struct Cache {
 }
 
 impl Cache {
-    pub fn new(directory: PathBuf) -> Result<Self, String> {
-        fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
-        let identity = [
-            "GPURS_ARCHITECTURE",
-            "GPURS_OVERFLOW_CHECKS",
-            "GPURS_STRICTNESS",
-            "GPURS_INSTRUMENTED",
-            "GPURS_COMPILER",
-        ]
-        .map(|name| env::var(name).unwrap_or_default())
-        .join("\n");
+    pub fn new(configuration: &BuildConfiguration) -> Result<Self, String> {
+        fs::create_dir_all(&configuration.cache).map_err(|error| error.to_string())?;
+        let identity = format!(
+            "{:?}",
+            (
+                &configuration.architectures,
+                configuration.overflow_checks,
+                configuration.strictness,
+                configuration.instrumented,
+                &configuration.compiler,
+            )
+        );
         Ok(Self {
-            directory,
+            directory: configuration.cache.clone(),
             identity: format!(
                 "{}\n{}\n{identity}",
                 env!("CARGO_PKG_VERSION"),
