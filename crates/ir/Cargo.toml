@@ -10,3 +10,6 @@ repository.workspace = true
 bitflags.workspace = true
 gpurs-artifact.workspace = true
 rustc-hash.workspace = true
+
+[lints]
+workspace = true

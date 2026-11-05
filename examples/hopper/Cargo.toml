@@ -12,3 +12,6 @@ gpurs.workspace = true
 
 [build-dependencies]
 gpurs-build.workspace = true
+
+[lints]
+workspace = true

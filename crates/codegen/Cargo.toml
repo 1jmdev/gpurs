@@ -14,3 +14,6 @@ gpurs-artifact.workspace = true
 gpurs-ir.workspace = true
 gpurs-rustc.workspace = true
 gpurs-verifier.workspace = true
+
+[lints]
+workspace = true

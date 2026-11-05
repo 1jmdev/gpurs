@@ -13,3 +13,6 @@ rustc_private = true
 [dependencies]
 gpurs-artifact.workspace = true
 syn.workspace = true
+
+[lints]
+workspace = true
