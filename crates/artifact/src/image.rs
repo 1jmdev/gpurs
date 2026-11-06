@@ -1,14 +1,18 @@
+use std::borrow::Cow;
+
 use serde::{Deserialize, Serialize};
 
 use crate::{Kernel, TransferType};
 
 #[derive(Serialize, Deserialize, Debug, Default)]
-pub struct Artifact {
+pub struct Artifact<'a> {
     pub compiler: String,
     pub architecture: String,
-    pub modules: Vec<Module>,
+    #[serde(borrow)]
+    pub modules: Vec<Module<'a>>,
     pub types: Vec<TransferType>,
-    pub alternatives: Vec<Artifact>,
+    #[serde(borrow)]
+    pub alternatives: Vec<Artifact<'a>>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -34,22 +38,22 @@ pub struct Reference {
 }
 
 #[derive(Serialize, Deserialize, Debug, Default)]
-pub struct Module {
-    pub cubin: Vec<u8>,
-    pub ptx: String,
+pub struct Module<'a> {
+    #[serde(borrow)]
+    pub cubin: Cow<'a, [u8]>,
     pub kernels: Vec<Kernel>,
 }
 
-impl Artifact {
+impl<'a> Artifact<'a> {
     pub fn encode(&self) -> Vec<u8> {
         postcard::to_allocvec(self).expect("artifact serialization cannot fail")
     }
 
-    pub fn decode(bytes: &[u8]) -> Result<Self, postcard::Error> {
+    pub fn decode(bytes: &'a [u8]) -> Result<Self, postcard::Error> {
         postcard::from_bytes(bytes)
     }
 
-    pub fn merge(&mut self, other: Artifact) {
+    pub fn merge(&mut self, other: Artifact<'a>) {
         self.compiler = other.compiler;
         self.architecture = other.architecture;
         for alternative in other.alternatives {

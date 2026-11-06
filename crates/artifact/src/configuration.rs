@@ -53,7 +53,6 @@ pub enum Stage {
     LibraryView,
     Discovery,
     Device { output: PathBuf },
-    Shard { architecture: String },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]

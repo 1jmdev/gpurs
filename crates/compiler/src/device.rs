@@ -1,14 +1,12 @@
 use std::{
-    env, fs,
-    io::{self, BufRead, BufReader, Write},
-    process::{self, Command, Stdio},
+    fs, io,
+    panic::{self, AssertUnwindSafe},
+    ptr,
     sync::atomic::{AtomicUsize, Ordering},
     thread,
 };
 
-use gpurs_artifact::{
-    BuildConfiguration, CONFIGURATION_VARIABLE, LoweredCrate, LoweredTarget, Stage,
-};
+use gpurs_artifact::{BuildConfiguration, LoweredCrate, LoweredTarget, Stage};
 use gpurs_rustc::{Session, driver};
 
 use crate::cache::Cache;
@@ -34,7 +32,6 @@ fn compile(sess: Session<'_>, configuration: &BuildConfiguration) -> Result<(), 
             let bytes = postcard::to_allocvec(&lowered).map_err(|error| error.to_string())?;
             fs::write(output, bytes).map_err(|error| error.to_string())
         }
-        Stage::Shard { architecture } => compile_shard(sess, configuration, architecture),
         Stage::LibraryView | Stage::Discovery => unreachable!("gpurs-build selects the stage"),
     }
 }
@@ -59,48 +56,59 @@ fn compile_target(
                 architecture,
             )
         })
-        .map(|kernel| kernel.key.as_str())
         .collect();
     let workers = thread::available_parallelism()
         .map_or(1, |count| usize::from(count) / 2)
         .min(missing.len());
     if workers > 1 {
-        let executable = env::current_exe().map_err(|error| error.to_string())?;
-        let shard = BuildConfiguration {
-            stage: Stage::Shard {
-                architecture: architecture.to_owned(),
-            },
-            ..configuration.clone()
+        // SAFETY: a fresh anonymous mapping is checked before use and never unmapped.
+        let next = unsafe {
+            libc::mmap(
+                ptr::null_mut(),
+                size_of::<AtomicUsize>(),
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        if next == libc::MAP_FAILED {
+            return Err(io::Error::last_os_error().to_string());
         }
-        .encode();
-        let next = AtomicUsize::new(0);
-        thread::scope(|scope| {
-            (0..workers)
-                .map(|_| {
-                    scope.spawn(|| {
-                        let mut child = Command::new(&executable)
-                            .args(env::args_os().skip(1))
-                            .env(CONFIGURATION_VARIABLE, &shard)
-                            .stdin(Stdio::piped())
-                            .stdout(Stdio::piped())
-                            .stderr(Stdio::null())
-                            .spawn()
-                            .map_err(|error| error.to_string())?;
-                        let mut input = child.stdin.take().unwrap();
-                        let mut completions = BufReader::new(child.stdout.take().unwrap()).lines();
-                        while let Some(key) = missing.get(next.fetch_add(1, Ordering::Relaxed))
-                            && writeln!(input, "{key}").is_ok()
-                            && completions.next().is_some()
-                        {}
-                        drop(input);
-                        child.wait().map_err(|error| error.to_string())
-                    })
-                })
-                .collect::<Vec<_>>()
-                .into_iter()
-                .map(|worker| worker.join().unwrap())
-                .collect::<Result<Vec<_>, _>>()
-        })?;
+        // SAFETY: the zeroed, page-aligned mapping holds one counter shared by every worker.
+        let next = unsafe { &*next.cast::<AtomicUsize>() };
+        let mut children = Vec::new();
+        for _ in 0..workers {
+            // SAFETY: the child inherits the analyzed session, lowers on this thread, and exits
+            // without returning into rustc.
+            match unsafe { libc::fork() } {
+                -1 => return Err(io::Error::last_os_error().to_string()),
+                0 => {
+                    let _ = panic::catch_unwind(AssertUnwindSafe(|| {
+                        // SAFETY: the parent reports diagnostics, so the child discards its own.
+                        unsafe {
+                            libc::dup2(libc::open(c"/dev/null".as_ptr(), libc::O_WRONLY), 2);
+                        }
+                        while let Some(kernel) = missing.get(next.fetch_add(1, Ordering::Relaxed)) {
+                            let _ = cache.kernel(
+                                sess,
+                                kernel.instance,
+                                kernel.configured,
+                                &kernel.key,
+                                architecture,
+                            );
+                        }
+                    }));
+                    // SAFETY: exits the forked worker without running the parent's teardown.
+                    unsafe { libc::_exit(0) }
+                }
+                child => children.push(child),
+            }
+        }
+        for child in children {
+            // SAFETY: waits on a child forked above.
+            unsafe { libc::waitpid(child, ptr::null_mut(), 0) };
+        }
     }
     let mut kernels = Vec::new();
     let mut preconditions = String::new();
@@ -123,28 +131,4 @@ fn compile_target(
         types: program.types,
         preconditions,
     })
-}
-
-fn compile_shard(
-    mut sess: Session<'_>,
-    configuration: &BuildConfiguration,
-    architecture: &str,
-) -> Result<(), String> {
-    sess.target = architecture.parse().expect("validated GPU architecture");
-    let program = gpurs_frontend::analyze(sess);
-    let mut cache = Cache::new(configuration)?;
-    for key in io::stdin().lines() {
-        let key = key.map_err(|error| error.to_string())?;
-        if let Some(kernel) = program.kernels.iter().find(|kernel| kernel.key == key) {
-            cache.kernel(
-                sess,
-                kernel.instance,
-                kernel.configured,
-                &kernel.key,
-                architecture,
-            )?;
-        }
-        println!();
-    }
-    process::exit(0)
 }

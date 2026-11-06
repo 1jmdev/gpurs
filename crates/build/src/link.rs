@@ -18,7 +18,7 @@ pub(crate) fn link(
     architecture: &str,
     registers: Option<&str>,
     store: &Store,
-) -> Result<Artifact> {
+) -> Result<Artifact<'static>> {
     let mut kernels: Vec<Kernel> = Vec::new();
     let mut fragments = Vec::new();
     let mut types = Vec::new();
@@ -56,21 +56,19 @@ pub(crate) fn link(
         )
     });
     let next = AtomicUsize::new(0);
-    let assemble = |index: usize, fragment: &str| -> Result<Module> {
+    let assemble = |index: usize, fragment: &str| -> Result<Module<'static>> {
+        let fragment = store
+            .get(Kind::Fragment, fragment)
+            .ok_or("missing fragment")?;
+        let ir = artifact::link([&postcard::from_bytes::<Fragment>(&fragment)?]);
         let digest = Key::Ptx {
             toolkit: &fingerprint,
             architecture,
-            fragment,
+            ir: &ir,
         }
         .digest();
         let ptx = store.get_or_insert(Kind::Ptx, &digest, || -> Result<_> {
-            let fragment = store
-                .get(Kind::Fragment, fragment)
-                .ok_or("missing fragment")?;
-            let fragment = postcard::from_bytes::<Fragment>(&fragment)?;
-            Ok(compiler
-                .ptx(&artifact::link([&fragment]), architecture)?
-                .into_bytes())
+            Ok(compiler.ptx(&ir, architecture)?.into_bytes())
         })?;
         let ptx = String::from_utf8(ptx)?;
         let digest = Key::Cubin {
@@ -90,8 +88,7 @@ pub(crate) fn link(
             Ok(cubin)
         })?;
         Ok(Module {
-            cubin,
-            ptx,
+            cubin: cubin.into(),
             kernels: vec![kernels[index].clone()],
         })
     };

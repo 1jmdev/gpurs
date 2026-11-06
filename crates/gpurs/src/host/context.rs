@@ -32,7 +32,7 @@ pub(crate) struct Device {
     pub transfer: Rc<driver::Stream>,
     pub download: Rc<driver::Stream>,
     pub release: Rc<driver::Stream>,
-    pub artifact: Artifact,
+    pub artifact: Artifact<'static>,
     modules: Vec<OnceCell<Module>>,
     kernels: RefCell<HashMap<KernelKey, Rc<LoadedKernel>>>,
     pub context: Context,
@@ -207,12 +207,7 @@ impl Device {
             )));
         };
         if self.modules[index].get().is_none() {
-            let module = if self.artifact.modules[index].cubin.is_empty() {
-                Module::try_load_ptx(&self.artifact.modules[index].ptx)?
-            } else {
-                Module::try_load(&self.artifact.modules[index].cubin)?
-            };
-            let _ = self.modules[index].set(module);
+            let _ = self.modules[index].set(Module::try_load(&self.artifact.modules[index].cubin)?);
         }
         let module = self.modules[index].get().expect("module was loaded");
         let (offsets, size) = gpurs_artifact::parameter_offsets(&metadata.parameters);
@@ -272,7 +267,7 @@ impl Drop for Device {
 #[unsafe(link_section = "gpurs_artifacts")]
 static EMPTY_ARTIFACT: &[u8] = &[];
 
-fn embedded_artifact(capability: u32) -> Result<Artifact> {
+fn embedded_artifact(capability: u32) -> Result<Artifact<'static>> {
     unsafe extern "C" {
         static __start_gpurs_artifacts: u8;
         static __stop_gpurs_artifacts: u8;
@@ -300,22 +295,17 @@ fn embedded_artifact(capability: u32) -> Result<Artifact> {
         candidates.push(artifact);
         let artifact = candidates
             .into_iter()
-            .filter_map(|mut artifact| {
+            .filter_map(|artifact| {
                 let target: Target = artifact.architecture.parse().ok()?;
-                let native = target.supports(capability);
-                if !native {
-                    for module in &mut artifact.modules {
-                        module.cubin.clear();
-                    }
-                }
-                (native || target.supports_ptx(capability))
-                    .then_some(((native, target.capability()), artifact))
+                target
+                    .supports(capability)
+                    .then_some((target.capability(), artifact))
             })
             .max_by_key(|(priority, _)| *priority)
             .map(|(_, artifact)| artifact)
             .ok_or_else(|| {
                 Error::InvalidOperation(
-                    "no embedded GPU image or PTX target is compatible with this device".to_owned(),
+                    "no embedded GPU image is compatible with this device".to_owned(),
                 )
             })?;
         merged.architecture = artifact.architecture;

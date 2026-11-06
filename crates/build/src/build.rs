@@ -51,7 +51,7 @@ impl Mode {
                 Mode::LibraryView
             }
             Stage::Discovery if target => Mode::Discovery,
-            Stage::Device { .. } | Stage::Shard { .. } if target => Mode::Device,
+            Stage::Device { .. } if target => Mode::Device,
             _ => Mode::Passthrough,
         }
     }

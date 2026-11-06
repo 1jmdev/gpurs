@@ -23,7 +23,7 @@ pub enum Key<'a> {
     Ptx {
         toolkit: &'a str,
         architecture: &'a str,
-        fragment: &'a str,
+        ir: &'a str,
     },
     Cubin {
         toolkit: &'a str,
