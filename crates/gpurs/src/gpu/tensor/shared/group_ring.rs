@@ -16,8 +16,8 @@ use crate::gpu::{self, intrinsics};
 #[repr(C)]
 pub struct GroupRing<S, const STAGES: usize> {
     storage: *mut [S; STAGES],
-    filled: u32,
     consumed: u32,
+    pending: u32,
 }
 
 impl<S: Stage<Asynchronous>, const STAGES: usize> GroupRing<S, STAGES> {
@@ -97,8 +97,8 @@ impl<S: Stage<Asynchronous>, const STAGES: usize> GroupRing<S, STAGES> {
         intrinsics::commit_group();
         intrinsics::wait_group_0();
         gpu::sync_block();
-        self.filled = 0;
         self.consumed = 0;
+        self.pending = 0;
         SharedLease::new(self.storage)
     }
 
@@ -114,7 +114,7 @@ impl<S: Stage<Asynchronous>, const STAGES: usize> GroupRing<S, STAGES> {
 
     /// Filled stages not yet consumed.
     fn pending(&self) -> usize {
-        self.filled.wrapping_sub(self.consumed) as usize
+        self.pending as usize
     }
 
     /// Completes the oldest filled stage, makes it visible to the block, and marks it consumed.
@@ -128,12 +128,13 @@ impl<S: Stage<Asynchronous>, const STAGES: usize> GroupRing<S, STAGES> {
         }
         gpu::sync_block();
         self.consumed = self.consumed.wrapping_add(1);
+        self.pending -= 1;
     }
 
     /// Writers for the next free stage, whose copies form the next group.
     fn produce(&mut self) -> S::Writers<'_> {
-        let slot = self.slot(self.filled);
-        self.filled = self.filled.wrapping_add(1);
+        let slot = self.slot(self.consumed.wrapping_add(self.pending));
+        self.pending += 1;
         // SAFETY: no thread reads this stage before it is consumed again, and the barrier of
         // the latest `consume` followed every read of its previous contents.
         unsafe { S::writers(slot, ()) }
@@ -141,14 +142,16 @@ impl<S: Stage<Asynchronous>, const STAGES: usize> GroupRing<S, STAGES> {
 
     /// Fills the next free stage with zeros by plain stores from every thread.
     fn zero(&mut self) {
-        let slot = self.slot(self.filled).cast::<Zero>();
+        let slot = self
+            .slot(self.consumed.wrapping_add(self.pending))
+            .cast::<Zero>();
         let mut chunk = gpu::thread_id().x;
         while chunk < size_of::<S>() / 16 {
             // SAFETY: the chunk lies inside a free stage, and tiles are 128-byte aligned.
             unsafe { slot.add(chunk).write(Zero([0; 4])) };
             chunk += gpu::block_dim().x;
         }
-        self.filled = self.filled.wrapping_add(1);
+        self.pending += 1;
     }
 
     fn slot(&self, index: u32) -> *mut S {

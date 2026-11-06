@@ -42,6 +42,7 @@ pub(super) struct Steps {
     residue: u32,
     offset: u64,
     advance: u64,
+    alignment: u64,
 }
 
 impl Steps {
@@ -49,12 +50,15 @@ impl Steps {
     /// apart in the source.
     pub(super) fn new(length: usize, depth: usize, line: usize) -> Self {
         let residue = (length.saturating_sub(1) % depth + 1).min(length);
+        let offset = (residue as u64).wrapping_mul(line as u64);
+        let advance = (depth as u64).wrapping_mul(line as u64);
         Steps {
             steps: length.div_ceil(depth) as u32,
             step: 0,
             residue: residue as u32,
-            offset: (residue as u64).wrapping_mul(line as u64),
-            advance: (depth as u64).wrapping_mul(line as u64),
+            offset,
+            advance,
+            alignment: offset | advance,
         }
     }
 
@@ -294,9 +298,12 @@ impl<S: Source> Chunks<S> {
         let along = count.saturating_sub(self.depth).min(self.width);
         let size = size_of::<T>() as u64;
         let vector = (self.source.alignment()
-            | shift
-            | u64::from(count).wrapping_mul(size)
-            | u64::from(self.width).wrapping_mul(size))
+            | u64::from(self.width).wrapping_mul(size)
+            | if step == 0 {
+                u64::from(steps.residue).wrapping_mul(size)
+            } else {
+                steps.alignment | ((if L::DEPTH_MAJOR { C } else { R }) as u64).wrapping_mul(size)
+            })
             & 15
             == 0;
         let elements = |index: usize| -> u32 {

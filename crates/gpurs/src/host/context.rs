@@ -41,13 +41,15 @@ pub(crate) struct Device {
 pub(crate) struct Entry {
     pub general: Function,
     pub linear: Option<Function>,
+    pub aligned: Option<[Function; 2]>,
     pub offset: usize,
 }
 
 impl Entry {
-    pub fn select(&self, linear: bool) -> &Function {
-        match (&self.linear, linear) {
-            (Some(function), true) => function,
+    pub fn select(&self, linear: bool, aligned: bool) -> &Function {
+        match (&self.aligned, &self.linear, linear) {
+            (Some(functions), _, _) if aligned => &functions[usize::from(linear)],
+            (_, Some(function), true) => function,
             _ => &self.general,
         }
     }
@@ -239,6 +241,14 @@ impl Device {
             entry: Entry {
                 general: function(&metadata.entry.symbol)?,
                 linear: metadata.entry.linear.as_deref().map(function).transpose()?,
+                aligned: metadata
+                    .entry
+                    .aligned
+                    .as_ref()
+                    .map(|[general, linear]| {
+                        Ok::<_, Error>([function(general)?, function(linear)?])
+                    })
+                    .transpose()?,
                 offset: (start / align * align) as usize,
             },
             offsets,

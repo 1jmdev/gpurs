@@ -11,8 +11,9 @@ use super::{
     shared_memory::{CallPath, SharedAllocations},
 };
 
-/// One copy of a function; `linear` folds a one-dimensional launch geometry.
-type Copy = (Instance, bool, CallPath);
+/// One copy of a function; `linear` folds a one-dimensional launch geometry, and `aligned`
+/// belongs to an entry whose slice arguments start 16-byte aligned.
+type Copy = (Instance, bool, bool, CallPath);
 
 /// One NVVM IR module holding every device function reachable from the requested kernels.
 pub(crate) struct ModuleBuilder<'sess> {
@@ -45,12 +46,18 @@ impl<'sess> ModuleBuilder<'sess> {
 
     /// Name of the device function for one copy of `instance`, queueing it for lowering on
     /// first use.
-    pub fn function(&mut self, instance: Instance, linear: bool) -> String {
-        self.specialize(instance, linear, Vec::new())
+    pub fn function(&mut self, instance: Instance, linear: bool, aligned: bool) -> String {
+        self.specialize(instance, linear, aligned, Vec::new())
     }
 
-    pub fn specialize(&mut self, instance: Instance, linear: bool, path: CallPath) -> String {
-        let copy = (instance, linear, path);
+    pub fn specialize(
+        &mut self,
+        instance: Instance,
+        linear: bool,
+        aligned: bool,
+        path: CallPath,
+    ) -> String {
+        let copy = (instance, linear, aligned, path);
         if let Some(name) = self.functions.get(&copy) {
             return name.clone();
         }
@@ -85,9 +92,10 @@ impl<'sess> ModuleBuilder<'sess> {
     pub fn finish(mut self) -> (Fragment, SharedMemory) {
         while let Some(copy) = self.queue.pop() {
             let name = self.functions[&copy].clone();
-            let (instance, linear, path) = copy;
+            let (instance, linear, aligned, path) = copy;
             let mut builder = FunctionBuilder::new(&mut self, instance);
             builder.linear = linear;
+            builder.aligned = aligned;
             builder.path = path;
             builder.lower(&name);
         }

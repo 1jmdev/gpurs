@@ -38,6 +38,7 @@ pub struct FunctionBuilder<'m, 'sess> {
     pending: Vec<(usize, Vec<u64>)>,
     /// Whether the launch has one block and thread dimension.
     pub linear: bool,
+    pub aligned: bool,
     pub block: usize,
     pub path: CallPath,
 }
@@ -63,6 +64,7 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
             copies: FxHashMap::default(),
             pending: Vec::new(),
             linear: false,
+            aligned: false,
             block: 0,
             path: Vec::new(),
         }

@@ -26,6 +26,8 @@ pub struct SharedMemory {
 pub struct Entry {
     pub symbol: String,
     pub linear: Option<String>,
+    /// The general and linear entries for 16-byte aligned slices.
+    pub aligned: Option<[String; 2]>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]

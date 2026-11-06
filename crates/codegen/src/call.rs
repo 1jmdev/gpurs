@@ -56,7 +56,7 @@ impl FunctionBuilder<'_, '_> {
             path.clone_from(&self.path);
             path.push((self.instance, self.block, self.copy.clone()));
         }
-        let name = self.module.specialize(instance, false, path);
+        let name = self.module.specialize(instance, false, self.aligned, path);
         self.invoke_named(&name, instance, arguments, destination);
     }
 

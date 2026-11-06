@@ -160,7 +160,11 @@ impl<S: Launch> KernelLaunch<'_, S> {
                 Error::InvalidOperation("launch shared memory exceeds CUDA range".to_owned())
             })?;
             if config.shared_bytes > metadata.shared.dynamic_bytes as usize {
-                for function in [Some(entry.general), entry.linear].into_iter().flatten() {
+                for function in [Some(entry.general), entry.linear]
+                    .into_iter()
+                    .flatten()
+                    .chain(entry.aligned.into_iter().flatten())
+                {
                     function.try_reserve_shared(shared_bytes)?;
                 }
             }
@@ -245,7 +249,13 @@ impl<S: Launch> KernelLaunch<'_, S> {
             && config.grid[2] == 1
             && config.block[1] == 1
             && config.block[2] == 1;
-        let function = entry.select(linear);
+        let aligned = metadata
+            .parameters
+            .iter()
+            .enumerate()
+            .filter(|(_, parameter)| matches!(parameter, Parameter::Slice { .. }))
+            .all(|(parameter, _)| self.scalar(parameter, 0, 8) % 16 == 0);
+        let function = entry.select(linear, aligned);
         stream.maintain()?;
         if let Some(buffer) = &result {
             self.write_word(RESULT_OFFSET as usize, buffer.allocation.pointer);

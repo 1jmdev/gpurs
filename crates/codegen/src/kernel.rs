@@ -3,11 +3,16 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use gpurs_artifact::{
     self as artifact, Entry, Fragment, Kernel, PARAMETERS_OFFSET, RESULT_OFFSET, SharedMemory,
 };
-use gpurs_ir::{Access, Binary, Conversion, Flags, Type, Value as IRValue};
+use gpurs_ir::{Access, Binary, Conversion, Flags, Predicate, Type, Value as IRValue};
 use gpurs_rustc::{CrateDef, Session, attributes};
 use gpurs_verifier::KernelPlan;
 
-use super::{function::FunctionBuilder, intrinsic::GEOMETRY, module::ModuleBuilder, place::Place};
+use super::{
+    function::FunctionBuilder,
+    intrinsic::GEOMETRY,
+    module::ModuleBuilder,
+    place::{Place, Value},
+};
 
 /// Kernel metadata and NVVM IR, including all entry points and shared-memory requirements.
 #[derive(Clone, Debug)]
@@ -43,13 +48,26 @@ impl ModuleBuilder<'_> {
             .next()
             .unwrap_or_default();
         let symbol = format!("{SYMBOL}_{function}_{:016x}", hasher.finish());
-        let root = self.function(plan.instance, false);
-        self.entry(&plan, &symbol, root, false);
-        let linear = plan.uses_index.then(|| {
-            let symbol = format!("{symbol}_linear");
-            let root = self.function(plan.instance, true);
-            self.entry(&plan, &symbol, root, true);
+        let mut variant = |suffix: &str, linear: bool, aligned: bool| {
+            let symbol = format!("{symbol}{suffix}");
+            let root = self.function(plan.instance, linear, aligned);
+            self.entry(&plan, &symbol, root, linear, aligned);
             symbol
+        };
+        variant("", false, false);
+        let linear = plan.uses_index.then(|| variant("_linear", true, false));
+        let slices = plan
+            .parameters
+            .iter()
+            .any(|parameter| matches!(parameter.metadata, artifact::Parameter::Slice { .. }));
+        let aligned = (plan.asynchronous && slices).then(|| {
+            let general = variant("_aligned", false, true);
+            let linear = if plan.uses_index {
+                variant("_aligned_linear", true, true)
+            } else {
+                general.clone()
+            };
+            [general, linear]
         });
         Kernel {
             key: plan.key,
@@ -63,13 +81,24 @@ impl ModuleBuilder<'_> {
             result: plan.result,
             requirements: plan.requirements,
             preconditions: plan.preconditions,
-            entry: Entry { symbol, linear },
+            entry: Entry {
+                symbol,
+                linear,
+                aligned,
+            },
             shared: SharedMemory::default(),
         }
     }
 
     /// Emits the entry point `symbol`, which unpacks the argument block and calls `root`.
-    fn entry(&mut self, plan: &KernelPlan, symbol: &str, root: String, linear: bool) {
+    fn entry(
+        &mut self,
+        plan: &KernelPlan,
+        symbol: &str,
+        root: String,
+        linear: bool,
+        aligned: bool,
+    ) {
         let parameters: Vec<_> = plan
             .parameters
             .iter()
@@ -109,6 +138,24 @@ impl ModuleBuilder<'_> {
                 function.load(&Place::new(pointer, parameter.layout.clone()))
             })
             .collect();
+        if aligned {
+            for (parameter, operand) in plan.parameters.iter().zip(&operands) {
+                if let (artifact::Parameter::Slice { .. }, Value::Pair(pointer, _)) =
+                    (parameter.metadata, &operand.value)
+                {
+                    let address =
+                        function
+                            .ir
+                            .cast(Conversion::PtrToInt, pointer.clone(), Type::I64);
+                    let low =
+                        function
+                            .ir
+                            .binary(Binary::And, Flags::empty(), address, IRValue::i64(15));
+                    let holds = function.ir.compare(Predicate::Eq, low, IRValue::i64(0));
+                    function.ir.call("llvm.assume", Type::Void, vec![holds]);
+                }
+            }
+        }
         let destination = function.temporary(signature.result.1.clone());
         function.invoke_named(&root, plan.instance, &operands, &destination);
         if let Some(result) = plan.result {
