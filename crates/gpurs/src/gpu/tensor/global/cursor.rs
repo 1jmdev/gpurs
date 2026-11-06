@@ -206,23 +206,25 @@ impl Chunks<Strided> {
 }
 
 impl Chunks<Gathered> {
-    /// The chunks of thread `thread` of `G` in depth-major `R`x`C` tiles whose row `r` is the
-    /// line at element offset `locate(r)` of `data`, or absent.
+    /// The chunks of thread `thread` of `G` in depth-major `R`x`C` tiles whose row `r` is line
+    /// `locate(r)` of the lines `stride` elements apart from `base` in `data`, or absent.
     #[inline]
     pub(super) fn gathered<T: Element, const R: usize, const C: usize, G: ThreadGroup>(
         data: &[T],
         thread: usize,
+        [base, stride]: [usize; 2],
         locate: impl Fn(usize) -> Option<usize>,
     ) -> Self {
         let [row, column, rows] = placement::<T, R, C, DepthMajor, G>(thread);
+        let first = data.as_ptr().wrapping_add(base.wrapping_add(column));
+        let step = (stride * size_of::<T>()) as u64;
+        let alignment = first as u64 | step.isolate_lowest_one();
         let mut addresses = [0; CHUNKS];
-        let mut alignment = 0;
         for index in
             0..const { (R * SharedTile::<T, R, C, DepthMajor>::CHUNKS).div_ceil(G::THREADS) }
         {
-            if let Some(offset) = locate(row.wrapping_add(index.wrapping_mul(rows))) {
-                addresses[index] = data.as_ptr().wrapping_add(offset.wrapping_add(column)) as u64;
-                alignment |= addresses[index];
+            if let Some(line) = locate(row.wrapping_add(index.wrapping_mul(rows))) {
+                addresses[index] = first.wrapping_add(line.wrapping_mul(stride)) as u64;
             }
         }
         Self::place::<T, R, C, DepthMajor, G>(

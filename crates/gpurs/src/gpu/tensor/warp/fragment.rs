@@ -4,7 +4,7 @@ use std::marker::PhantomData;
 
 use gpurs_macros::primitive;
 
-use super::super::element;
+use super::super::{Element, element};
 use crate::gpu::{
     self, BFloat16, Half,
     warp::{self, Shuffle},
@@ -35,6 +35,15 @@ impl<T> FragmentA<T> {
 
     pub fn registers(&self) -> [u32; 4] {
         self.registers
+    }
+}
+
+impl<T: Element> FragmentA<T> {
+    /// Rounds adjacent 16x8 f32 blocks into one 16x16 `A` operand.
+    pub fn rounded(left: &Accumulator<f32>, right: &Accumulator<f32>) -> Self {
+        let [a, b, c, d] = left.values;
+        let [e, f, g, h] = right.values;
+        Self::new([T::pack(a, b), T::pack(c, d), T::pack(e, f), T::pack(g, h)])
     }
 }
 

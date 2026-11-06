@@ -10,7 +10,7 @@ use super::{
 };
 use crate::gpu::{
     Block,
-    tensor::{Asynchronous, DepthMajor, Element, Initialized, SharedTile, TileWriter},
+    tensor::{Asynchronous, DepthMajor, Element, Initialized, Layout, SharedTile, TileWriter},
 };
 
 /// A [`DepthMajor`] matrix read through row indices: its row `r` is row `indices[r]` of the
@@ -37,33 +37,46 @@ impl<'a, T> GatheredMatrix<'a, T> {
     where
         T: Element,
     {
-        let (data, stride, offset) = self.matrix.parts();
-        let end = depth.end.min(self.matrix.depth());
-        let begin = depth.start.min(end);
-        let length = end.wrapping_sub(begin);
-        let lines = self.matrix.lines();
-        let base = offset.wrapping_add(begin);
         let indices = self.indices;
-        let chunks =
-            Chunks::gathered::<T, R, C, Block<THREADS>>(data, block.thread(), |row| match indices
+        self.matrix.locate(block, depth, |row| {
+            indices
                 .get(first.wrapping_add(row))
-            {
-                Some(&source) if (source as usize) < lines => {
-                    Some(base.wrapping_add((source as usize).wrapping_mul(stride)))
-                }
-                _ => None,
-            });
+                .map(|&source| source as usize)
+        })
+    }
+}
+
+impl<'a, T> GlobalMatrix<'a, T, DepthMajor> {
+    /// A block copy plan whose tile row `r` is matrix row `locate(r)`; `None` reads as zero.
+    pub fn locate<const THREADS: usize, const R: usize, const C: usize>(
+        &self,
+        block: &Block<THREADS>,
+        depth: Range<usize>,
+        locate: impl Fn(usize) -> Option<usize>,
+    ) -> GatherCursor<'a, T, THREADS, R, C>
+    where
+        T: Element,
+    {
+        let (data, stride, offset) = self.parts();
+        let end = depth.end.min(self.depth());
+        let begin = depth.start.min(end);
+        let lines = self.lines();
+        let chunks = Chunks::gathered::<T, R, C, Block<THREADS>>(
+            data,
+            block.thread(),
+            [offset.wrapping_add(begin), stride],
+            |row| locate(row).filter(|&line| line < lines),
+        );
         GatherCursor {
             data: PhantomData,
-            steps: Steps::new(length, C, size_of::<T>()),
+            steps: Steps::new(end.wrapping_sub(begin), C, size_of::<T>()),
             chunks,
         }
     }
 }
 
-/// The copy plan of a block for a [`GatheredMatrix`] into `R`x`C` [`SharedTile`]s along
-/// depth. The cursor reads the row indices of the thread's chunks once, when it is created,
-/// and otherwise copies as a [`TileCursor`](super::TileCursor) does.
+/// A block copy plan of gathered rows into `R`x`C` [`SharedTile`] rows of either layout,
+/// located once at creation.
 #[derive(Debug)]
 pub struct GatherCursor<'a, T, const THREADS: usize, const R: usize, const C: usize> {
     data: PhantomData<&'a [T]>,
@@ -88,13 +101,14 @@ impl<T: Element, const THREADS: usize, const R: usize, const C: usize>
         memory = ReadReachable(0),
         proof = Initialized
     )]
-    pub fn copy<'s>(
+    pub fn copy<'s, L: Layout>(
         &mut self,
-        writer: TileWriter<'s, T, R, C, DepthMajor, Asynchronous>,
-    ) -> Initialized<'s, SharedTile<T, R, C, DepthMajor>> {
+        writer: TileWriter<'s, T, R, C, L, Asynchronous>,
+    ) -> Initialized<'s, SharedTile<T, R, C, L>> {
+        // SAFETY: both layouts share one representation.
         unsafe {
             self.chunks
-                .copy::<T, R, C, DepthMajor, Block<THREADS>>(writer.tile, &mut self.steps);
+                .copy::<T, R, C, DepthMajor, Block<THREADS>>(writer.tile.cast(), &mut self.steps);
         };
         Initialized::new()
     }

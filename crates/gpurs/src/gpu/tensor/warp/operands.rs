@@ -20,13 +20,16 @@ pub trait OperandTile<T: Element>: Sealed {
     /// Depth positions in the tile.
     const DEPTH: usize;
 
-    #[doc(hidden)]
+    /// The `A` fragment of the 16x16 block at (`extent`, `depth`). Every lane of the warp takes
+    /// part.
     fn fragment_a(&self, extent: usize, depth: usize) -> FragmentA<T>;
 
-    #[doc(hidden)]
+    /// The `B` fragments of the 16x16 block at (`extent`, `depth`), the first of its first eight
+    /// extent positions. Every lane of the warp takes part.
     fn fragments_b(&self, extent: usize, depth: usize) -> [FragmentB<T>; 2];
 
-    #[doc(hidden)]
+    /// The `B` fragment of the 8x16 block at (`extent`, `depth`). Every lane of the warp takes
+    /// part.
     fn fragment_b(&self, extent: usize, depth: usize) -> FragmentB<T>;
 }
 
