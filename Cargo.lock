@@ -134,6 +134,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "gpurs-inspect"
+version = "0.1.0"
+dependencies = [
+ "gpurs-nvvm",
+ "serde_json",
+]
+
+[[package]]
 name = "gpurs-ir"
 version = "0.1.0"
 dependencies = [

@@ -149,11 +149,14 @@ fn build(architectures: &[&str]) -> Result<()> {
     let image = directory.join("gpurs_artifact.bin");
     let identity_path = directory.join("gpurs_artifact.identity");
     let registers = env::var("GPURS_MAX_REGISTERS").ok();
+    let dump = env::var("GPURS_DUMP").ok();
+    let dump_directory = compiler.ancestors().nth(2).unwrap().join("gpurs/dump");
     let identity = Key::Image {
         inputs: &inputs,
         architectures,
         toolkit: &TOOLKIT_ENVIRONMENT.map(env::var_os),
         registers: registers.as_deref(),
+        dump: dump.as_deref(),
     }
     .digest();
     if !image.exists() || fs::read_to_string(&identity_path).ok() != Some(identity.clone()) {
@@ -170,8 +173,11 @@ fn build(architectures: &[&str]) -> Result<()> {
                         .map(|lowered| &lowered.targets[index])
                         .collect();
                     let (store, registers) = (&store, registers.as_deref());
+                    let dump = dump
+                        .as_deref()
+                        .map(|filter| (filter, dump_directory.as_path()));
                     scope.spawn(move || {
-                        link::link(&lowered, compiler, architecture, registers, store)
+                        link::link(&lowered, compiler, architecture, registers, dump, store)
                     })
                 })
                 .collect::<Vec<_>>()
@@ -199,9 +205,10 @@ fn build(architectures: &[&str]) -> Result<()> {
     );
     println!("cargo::rustc-env=GPURS_ARTIFACT={}", image.display());
     println!("cargo::rerun-if-changed={COMPILER_LIBRARY}");
-    for name in TOOLKIT_ENVIRONMENT
-        .into_iter()
-        .chain(["GPURS_MAX_REGISTERS", "GPURS_AUDIT"])
+    for name in
+        TOOLKIT_ENVIRONMENT
+            .into_iter()
+            .chain(["GPURS_MAX_REGISTERS", "GPURS_AUDIT", "GPURS_DUMP"])
     {
         println!("cargo::rerun-if-env-changed={name}");
     }

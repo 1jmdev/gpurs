@@ -36,6 +36,7 @@ pub enum Key<'a> {
         architectures: &'a [&'a str],
         toolkit: &'a [Option<OsString>],
         registers: Option<&'a str>,
+        dump: Option<&'a str>,
     },
 }
 

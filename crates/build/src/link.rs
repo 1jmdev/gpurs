@@ -1,6 +1,8 @@
 use std::{
     cmp::Reverse,
-    fs, process,
+    fs,
+    path::Path,
+    process,
     sync::atomic::{AtomicUsize, Ordering},
     thread,
 };
@@ -17,6 +19,7 @@ pub(crate) fn link(
     compiler: &str,
     architecture: &str,
     registers: Option<&str>,
+    dump: Option<(&str, &Path)>,
     store: &Store,
 ) -> Result<Artifact<'static>> {
     let mut kernels: Vec<Kernel> = Vec::new();
@@ -87,6 +90,23 @@ pub(crate) fn link(
             fs::remove_dir_all(scratch)?;
             Ok(cubin)
         })?;
+        if let Some((filter, root)) = dump
+            && kernels[index].name.contains(filter)
+        {
+            let directory = root.join(kernels[index].name.replace("::", "."));
+            let scratch = directory.join(format!("{architecture}.{}.ptxas", process::id()));
+            fs::create_dir_all(&scratch)?;
+            let report = toolkit.report(&ptx, architecture, registers, &scratch)?;
+            let sass = toolkit.disassemble(&scratch.join("kernels.cubin"))?;
+            fs::remove_dir_all(scratch)?;
+            for (extension, contents) in [("ll", &ir), ("ptx", &ptx), ("sass", &sass)] {
+                fs::write(
+                    directory.join(format!("{architecture}.{extension}")),
+                    contents,
+                )?;
+            }
+            fs::write(directory.join(format!("{architecture}.ptxas.txt")), report)?;
+        }
         Ok(Module {
             cubin: cubin.into(),
             kernels: vec![kernels[index].clone()],

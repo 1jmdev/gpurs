@@ -5,6 +5,7 @@ pub const TOOLKIT_ENVIRONMENT: [&str; 2] = ["CUDA_PATH", "CUDA_HOME"];
 pub(crate) const LIBNVVM: &str = "nvvm/lib64/libnvvm.so";
 pub(crate) const LIBDEVICE: &str = "nvvm/libdevice/libdevice.10.bc";
 pub(crate) const PTXAS: &str = "bin/ptxas";
+pub(crate) const CUOBJDUMP: &str = "bin/cuobjdump";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Toolkit {
