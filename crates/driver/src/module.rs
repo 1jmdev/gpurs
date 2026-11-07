@@ -60,7 +60,10 @@ impl Module {
             unsafe { ffi::cuModuleGetFunction(&raw mut raw, self.raw, name.as_ptr()) },
             "cuModuleGetFunction",
         )?;
-        Ok(Function { raw })
+        Ok(Function {
+            raw,
+            programmatic: false,
+        })
     }
 }
 
@@ -78,11 +81,25 @@ impl Drop for Module {
 #[derive(Debug, Clone, Copy)]
 pub struct Function {
     raw: CUfunction,
+    programmatic: bool,
 }
 
 impl Function {
     pub fn as_raw(&self) -> CUfunction {
         self.raw
+    }
+
+    /// Lets launches of this function begin before the preceding kernel in the stream
+    /// completes.
+    ///
+    /// # Safety
+    /// The function must execute `griddepcontrol.wait` before any memory access that depends
+    /// on preceding work.
+    pub unsafe fn with_programmatic_serialization(self) -> Self {
+        Self {
+            programmatic: true,
+            ..self
+        }
     }
 
     /// Launches using CUDA's array of pointers to individual parameter values.
@@ -247,24 +264,30 @@ impl Function {
         arguments: &mut [MaybeUninit<u8>],
     ) -> Result<()> {
         let mut parameters = [arguments.as_mut_ptr().cast::<c_void>()];
+        let mut attribute = ffi::CUlaunchAttribute {
+            id: ffi::CU_LAUNCH_ATTRIBUTE_PROGRAMMATIC_STREAM_SERIALIZATION,
+            padding: 0,
+            value: [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        };
+        let config = ffi::CUlaunchConfig {
+            grid,
+            block,
+            shared_memory_bytes: shared_bytes,
+            stream: stream.raw,
+            attributes: &raw mut attribute,
+            attribute_count: self.programmatic.into(),
+        };
         // SAFETY: guaranteed by the caller; the driver copies the block during the call.
         ffi::result(
             unsafe {
-                ffi::cuLaunchKernel(
+                ffi::cuLaunchKernelEx(
+                    &raw const config,
                     self.raw,
-                    grid[0],
-                    grid[1],
-                    grid[2],
-                    block[0],
-                    block[1],
-                    block[2],
-                    shared_bytes,
-                    stream.raw,
                     parameters.as_mut_ptr(),
                     ptr::null_mut(),
                 )
             },
-            "cuLaunchKernel",
+            "cuLaunchKernelEx",
         )?;
         Ok(())
     }

@@ -1,7 +1,8 @@
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 use gpurs_artifact::{
-    self as artifact, Entry, Fragment, Kernel, PARAMETERS_OFFSET, RESULT_OFFSET, SharedMemory,
+    self as artifact, Compatibility, Entry, Fragment, Kernel, PARAMETERS_OFFSET, RESULT_OFFSET,
+    SharedMemory,
 };
 use gpurs_ir::{Access, Binary, Conversion, Flags, Predicate, Type, Value as IRValue};
 use gpurs_rustc::{CrateDef, Session, attributes};
@@ -125,6 +126,20 @@ impl ModuleBuilder<'_> {
             gpurs_ir::Function::new(symbol, Type::Void, vec![Type::bytes(size).pointer()]);
         function.ir.internal = false;
         function.ir.byval(0, align);
+        if function
+            .module
+            .sess
+            .target
+            .provides(90, Compatibility::Generic)
+        {
+            function.ir.assembly(
+                "griddepcontrol.launch_dependents; griddepcontrol.wait;",
+                "~{memory}",
+                true,
+                Type::Void,
+                Vec::new(),
+            );
+        }
         let arguments = function.ir.parameter(0);
         let arguments = function
             .ir
@@ -195,7 +210,7 @@ impl ModuleBuilder<'_> {
             function
                 .ir
                 .annotations
-                .extend((blocks > 0).then_some(("minctasm", blocks)));
+                .extend((blocks > 0 || plan.reallocates).then_some(("minctasm", blocks.max(1))));
         }
         let FunctionBuilder { module, ir, .. } = function;
         module.ir.define(ir);

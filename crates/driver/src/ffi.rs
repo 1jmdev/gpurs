@@ -18,11 +18,29 @@ pub const CUDA_SUCCESS: CUresult = 0;
 pub const CUDA_ERROR_NOT_READY: CUresult = 600;
 pub const CU_STREAM_NON_BLOCKING: c_uint = 1;
 pub const CU_EVENT_DISABLE_TIMING: c_uint = 2;
+pub const CU_LAUNCH_ATTRIBUTE_PROGRAMMATIC_STREAM_SERIALIZATION: c_int = 6;
 pub const CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR: c_int = 75;
 pub const CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR: c_int = 76;
 pub const CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES: c_int = 8;
 pub const CU_TENSOR_MAP_SWIZZLE_128B: c_int = 3;
 pub const CU_TENSOR_MAP_L2_PROMOTION_L2_256B: c_int = 3;
+
+#[repr(C, align(8))]
+pub struct CUlaunchAttribute {
+    pub id: c_int,
+    pub padding: c_int,
+    pub value: [c_int; 16],
+}
+
+#[repr(C)]
+pub struct CUlaunchConfig {
+    pub grid: [c_uint; 3],
+    pub block: [c_uint; 3],
+    pub shared_memory_bytes: c_uint,
+    pub stream: CUstream,
+    pub attributes: *mut CUlaunchAttribute,
+    pub attribute_count: c_uint,
+}
 
 #[link(name = "cuda")]
 unsafe extern "C" {
@@ -115,6 +133,12 @@ unsafe extern "C" {
         block_z: c_uint,
         shared_memory_bytes: c_uint,
         stream: CUstream,
+        parameters: *mut *mut c_void,
+        extra: *mut *mut c_void,
+    ) -> CUresult;
+    pub fn cuLaunchKernelEx(
+        config: *const CUlaunchConfig,
+        function: CUfunction,
         parameters: *mut *mut c_void,
         extra: *mut *mut c_void,
     ) -> CUresult;

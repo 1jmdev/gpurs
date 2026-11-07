@@ -225,8 +225,18 @@ impl Device {
         };
         let shared_bytes = u32::try_from(metadata.shared.dynamic_bytes)
             .expect("kernel shared memory exceeds CUDA's size range");
+        let programmatic = self
+            .artifact
+            .architecture
+            .parse::<Target>()
+            .is_ok_and(|target| target.capability() >= 90);
         let function = |symbol: &str| {
-            let function = module.try_function(symbol)?;
+            let mut function = module.try_function(symbol)?;
+            if programmatic {
+                // SAFETY: entries compiled for sm_90 and later wait on their prerequisite grids
+                // before any other instruction.
+                function = unsafe { function.with_programmatic_serialization() };
+            }
             if shared_bytes > 0 {
                 function.try_reserve_shared(shared_bytes)?;
             }

@@ -37,3 +37,37 @@ warpgroup!(warpgroup_e4m3_e4m3, "e4m3.e4m3");
 warpgroup!(warpgroup_e4m3_e5m2, "e4m3.e5m2");
 warpgroup!(warpgroup_e5m2_e4m3, "e5m2.e4m3");
 warpgroup!(warpgroup_e5m2_e5m2, "e5m2.e5m2");
+
+macro_rules! registers {
+    ($(#[$attribute:meta])* $name:ident $text:literal) => {
+        $(#[$attribute])*
+        #[primitive(
+            lowering = Assembly { text: $text, constraints: "n" },
+            architecture = 90,
+            compatibility = Architecture,
+            convergence = Warp,
+            memory = None,
+            proof = Varying
+        )]
+        pub unsafe fn $name(count: u32);
+    };
+}
+
+registers! {
+    /// Lowers the per-thread register limit of the executing warpgroup to `count`, returning
+    /// the remainder to the block's pool.
+    /// # Safety
+    /// Every thread of a complete warpgroup executes it with the same constant `count`, a
+    /// multiple of 8 in 24..=256 no larger than the current limit.
+    release_registers "setmaxnreg.dec.sync.aligned.u32 $0;"
+}
+
+registers! {
+    /// Raises the per-thread register limit of the executing warpgroup to `count`, waiting
+    /// until other warpgroups released enough registers to the block's pool.
+    /// # Safety
+    /// Every thread of a complete warpgroup executes it with the same constant `count`, a
+    /// multiple of 8 in 24..=256 no smaller than the current limit, and the block releases
+    /// enough registers for every such request.
+    acquire_registers "setmaxnreg.inc.sync.aligned.u32 $0;"
+}

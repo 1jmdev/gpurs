@@ -7,6 +7,7 @@ use gpurs_rustc::{
 #[derive(Default)]
 pub struct Effects {
     pub asynchronous: bool,
+    pub reallocates: bool,
 }
 
 /// Rejects unsupported call graphs and determines whether they issue asynchronous copies.
@@ -20,6 +21,16 @@ pub fn check(sess: Session<'_>, root: Instance) -> Effects {
         &mut FxHashSet::default(),
         &mut effects,
     );
+    if effects.reallocates
+        && !attributes::launch_bounds(sess, root.def.def_id())
+            .is_some_and(|(_, blocks)| blocks <= 1)
+    {
+        sess.error_help(
+            root.def.def_id().span(),
+            "register reallocation needs the block's register allocation at compile time",
+            "declare `#[gpu(threads = N)]` without `minimum_blocks` above 1",
+        );
+    }
     effects
 }
 
@@ -109,6 +120,9 @@ fn visit(
                 let primitive = attributes::primitive(sess, callee.def.def_id());
                 effects.asynchronous |= primitive.as_ref().is_some_and(|primitive| {
                     matches!(&primitive.lowering, Lowering::Assembly { text, .. } if text.contains("cp.async."))
+                });
+                effects.reallocates |= primitive.as_ref().is_some_and(|primitive| {
+                    matches!(&primitive.lowering, Lowering::Assembly { text, .. } if text.contains("setmaxnreg."))
                 });
                 if let Some(primitive) = primitive
                     && !sess

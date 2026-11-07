@@ -30,6 +30,8 @@ pub struct KernelPlan {
     pub uses_index: bool,
     /// Whether the kernel issues asynchronous copies, which must land before the block exits.
     pub asynchronous: bool,
+    /// Whether warpgroups exchange registers, which fixes the allocation to one block per SM.
+    pub reallocates: bool,
 }
 
 /// The outcome of verifying one kernel.
@@ -172,7 +174,7 @@ pub fn kernel(
     let summary = diagnostic::summary(&analysis, &preconditions);
     let requirements = clauses(&analysis.findings.requirements);
     let preconditions = clauses(&preconditions);
-    let (uses_index, asynchronous) = (analysis.findings.uses_index, effects.asynchronous);
+    let uses_index = analysis.findings.uses_index;
     drop(analysis);
     Some(Verification {
         plan: KernelPlan {
@@ -184,7 +186,8 @@ pub fn kernel(
             requirements,
             preconditions,
             uses_index,
-            asynchronous,
+            asynchronous: effects.asynchronous,
+            reallocates: effects.reallocates,
         },
         summary,
     })

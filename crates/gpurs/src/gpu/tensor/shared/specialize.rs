@@ -4,7 +4,7 @@
 use gpurs_macros::primitive;
 
 use super::super::sealed::Sealed;
-use crate::gpu::{self, Block, synchronization};
+use crate::gpu::{self, Block, synchronization, tensor::hopper::instruction};
 
 /// A group of complete warps of the block, numbered from its first thread.
 pub trait ThreadGroup: Copy + Sealed {
@@ -107,5 +107,59 @@ impl<const THREADS: usize> Block<THREADS> {
         } else {
             Role::Consumer(Consumers(()))
         }
+    }
+}
+
+impl<const THREADS: usize> Block<THREADS> {
+    /// Splits the block like [`Self::specialize`] and moves registers from the producer
+    /// warpgroups to the consumer warpgroups on `sm_90a`: each producer thread keeps
+    /// `RELEASED` registers and each consumer thread grows to `ACQUIRED`.
+    ///
+    /// The kernel declares `#[gpu(threads = THREADS)]`, which lets ptxas start every thread
+    /// with `ACQUIRED` registers, or the block's share of the register file when smaller.
+    #[primitive(
+        lowering = Body,
+        architecture = 90,
+        compatibility = Architecture,
+        convergence = Block,
+        memory = None,
+        proof = Varying
+    )]
+    pub fn specialize_registers<
+        const PRODUCERS: usize,
+        const RELEASED: u32,
+        const ACQUIRED: u32,
+    >(
+        &self,
+    ) -> Role<PRODUCERS, THREADS> {
+        const {
+            assert!(
+                PRODUCERS % 4 == 0 && THREADS % 128 == 0,
+                "registers move between complete warpgroups"
+            );
+            assert!(
+                RELEASED % 8 == 0 && ACQUIRED % 8 == 0 && 24 <= RELEASED && ACQUIRED <= 248,
+                "register limits are multiples of 8 in 24..=248"
+            );
+            let share = (65536 / THREADS / 8 * 8) as u32;
+            let allocated = if share < ACQUIRED { share } else { ACQUIRED };
+            assert!(
+                RELEASED <= allocated,
+                "producers keep no more registers than every thread starts with"
+            );
+            assert!(
+                RELEASED as usize * PRODUCERS * 32 + ACQUIRED as usize * (THREADS - PRODUCERS * 32)
+                    <= allocated as usize * THREADS,
+                "consumers acquire more registers than producers release"
+            );
+        };
+        let role = self.specialize::<PRODUCERS>();
+        match role {
+            // SAFETY: roles are uniform per warpgroup, the limits are checked constants, and
+            // the producers release at least the registers the consumers acquire.
+            Role::Producer(_) => unsafe { instruction::release_registers(RELEASED) },
+            Role::Consumer(_) => unsafe { instruction::acquire_registers(ACQUIRED) },
+        }
+        role
     }
 }
