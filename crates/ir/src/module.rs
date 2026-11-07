@@ -69,7 +69,7 @@ impl Module {
 
     pub fn define(&mut self, mut function: Function) {
         function.typed_byval = self.typed_byval;
-        function.promote();
+        function.optimize();
         self.functions.push(function);
     }
 

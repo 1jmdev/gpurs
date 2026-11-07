@@ -9,7 +9,7 @@ use gpurs_artifact::Fragment;
 
 use crate::{
     Module,
-    print::{List, Typed},
+    emit::print::{List, Typed},
 };
 
 impl Module {

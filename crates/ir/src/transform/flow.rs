@@ -1,4 +1,6 @@
-//! Dominance over a control-flow graph of block indices rooted at block 0.
+//! The control-flow graph of a function and dominance over it, rooted at block 0.
+
+use crate::{Function, instruction::Terminator};
 
 /// The immediate dominator of each block reachable from block 0.
 pub(crate) struct Dominators {
@@ -69,6 +71,17 @@ impl Dominators {
         self.immediate[block].filter(|_| block != 0)
     }
 
+    /// The blocks each reachable block immediately dominates.
+    pub(crate) fn children(&self) -> Vec<Vec<usize>> {
+        let mut children = vec![Vec::new(); self.immediate.len()];
+        for &block in &self.order[1..] {
+            if let Some(dominator) = self.immediate[block] {
+                children[dominator].push(block);
+            }
+        }
+        children
+    }
+
     /// The dominance frontier of each block: the joins it reaches without strictly dominating
     /// them.
     pub(crate) fn frontiers(&self, predecessors: &[Vec<usize>]) -> Vec<Vec<usize>> {
@@ -94,5 +107,37 @@ impl Dominators {
             }
         }
         frontiers
+    }
+}
+
+/// The control-flow graph of a function over block indices, with its dominators.
+pub(crate) struct ControlFlow {
+    pub predecessors: Vec<Vec<usize>>,
+    pub dominators: Dominators,
+}
+
+impl ControlFlow {
+    pub(crate) fn new(function: &Function) -> ControlFlow {
+        let successors: Vec<_> = function
+            .blocks
+            .iter()
+            .map(|block| {
+                block
+                    .terminator
+                    .as_ref()
+                    .map_or_else(Vec::new, Terminator::successors)
+            })
+            .collect();
+        let mut predecessors = vec![Vec::new(); successors.len()];
+        for (block, targets) in successors.iter().enumerate() {
+            for &target in targets {
+                predecessors[target].push(block);
+            }
+        }
+        let dominators = Dominators::new(&successors, &predecessors);
+        ControlFlow {
+            predecessors,
+            dominators,
+        }
     }
 }

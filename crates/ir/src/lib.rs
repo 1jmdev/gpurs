@@ -5,13 +5,11 @@
 //! type from its operands, so a malformed instruction fails where it is built instead of in
 //! libNVVM, and external declarations derive from the calls that use them.
 
-mod dominators;
-mod fragment;
+mod emit;
 mod function;
 mod instruction;
 mod module;
-mod print;
-mod promote;
+mod transform;
 mod ty;
 mod value;
 

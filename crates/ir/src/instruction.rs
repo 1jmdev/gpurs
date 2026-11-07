@@ -62,7 +62,7 @@ pub enum Predicate {
 }
 
 /// Conversions, printed as their lowercase names.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Conversion {
     Trunc,
     ZExt,
@@ -180,6 +180,111 @@ impl Transfer {
             Transfer::Copy => "llvm.memcpy.p0i8.p0i8.i64",
             Transfer::Move => "llvm.memmove.p0i8.p0i8.i64",
             Transfer::Set => "llvm.memset.p0i8.i64",
+        }
+    }
+}
+
+impl Instruction {
+    pub(crate) fn operands_mut(&mut self, mut visit: impl FnMut(&mut Value)) {
+        match self {
+            Instruction::Alloca(..) | Instruction::Fence(..) => {}
+            Instruction::Binary(_, _, left, right)
+            | Instruction::Compare(_, left, right)
+            | Instruction::Insert(left, right, _)
+            | Instruction::Store(left, right, ..)
+            | Instruction::Offset(left, right, _)
+            | Instruction::Modify(_, left, right, _) => {
+                visit(left);
+                visit(right);
+            }
+            Instruction::Cast(_, value, _)
+            | Instruction::Load(value, ..)
+            | Instruction::Extract(value, _) => visit(value),
+            Instruction::Select(condition, left, right) => {
+                visit(condition);
+                visit(left);
+                visit(right);
+            }
+            Instruction::Call { arguments, .. } => arguments.iter_mut().for_each(visit),
+            Instruction::Phi(_, incoming) => {
+                for (value, _) in incoming {
+                    visit(value);
+                }
+            }
+            Instruction::CompareExchange {
+                pointer,
+                expected,
+                replacement,
+                ..
+            } => {
+                visit(pointer);
+                visit(expected);
+                visit(replacement);
+            }
+            Instruction::Transfer {
+                destination,
+                source,
+                length,
+                ..
+            } => {
+                visit(destination);
+                visit(source);
+                visit(length);
+            }
+        }
+    }
+
+    /// The slot address of a lifetime marker.
+    pub(crate) fn lifetime(&self) -> Option<&Value> {
+        match self {
+            Instruction::Call {
+                callee: Callee::Symbol(symbol),
+                arguments,
+                ..
+            } if symbol.starts_with("llvm.lifetime.") => arguments.get(1),
+            _ => None,
+        }
+    }
+
+    /// Whether the instruction only computes its result, so it can go when that is unused.
+    pub(crate) fn is_pure(&self) -> bool {
+        matches!(
+            self,
+            Instruction::Alloca(..)
+                | Instruction::Binary(..)
+                | Instruction::Compare(..)
+                | Instruction::Cast(..)
+                | Instruction::Select(..)
+                | Instruction::Offset(..)
+                | Instruction::Phi(..)
+                | Instruction::Extract(..)
+                | Instruction::Insert(..)
+        )
+    }
+}
+
+impl Terminator {
+    pub(crate) fn operands_mut(&mut self, mut visit: impl FnMut(&mut Value)) {
+        match self {
+            Terminator::Conditional(value, ..) | Terminator::Return(Some(value)) => visit(value),
+            Terminator::Switch(value, _, cases) => {
+                visit(value);
+                for (case, _) in cases {
+                    visit(case);
+                }
+            }
+            Terminator::Branch(_) | Terminator::Return(None) | Terminator::Unreachable => {}
+        }
+    }
+
+    pub(crate) fn successors(&self) -> Vec<usize> {
+        match self {
+            Terminator::Branch(target) => vec![target.0],
+            Terminator::Conditional(_, first, second) => vec![first.0, second.0],
+            Terminator::Switch(_, otherwise, cases) => std::iter::once(otherwise.0)
+                .chain(cases.iter().map(|(_, target)| target.0))
+                .collect(),
+            Terminator::Return(_) | Terminator::Unreachable => Vec::new(),
         }
     }
 }

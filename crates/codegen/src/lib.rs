@@ -16,6 +16,5 @@ mod module;
 mod place;
 mod rvalue;
 mod shared_memory;
-mod unroll;
 
 pub use kernel::{GeneratedKernel, generate};
