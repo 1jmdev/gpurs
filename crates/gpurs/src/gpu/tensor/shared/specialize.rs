@@ -81,7 +81,7 @@ impl<const PRODUCERS: usize, const THREADS: usize> Consumers<PRODUCERS, THREADS>
     /// each other. Producers do not take part; every consumer thread does.
     #[primitive(
         lowering = Body,
-        architecture = 80,
+        targets = ">=sm_80",
         convergence = Warp,
         memory = Encapsulated,
         proof = Uniform
@@ -119,8 +119,7 @@ impl<const THREADS: usize> Block<THREADS> {
     /// with `ACQUIRED` registers, or the block's share of the register file when smaller.
     #[primitive(
         lowering = Body,
-        architecture = 90,
-        compatibility = Architecture,
+        targets = "sm_90a",
         convergence = Block,
         memory = None,
         proof = Varying

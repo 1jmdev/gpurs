@@ -2,8 +2,6 @@
 //! ties to even, preserving subnormals. Explicit `*_saturate` half operations clamp to [0, 1]
 //! and map NaN to +0. Equality and ordering methods are numerical; derived traits compare bits.
 
-use gpurs_macros::primitive;
-
 /// IEEE 754 binary16.
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -85,21 +83,6 @@ impl BFloat16 {
     }
 }
 
-macro_rules! instruction {
-    ($architecture:literal $text:expr, $constraints:literal;
-        $(#[$attribute:meta])* pub fn $name:ident($($arguments:tt)*) -> $result:ty;) => {
-        #[primitive(
-            lowering = Assembly { text: $text, constraints: $constraints },
-            architecture = $architecture,
-            convergence = None,
-            memory = None,
-            proof = Varying
-        )]
-        $(#[$attribute])*
-        pub fn $name($($arguments)*) -> $result;
-    };
-}
-
 /// Two f16 values, low component in bits 0..16, high component in bits 16..32.
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -128,179 +111,123 @@ impl Half2 {
 }
 
 impl Half {
-    instruction! {
-        53 "cvt.rn.f16.f32 $0, $1;", "=h,f";
+    primitives! {
+        convergence = None, memory = None, proof = Varying;
+
         #[cfg(gpurs_device)]
-        pub fn from_f32(value: f32) -> Self;
-    }
+        >= sm_53 "cvt.rn.f16.f32 $0, $1;" "=h,f"
+        fn from_f32(value: f32) -> Self;
 
-    instruction! {
-        53 "cvt.rz.f16.f32 $0, $1;", "=h,f";
-        pub fn from_f32_round_zero(value: f32) -> Self;
-    }
+        >= sm_53 "cvt.rz.f16.f32 $0, $1;" "=h,f"
+        fn from_f32_round_zero(value: f32) -> Self;
 
-    instruction! {
-        53 "cvt.rp.f16.f32 $0, $1;", "=h,f";
-        pub fn from_f32_round_up(value: f32) -> Self;
-    }
+        >= sm_53 "cvt.rp.f16.f32 $0, $1;" "=h,f"
+        fn from_f32_round_up(value: f32) -> Self;
 
-    instruction! {
-        53 "cvt.rm.f16.f32 $0, $1;", "=h,f";
-        pub fn from_f32_round_down(value: f32) -> Self;
-    }
+        >= sm_53 "cvt.rm.f16.f32 $0, $1;" "=h,f"
+        fn from_f32_round_down(value: f32) -> Self;
 
-    instruction! {
-        53 "cvt.f32.f16 $0, $1;", "=f,h";
         #[cfg(gpurs_device)]
-        pub fn to_f32(self) -> f32;
-    }
+        >= sm_53 "cvt.f32.f16 $0, $1;" "=f,h"
+        fn to_f32(self) -> f32;
 
-    instruction! {
-        53 "add.rn.f16 $0, $1, $2;", "=h,h,h";
-        pub fn add_round_nearest(self, right: Self) -> Self;
-    }
+        >= sm_53 "add.rn.f16 $0, $1, $2;" "=h,h,h"
+        fn add_round_nearest(self, right: Self) -> Self;
 
-    instruction! {
-        53 "sub.rn.f16 $0, $1, $2;", "=h,h,h";
-        pub fn subtract(self, right: Self) -> Self;
-    }
+        >= sm_53 "sub.rn.f16 $0, $1, $2;" "=h,h,h"
+        fn subtract(self, right: Self) -> Self;
 
-    instruction! {
-        53 "mul.rn.f16 $0, $1, $2;", "=h,h,h";
-        pub fn multiply(self, right: Self) -> Self;
-    }
+        >= sm_53 "mul.rn.f16 $0, $1, $2;" "=h,h,h"
+        fn multiply(self, right: Self) -> Self;
 
-    instruction! {
-        53 "fma.rn.f16 $0, $1, $2, $3;", "=h,h,h,h";
-        pub fn multiply_add(self, right: Self, addend: Self) -> Self;
-    }
+        >= sm_53 "fma.rn.f16 $0, $1, $2, $3;" "=h,h,h,h"
+        fn multiply_add(self, right: Self, addend: Self) -> Self;
 
-    instruction! {
-        80 "min.f16 $0, $1, $2;", "=h,h,h";
         /// Selects the number when one input is NaN; orders -0 below +0.
-        pub fn minimum(self, right: Self) -> Self;
-    }
+        >= sm_80 "min.f16 $0, $1, $2;" "=h,h,h"
+        fn minimum(self, right: Self) -> Self;
 
-    instruction! {
-        80 "max.f16 $0, $1, $2;", "=h,h,h";
         /// Selects the number when one input is NaN; orders -0 below +0.
-        pub fn maximum(self, right: Self) -> Self;
-    }
+        >= sm_80 "max.f16 $0, $1, $2;" "=h,h,h"
+        fn maximum(self, right: Self) -> Self;
 
-    instruction! {
-        53 "{ .reg .pred p; setp.eq.f16 p, $1, $2; selp.u32 $0, 1, 0, p; }", "=r,h,h";
         /// Ordered comparison; returns 0 for unordered inputs and 1 for true.
-        pub fn equal(self, right: Self) -> u32;
-    }
+        >= sm_53 "{ .reg .pred p; setp.eq.f16 p, $1, $2; selp.u32 $0, 1, 0, p; }" "=r,h,h"
+        fn equal(self, right: Self) -> u32;
 
-    instruction! {
-        53 "{ .reg .pred p; setp.lt.f16 p, $1, $2; selp.u32 $0, 1, 0, p; }", "=r,h,h";
         /// Ordered comparison; returns 0 for unordered inputs and 1 for true.
-        pub fn less_than(self, right: Self) -> u32;
-    }
+        >= sm_53 "{ .reg .pred p; setp.lt.f16 p, $1, $2; selp.u32 $0, 1, 0, p; }" "=r,h,h"
+        fn less_than(self, right: Self) -> u32;
 
-    instruction! {
-        53 "{ .reg .pred p; setp.le.f16 p, $1, $2; selp.u32 $0, 1, 0, p; }", "=r,h,h";
         /// Ordered comparison; returns 0 for unordered inputs and 1 for true.
-        pub fn less_equal(self, right: Self) -> u32;
-    }
+        >= sm_53 "{ .reg .pred p; setp.le.f16 p, $1, $2; selp.u32 $0, 1, 0, p; }" "=r,h,h"
+        fn less_equal(self, right: Self) -> u32;
 
-    instruction! {
-        53 "add.rn.sat.f16 $0, $1, $2;", "=h,h,h";
-        pub fn add_saturate(self, right: Self) -> Self;
-    }
+        >= sm_53 "add.rn.sat.f16 $0, $1, $2;" "=h,h,h"
+        fn add_saturate(self, right: Self) -> Self;
 
-    instruction! {
-        53 "sub.rn.sat.f16 $0, $1, $2;", "=h,h,h";
-        pub fn subtract_saturate(self, right: Self) -> Self;
-    }
+        >= sm_53 "sub.rn.sat.f16 $0, $1, $2;" "=h,h,h"
+        fn subtract_saturate(self, right: Self) -> Self;
 
-    instruction! {
-        53 "mul.rn.sat.f16 $0, $1, $2;", "=h,h,h";
-        pub fn multiply_saturate(self, right: Self) -> Self;
-    }
+        >= sm_53 "mul.rn.sat.f16 $0, $1, $2;" "=h,h,h"
+        fn multiply_saturate(self, right: Self) -> Self;
 
-    instruction! {
-        53 "fma.rn.sat.f16 $0, $1, $2, $3;", "=h,h,h,h";
-        pub fn multiply_add_saturate(self, right: Self, addend: Self) -> Self;
+        >= sm_53 "fma.rn.sat.f16 $0, $1, $2, $3;" "=h,h,h,h"
+        fn multiply_add_saturate(self, right: Self, addend: Self) -> Self;
     }
 }
 
 impl Half2 {
-    instruction! {
-        53 "cvt.rn.f16x2.f32 $0, $2, $1;", "=r,f,f";
+    primitives! {
+        convergence = None, memory = None, proof = Varying;
+
         #[cfg(gpurs_device)]
-        pub fn from_f32(low: f32, high: f32) -> Self;
-    }
+        >= sm_80 "cvt.rn.f16x2.f32 $0, $2, $1;" "=r,f,f"
+        fn from_f32(low: f32, high: f32) -> Self;
 
-    instruction! {
-        53 "add.rn.f16x2 $0, $1, $2;", "=r,r,r";
-        pub fn add_round_nearest(self, right: Self) -> Self;
-    }
+        >= sm_53 "add.rn.f16x2 $0, $1, $2;" "=r,r,r"
+        fn add_round_nearest(self, right: Self) -> Self;
 
-    instruction! {
-        53 "sub.rn.f16x2 $0, $1, $2;", "=r,r,r";
-        pub fn subtract(self, right: Self) -> Self;
-    }
+        >= sm_53 "sub.rn.f16x2 $0, $1, $2;" "=r,r,r"
+        fn subtract(self, right: Self) -> Self;
 
-    instruction! {
-        53 "mul.rn.f16x2 $0, $1, $2;", "=r,r,r";
-        pub fn multiply(self, right: Self) -> Self;
-    }
+        >= sm_53 "mul.rn.f16x2 $0, $1, $2;" "=r,r,r"
+        fn multiply(self, right: Self) -> Self;
 
-    instruction! {
-        53 "fma.rn.f16x2 $0, $1, $2, $3;", "=r,r,r,r";
-        pub fn multiply_add(self, right: Self, addend: Self) -> Self;
-    }
+        >= sm_53 "fma.rn.f16x2 $0, $1, $2, $3;" "=r,r,r,r"
+        fn multiply_add(self, right: Self, addend: Self) -> Self;
 
-    instruction! {
-        80 "min.f16x2 $0, $1, $2;", "=r,r,r";
         /// Selects the number when one input is NaN; orders -0 below +0.
-        pub fn minimum(self, right: Self) -> Self;
-    }
+        >= sm_80 "min.f16x2 $0, $1, $2;" "=r,r,r"
+        fn minimum(self, right: Self) -> Self;
 
-    instruction! {
-        80 "max.f16x2 $0, $1, $2;", "=r,r,r";
         /// Selects the number when one input is NaN; orders -0 below +0.
-        pub fn maximum(self, right: Self) -> Self;
-    }
+        >= sm_80 "max.f16x2 $0, $1, $2;" "=r,r,r"
+        fn maximum(self, right: Self) -> Self;
 
-    instruction! {
-        53 "set.eq.u32.f16x2 $0, $1, $2;", "=r,r,r";
         /// Ordered component comparison, each true component becomes 0xffff.
-        pub fn equal_mask(self, right: Self) -> u32;
-    }
+        >= sm_53 "set.eq.u32.f16x2 $0, $1, $2;" "=r,r,r"
+        fn equal_mask(self, right: Self) -> u32;
 
-    instruction! {
-        53 "set.lt.u32.f16x2 $0, $1, $2;", "=r,r,r";
         /// Ordered component comparison, each true component becomes 0xffff.
-        pub fn less_than_mask(self, right: Self) -> u32;
-    }
+        >= sm_53 "set.lt.u32.f16x2 $0, $1, $2;" "=r,r,r"
+        fn less_than_mask(self, right: Self) -> u32;
 
-    instruction! {
-        53 "set.le.u32.f16x2 $0, $1, $2;", "=r,r,r";
         /// Ordered component comparison, each true component becomes 0xffff.
-        pub fn less_equal_mask(self, right: Self) -> u32;
-    }
+        >= sm_53 "set.le.u32.f16x2 $0, $1, $2;" "=r,r,r"
+        fn less_equal_mask(self, right: Self) -> u32;
 
-    instruction! {
-        53 "add.rn.sat.f16x2 $0, $1, $2;", "=r,r,r";
-        pub fn add_saturate(self, right: Self) -> Self;
-    }
+        >= sm_53 "add.rn.sat.f16x2 $0, $1, $2;" "=r,r,r"
+        fn add_saturate(self, right: Self) -> Self;
 
-    instruction! {
-        53 "sub.rn.sat.f16x2 $0, $1, $2;", "=r,r,r";
-        pub fn subtract_saturate(self, right: Self) -> Self;
-    }
+        >= sm_53 "sub.rn.sat.f16x2 $0, $1, $2;" "=r,r,r"
+        fn subtract_saturate(self, right: Self) -> Self;
 
-    instruction! {
-        53 "mul.rn.sat.f16x2 $0, $1, $2;", "=r,r,r";
-        pub fn multiply_saturate(self, right: Self) -> Self;
-    }
+        >= sm_53 "mul.rn.sat.f16x2 $0, $1, $2;" "=r,r,r"
+        fn multiply_saturate(self, right: Self) -> Self;
 
-    instruction! {
-        53 "fma.rn.sat.f16x2 $0, $1, $2, $3;", "=r,r,r,r";
-        pub fn multiply_add_saturate(self, right: Self, addend: Self) -> Self;
+        >= sm_53 "fma.rn.sat.f16x2 $0, $1, $2, $3;" "=r,r,r,r"
+        fn multiply_add_saturate(self, right: Self, addend: Self) -> Self;
     }
 }
 
@@ -332,139 +259,99 @@ impl BFloat162 {
 }
 
 impl BFloat16 {
-    instruction! {
-        80 "cvt.rn.bf16.f32 $0, $1;", "=h,f";
+    primitives! {
+        convergence = None, memory = None, proof = Varying;
+
         #[cfg(gpurs_device)]
-        pub fn from_f32(value: f32) -> Self;
-    }
+        >= sm_80 "cvt.rn.bf16.f32 $0, $1;" "=h,f"
+        fn from_f32(value: f32) -> Self;
 
-    instruction! {
-        80 "cvt.rz.bf16.f32 $0, $1;", "=h,f";
-        pub fn from_f32_round_zero(value: f32) -> Self;
-    }
+        >= sm_80 "cvt.rz.bf16.f32 $0, $1;" "=h,f"
+        fn from_f32_round_zero(value: f32) -> Self;
 
-    instruction! {
-        80 "cvt.rp.bf16.f32 $0, $1;", "=h,f";
-        pub fn from_f32_round_up(value: f32) -> Self;
-    }
+        >= sm_80 "cvt.rp.bf16.f32 $0, $1;" "=h,f"
+        fn from_f32_round_up(value: f32) -> Self;
 
-    instruction! {
-        80 "cvt.rm.bf16.f32 $0, $1;", "=h,f";
-        pub fn from_f32_round_down(value: f32) -> Self;
-    }
+        >= sm_80 "cvt.rm.bf16.f32 $0, $1;" "=h,f"
+        fn from_f32_round_down(value: f32) -> Self;
 
-    instruction! {
-        80 "cvt.f32.bf16 $0, $1;", "=f,h";
         #[cfg(gpurs_device)]
-        pub fn to_f32(self) -> f32;
-    }
+        >= sm_80 "cvt.f32.bf16 $0, $1;" "=f,h"
+        fn to_f32(self) -> f32;
 
-    instruction! {
-        80 "{ .reg .b16 constant; mov.b16 constant, 0x3f80; fma.rn.bf16 $0, $1, constant, $2; }", "=h,h,h";
-        pub fn add_round_nearest(self, right: Self) -> Self;
-    }
+        >= sm_80 "{ .reg .b16 constant; mov.b16 constant, 0x3f80; fma.rn.bf16 $0, $1, constant, $2; }" "=h,h,h"
+        fn add_round_nearest(self, right: Self) -> Self;
 
-    instruction! {
-        80 "{ .reg .b16 constant; mov.b16 constant, 0xbf80; fma.rn.bf16 $0, $2, constant, $1; }", "=h,h,h";
-        pub fn subtract(self, right: Self) -> Self;
-    }
+        >= sm_80 "{ .reg .b16 constant; mov.b16 constant, 0xbf80; fma.rn.bf16 $0, $2, constant, $1; }" "=h,h,h"
+        fn subtract(self, right: Self) -> Self;
 
-    instruction! {
-        80 "{ .reg .b16 constant; mov.b16 constant, 0x8000; fma.rn.bf16 $0, $1, $2, constant; }", "=h,h,h";
-        pub fn multiply(self, right: Self) -> Self;
-    }
+        >= sm_80 "{ .reg .b16 constant; mov.b16 constant, 0x8000; fma.rn.bf16 $0, $1, $2, constant; }" "=h,h,h"
+        fn multiply(self, right: Self) -> Self;
 
-    instruction! {
-        80 "fma.rn.bf16 $0, $1, $2, $3;", "=h,h,h,h";
-        pub fn multiply_add(self, right: Self, addend: Self) -> Self;
-    }
+        >= sm_80 "fma.rn.bf16 $0, $1, $2, $3;" "=h,h,h,h"
+        fn multiply_add(self, right: Self, addend: Self) -> Self;
 
-    instruction! {
-        80 "min.bf16 $0, $1, $2;", "=h,h,h";
         /// Selects the number when one input is NaN; orders -0 below +0.
-        pub fn minimum(self, right: Self) -> Self;
-    }
+        >= sm_80 "min.bf16 $0, $1, $2;" "=h,h,h"
+        fn minimum(self, right: Self) -> Self;
 
-    instruction! {
-        80 "max.bf16 $0, $1, $2;", "=h,h,h";
         /// Selects the number when one input is NaN; orders -0 below +0.
-        pub fn maximum(self, right: Self) -> Self;
-    }
+        >= sm_80 "max.bf16 $0, $1, $2;" "=h,h,h"
+        fn maximum(self, right: Self) -> Self;
 
-    instruction! {
-        90 "{ .reg .pred p; setp.eq.bf16 p, $1, $2; selp.u32 $0, 1, 0, p; }", "=r,h,h";
         /// Ordered comparison; returns 0 for unordered inputs and 1 for true.
-        pub fn equal_native(self, right: Self) -> u32;
-    }
+        >= sm_90 "{ .reg .pred p; setp.eq.bf16 p, $1, $2; selp.u32 $0, 1, 0, p; }" "=r,h,h"
+        fn equal_native(self, right: Self) -> u32;
 
-    instruction! {
-        90 "{ .reg .pred p; setp.lt.bf16 p, $1, $2; selp.u32 $0, 1, 0, p; }", "=r,h,h";
         /// Ordered comparison; returns 0 for unordered inputs and 1 for true.
-        pub fn less_than_native(self, right: Self) -> u32;
-    }
+        >= sm_90 "{ .reg .pred p; setp.lt.bf16 p, $1, $2; selp.u32 $0, 1, 0, p; }" "=r,h,h"
+        fn less_than_native(self, right: Self) -> u32;
 
-    instruction! {
-        90 "{ .reg .pred p; setp.le.bf16 p, $1, $2; selp.u32 $0, 1, 0, p; }", "=r,h,h";
         /// Ordered comparison; returns 0 for unordered inputs and 1 for true.
-        pub fn less_equal_native(self, right: Self) -> u32;
+        >= sm_90 "{ .reg .pred p; setp.le.bf16 p, $1, $2; selp.u32 $0, 1, 0, p; }" "=r,h,h"
+        fn less_equal_native(self, right: Self) -> u32;
     }
 }
 
 impl BFloat162 {
-    instruction! {
-        80 "cvt.rn.bf16x2.f32 $0, $2, $1;", "=r,f,f";
+    primitives! {
+        convergence = None, memory = None, proof = Varying;
+
         #[cfg(gpurs_device)]
-        pub fn from_f32(low: f32, high: f32) -> Self;
-    }
+        >= sm_80 "cvt.rn.bf16x2.f32 $0, $2, $1;" "=r,f,f"
+        fn from_f32(low: f32, high: f32) -> Self;
 
-    instruction! {
-        80 "{ .reg .b32 constant; mov.b32 constant, 0x3f803f80; fma.rn.bf16x2 $0, $1, constant, $2; }", "=r,r,r";
-        pub fn add_round_nearest(self, right: Self) -> Self;
-    }
+        >= sm_80 "{ .reg .b32 constant; mov.b32 constant, 0x3f803f80; fma.rn.bf16x2 $0, $1, constant, $2; }" "=r,r,r"
+        fn add_round_nearest(self, right: Self) -> Self;
 
-    instruction! {
-        80 "{ .reg .b32 constant; mov.b32 constant, 0xbf80bf80; fma.rn.bf16x2 $0, $2, constant, $1; }", "=r,r,r";
-        pub fn subtract(self, right: Self) -> Self;
-    }
+        >= sm_80 "{ .reg .b32 constant; mov.b32 constant, 0xbf80bf80; fma.rn.bf16x2 $0, $2, constant, $1; }" "=r,r,r"
+        fn subtract(self, right: Self) -> Self;
 
-    instruction! {
-        80 "{ .reg .b32 constant; mov.b32 constant, 0x80008000; fma.rn.bf16x2 $0, $1, $2, constant; }", "=r,r,r";
-        pub fn multiply(self, right: Self) -> Self;
-    }
+        >= sm_80 "{ .reg .b32 constant; mov.b32 constant, 0x80008000; fma.rn.bf16x2 $0, $1, $2, constant; }" "=r,r,r"
+        fn multiply(self, right: Self) -> Self;
 
-    instruction! {
-        80 "fma.rn.bf16x2 $0, $1, $2, $3;", "=r,r,r,r";
-        pub fn multiply_add(self, right: Self, addend: Self) -> Self;
-    }
+        >= sm_80 "fma.rn.bf16x2 $0, $1, $2, $3;" "=r,r,r,r"
+        fn multiply_add(self, right: Self, addend: Self) -> Self;
 
-    instruction! {
-        80 "min.bf16x2 $0, $1, $2;", "=r,r,r";
         /// Selects the number when one input is NaN; orders -0 below +0.
-        pub fn minimum(self, right: Self) -> Self;
-    }
+        >= sm_80 "min.bf16x2 $0, $1, $2;" "=r,r,r"
+        fn minimum(self, right: Self) -> Self;
 
-    instruction! {
-        80 "max.bf16x2 $0, $1, $2;", "=r,r,r";
         /// Selects the number when one input is NaN; orders -0 below +0.
-        pub fn maximum(self, right: Self) -> Self;
-    }
+        >= sm_80 "max.bf16x2 $0, $1, $2;" "=r,r,r"
+        fn maximum(self, right: Self) -> Self;
 
-    instruction! {
-        90 "set.eq.u32.bf16x2 $0, $1, $2;", "=r,r,r";
         /// Ordered component comparison, each true component becomes 0xffff.
-        pub fn equal_mask_native(self, right: Self) -> u32;
-    }
+        >= sm_90 "set.eq.u32.bf16x2 $0, $1, $2;" "=r,r,r"
+        fn equal_mask_native(self, right: Self) -> u32;
 
-    instruction! {
-        90 "set.lt.u32.bf16x2 $0, $1, $2;", "=r,r,r";
         /// Ordered component comparison, each true component becomes 0xffff.
-        pub fn less_than_mask_native(self, right: Self) -> u32;
-    }
+        >= sm_90 "set.lt.u32.bf16x2 $0, $1, $2;" "=r,r,r"
+        fn less_than_mask_native(self, right: Self) -> u32;
 
-    instruction! {
-        90 "set.le.u32.bf16x2 $0, $1, $2;", "=r,r,r";
         /// Ordered component comparison, each true component becomes 0xffff.
-        pub fn less_equal_mask_native(self, right: Self) -> u32;
+        >= sm_90 "set.le.u32.bf16x2 $0, $1, $2;" "=r,r,r"
+        fn less_equal_mask_native(self, right: Self) -> u32;
     }
 }
 
@@ -517,17 +404,21 @@ impl BFloat162 {
 }
 
 impl Half {
-    instruction! {
-        80 "cvt.rn.satfinite.f16.f32 $0, $1;", "=h,f";
+    primitives! {
+        convergence = None, memory = None, proof = Varying;
+
         /// Nearest-even conversion, saturating infinity and overflow to finite bounds.
-        pub fn from_f32_saturating(value: f32) -> Self;
+        >= sm_80 "cvt.rn.satfinite.f16.f32 $0, $1;" "=h,f"
+        fn from_f32_saturating(value: f32) -> Self;
     }
 }
 
 impl BFloat16 {
-    instruction! {
-        80 "cvt.rn.satfinite.bf16.f32 $0, $1;", "=h,f";
+    primitives! {
+        convergence = None, memory = None, proof = Varying;
+
         /// Nearest-even conversion, saturating infinity and overflow to finite bounds.
-        pub fn from_f32_saturating(value: f32) -> Self;
+        >= sm_80 "cvt.rn.satfinite.bf16.f32 $0, $1;" "=h,f"
+        fn from_f32_saturating(value: f32) -> Self;
     }
 }

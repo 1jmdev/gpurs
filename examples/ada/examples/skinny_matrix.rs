@@ -83,11 +83,10 @@ fn main() -> gpurs::Result<()> {
     let bias = gpu.upload(&bias_host)?;
     let mut output = gpu.zeros::<f32>(TOKENS * COLUMNS)?;
     let locks = gpu.zeros::<AtomicU32>(COLUMNS / TILE_ROWS * (TOKENS / TILE_COLUMNS))?;
-    let configured = stream.launch(LaunchConfig {
-        grid: SplitDepth::dimensions::<TILE_ROWS, TILE_COLUMNS>([COLUMNS, TOKENS], DEPTH, SPLITS),
-        block: [THREADS, 1, 1],
-        shared_bytes: 0,
-    });
+    let configured = stream.launch(LaunchConfig::new(
+        SplitDepth::dimensions::<TILE_ROWS, TILE_COLUMNS>([COLUMNS, TOKENS], DEPTH, SPLITS),
+        [THREADS, 1, 1],
+    ));
     for _ in 0..5 {
         project(&configured, &input, &weight, &bias, &mut output, &locks)?;
     }

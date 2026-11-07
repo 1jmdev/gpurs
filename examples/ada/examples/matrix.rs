@@ -63,11 +63,10 @@ fn main() -> gpurs::Result<()> {
     let left = gpu.upload(&left_host)?;
     let right_transposed = gpu.upload(&right_host)?;
     let mut output = gpu.zeros::<f32>(SIZE * SIZE)?;
-    let configured = stream.launch(LaunchConfig {
-        grid: Grid::<Swizzle<8>>::dimensions::<TILE_ROWS, TILE_COLUMNS>([SIZE, SIZE], 1),
-        block: [THREADS, 1, 1],
-        shared_bytes: 0,
-    });
+    let configured = stream.launch(LaunchConfig::new(
+        Grid::<Swizzle<8>>::dimensions::<TILE_ROWS, TILE_COLUMNS>([SIZE, SIZE], 1),
+        [THREADS, 1, 1],
+    ));
     let seconds = matrix_benchmark::measure(&stream, || {
         multiply(&configured, &left, &right_transposed, &mut output)
     })?;

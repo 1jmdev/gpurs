@@ -79,7 +79,7 @@ pub struct TensorRing<S, const STAGES: usize, C: Consumer> {
 impl<S: Stage<Bulk>, const STAGES: usize, C: Consumer> TensorRing<S, STAGES, C> {
     #[primitive(
         lowering = SharedArray,
-        architecture = 90,
+        targets = ">=sm_90",
         convergence = None,
         memory = SharedAllocation,
         proof = Uniform
@@ -90,7 +90,7 @@ impl<S: Stage<Bulk>, const STAGES: usize, C: Consumer> TensorRing<S, STAGES, C> 
     /// site owns distinct storage.
     #[primitive(
         lowering = Body,
-        architecture = 90,
+        targets = ">=sm_90",
         convergence = Block,
         memory = Encapsulated,
         proof = Uniform
@@ -113,7 +113,7 @@ impl<S: Stage<Bulk>, const STAGES: usize, C: Consumer> TensorRing<S, STAGES, C> 
     /// returning every writer's load proof from the closure.
     #[primitive(
         lowering = Body,
-        architecture = 90,
+        targets = ">=sm_90",
         convergence = Block,
         memory = ReadReachable(1),
         proof = Uniform
@@ -133,7 +133,7 @@ impl<S: Stage<Bulk>, const STAGES: usize, C: Consumer> TensorRing<S, STAGES, C> 
     /// stage.
     #[primitive(
         lowering = Body,
-        architecture = 90,
+        targets = ">=sm_90",
         convergence = Block,
         memory = ReadReachable(1),
         proof = Uniform
@@ -151,7 +151,7 @@ impl<S: Stage<Bulk>, const STAGES: usize, C: Consumer> TensorRing<S, STAGES, C> 
     /// Returns completed tiles without filling another; an empty ring yields zeros.
     #[primitive(
         lowering = Body,
-        architecture = 90,
+        targets = ">=sm_90",
         convergence = Block,
         memory = Encapsulated,
         proof = Uniform
@@ -260,7 +260,7 @@ impl<S, const STAGES: usize, C: Consumer> Drop for TensorRing<S, STAGES, C> {
     /// exited.
     #[primitive(
         lowering = Body,
-        architecture = 90,
+        targets = ">=sm_90",
         convergence = Block,
         memory = Encapsulated,
         proof = Uniform

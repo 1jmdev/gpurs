@@ -9,6 +9,7 @@ mod context;
 mod error;
 mod ffi;
 mod graph;
+mod launch;
 mod memory;
 mod module;
 mod stream;
@@ -17,6 +18,7 @@ pub use context::{Context, ContextGuard, Ownership};
 pub use error::{Error, Result};
 pub use ffi::DevicePointer;
 pub use graph::{Graph, GraphExec, KernelNodeParameters};
+pub use launch::{LaunchAttributes, LaunchRequest};
 pub use memory::{
     TensorDescriptor, allocate, allocate_async, allocate_host, copy_device_async, copy_from_device,
     copy_from_device_async, copy_to_device_async, fill_async, fill_words_async, free, free_async,

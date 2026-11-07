@@ -22,7 +22,7 @@ impl<const GROUP: usize> Swizzle<GROUP> {
     /// tile row.
     #[primitive(
         lowering = Body,
-        architecture = 0,
+        targets = ">=sm_0",
         convergence = None,
         memory = None,
         proof = Uniform

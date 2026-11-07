@@ -28,8 +28,7 @@ impl WarpgroupAccumulator {
     /// next call waits until the products complete. Every thread of the block takes part.
     #[primitive(
         lowering = Body,
-        architecture = 90,
-        compatibility = Architecture,
+        targets = "sm_90a",
         convergence = Block,
         memory = Encapsulated,
         proof = Uniform
@@ -68,8 +67,7 @@ impl WarpgroupAccumulator {
     /// the block takes part.
     #[primitive(
         lowering = Body,
-        architecture = 90,
-        compatibility = Architecture,
+        targets = "sm_90a",
         convergence = Block,
         memory = None,
         proof = Varying
@@ -84,8 +82,7 @@ impl WarpgroupAccumulator {
 impl Drop for WarpgroupAccumulator {
     #[primitive(
         lowering = Body,
-        architecture = 90,
-        compatibility = Architecture,
+        targets = "sm_90a",
         convergence = Block,
         memory = Encapsulated,
         proof = Uniform

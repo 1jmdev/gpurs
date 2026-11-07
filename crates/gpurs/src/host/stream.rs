@@ -6,7 +6,7 @@ use std::{
     rc::Rc,
 };
 
-use gpurs_driver::{self as driver, Event};
+use gpurs_driver::{self as driver, Event, LaunchAttributes, LaunchRequest};
 
 use crate::{
     Capture, Result,
@@ -23,11 +23,41 @@ pub struct Stream {
     pub(crate) lengths: RefCell<Vec<u64>>,
     pub(crate) accesses: RefCell<Vec<Access>>,
 }
+/// The geometry of an explicitly configured launch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct LaunchConfig {
     pub grid: [usize; 3],
     pub block: [usize; 3],
     pub shared_bytes: usize,
+}
+
+impl LaunchConfig {
+    pub fn new(grid: [usize; 3], block: [usize; 3]) -> Self {
+        LaunchConfig {
+            grid,
+            block,
+            shared_bytes: 0,
+        }
+    }
+
+    /// Reserves `bytes` of dynamic block-shared memory per block.
+    #[must_use]
+    pub fn shared_bytes(self, bytes: usize) -> Self {
+        LaunchConfig {
+            shared_bytes: bytes,
+            ..self
+        }
+    }
+
+    pub(crate) fn request(self, attributes: LaunchAttributes) -> LaunchRequest {
+        LaunchRequest {
+            grid: self.grid.map(|value| value as u32),
+            block: self.block.map(|value| value as u32),
+            shared_bytes: self.shared_bytes as u32,
+            attributes,
+        }
+    }
 }
 
 pub trait Launch: Sealed {}

@@ -18,6 +18,7 @@
 
 #![cfg_attr(gpurs_device, feature(rustc_attrs))]
 #![cfg_attr(gpurs_device, allow(internal_features))]
+#![recursion_limit = "512"]
 
 mod argument;
 mod error;

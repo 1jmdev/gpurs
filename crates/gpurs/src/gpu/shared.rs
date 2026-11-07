@@ -15,7 +15,7 @@ pub struct SharedArray<T, const N: usize> {
 /// Declares block-shared storage; the compiler verifies initialization and race freedom.
 #[primitive(
     lowering = SharedArray,
-    architecture = 0,
+    targets = ">=sm_0",
     convergence = None,
     memory = SharedAllocation,
     proof = SharedRegion
@@ -71,7 +71,7 @@ pub struct SharedRegion<T> {
 /// before reading, and complete all asynchronous accesses before reuse or block exit.
 #[primitive(
     lowering = DynamicShared,
-    architecture = 20,
+    targets = ">=sm_20",
     convergence = None,
     memory = Encapsulated,
     proof = Uniform
@@ -145,7 +145,7 @@ impl<T> SharedRegion<T> {
     /// aliases or duplicate ownership of a non-Copy value. Wait for asynchronous producers.
     #[primitive(
         lowering = Body,
-        architecture = 0,
+        targets = ">=sm_0",
         convergence = None,
         memory = Encapsulated,
         proof = Varying
@@ -160,7 +160,7 @@ impl<T> SharedRegion<T> {
     /// Synchronize before other threads read the value; overwritten values are not dropped.
     #[primitive(
         lowering = Body,
-        architecture = 0,
+        targets = ">=sm_0",
         convergence = None,
         memory = Encapsulated,
         proof = Varying

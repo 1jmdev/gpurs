@@ -1,19 +1,15 @@
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 use gpurs_artifact::{
-    self as artifact, Compatibility, Entry, Fragment, Kernel, PARAMETERS_OFFSET, RESULT_OFFSET,
+    self as artifact, Entry, Fragment, Kernel, KernelEffects, PARAMETERS_OFFSET, RESULT_OFFSET,
     SharedMemory,
 };
-use gpurs_ir::{Access, Binary, Conversion, Flags, Predicate, Type, Value as IRValue};
-use gpurs_rustc::{CrateDef, Session, attributes};
+use gpurs_ir::{Conversion, Type};
+use gpurs_rustc::Session;
 use gpurs_verifier::KernelPlan;
 
-use super::{
-    function::FunctionBuilder,
-    intrinsic::GEOMETRY,
-    module::ModuleBuilder,
-    place::{Place, Value},
-};
+use super::{annotations, epilogue, prologue};
+use crate::{function::FunctionBuilder, module::ModuleBuilder, place::Place};
 
 /// Kernel metadata and NVVM IR, including all entry points and shared-memory requirements.
 #[derive(Clone, Debug)]
@@ -55,15 +51,16 @@ impl ModuleBuilder<'_> {
             self.entry(&plan, &symbol, root, linear, aligned);
             symbol
         };
+        let indexed = plan.effects.contains(KernelEffects::INDEX);
         variant("", false, false);
-        let linear = plan.uses_index.then(|| variant("_linear", true, false));
+        let linear = indexed.then(|| variant("_linear", true, false));
         let slices = plan
             .parameters
             .iter()
             .any(|parameter| matches!(parameter.metadata, artifact::Parameter::Slice { .. }));
-        let aligned = (plan.asynchronous && slices).then(|| {
+        let aligned = (plan.effects.contains(KernelEffects::ASYNCHRONOUS) && slices).then(|| {
             let general = variant("_aligned", false, true);
-            let linear = if plan.uses_index {
+            let linear = if indexed {
                 variant("_aligned_linear", true, true)
             } else {
                 general.clone()
@@ -119,27 +116,16 @@ impl ModuleBuilder<'_> {
             PARAMETERS_OFFSET
         };
         let argument_offset = start / align * align;
-        let size = size - argument_offset;
         let mut function = FunctionBuilder::new(self, plan.instance);
         function.linear = linear;
-        function.ir =
-            gpurs_ir::Function::new(symbol, Type::Void, vec![Type::bytes(size).pointer()]);
+        function.ir = gpurs_ir::Function::new(
+            symbol,
+            Type::Void,
+            vec![Type::bytes(size - argument_offset).pointer()],
+        );
         function.ir.internal = false;
         function.ir.byval(0, align);
-        if function
-            .module
-            .sess
-            .target
-            .provides(90, Compatibility::Generic)
-        {
-            function.ir.assembly(
-                "griddepcontrol.launch_dependents; griddepcontrol.wait;",
-                "~{memory}",
-                true,
-                Type::Void,
-                Vec::new(),
-            );
-        }
+        prologue::dependencies(&mut function);
         let arguments = function.ir.parameter(0);
         let arguments = function
             .ir
@@ -154,64 +140,17 @@ impl ModuleBuilder<'_> {
             })
             .collect();
         if aligned {
-            for (parameter, operand) in plan.parameters.iter().zip(&operands) {
-                if let (artifact::Parameter::Slice { .. }, Value::Pair(pointer, _)) =
-                    (parameter.metadata, &operand.value)
-                {
-                    let address =
-                        function
-                            .ir
-                            .cast(Conversion::PtrToInt, pointer.clone(), Type::I64);
-                    let low =
-                        function
-                            .ir
-                            .binary(Binary::And, Flags::empty(), address, IRValue::i64(15));
-                    let holds = function.ir.compare(Predicate::Eq, low, IRValue::i64(0));
-                    function.ir.call("llvm.assume", Type::Void, vec![holds]);
-                }
-            }
+            prologue::alignment(&mut function, plan, &operands);
         }
         let destination = function.temporary(signature.result.1.clone());
         function.invoke_named(&root, plan.instance, &operands, &destination);
         if let Some(result) = plan.result {
-            let registers = GEOMETRY
-                .map(|register| function.special_register(register))
-                .map(|value| function.ir.cast(Conversion::ZExt, value, Type::I64));
-            let index = function.linear_index(&registers);
-            let offset = function.ir.binary(
-                Binary::Mul,
-                Flags::empty(),
-                index,
-                IRValue::i64(result.size),
-            );
             let pointer = function.offset(arguments, RESULT_OFFSET - argument_offset);
-            let pointer = function
-                .ir
-                .load(Type::byte_pointer(), pointer, 8, Access::Plain);
-            let pointer = function.ir.offset(pointer, offset, true);
-            let value = function.load(&destination);
-            function.store(&Place::new(pointer, destination.shape.clone()), &value);
+            epilogue::result(&mut function, result, pointer, &destination);
         }
-        if plan.asynchronous {
-            function.ir.assembly(
-                "cp.async.wait_all;",
-                "~{memory}",
-                true,
-                Type::Void,
-                Vec::new(),
-            );
-        }
+        epilogue::drain(&mut function, plan.effects);
         function.ir.ret(None);
-        function.ir.annotations.push(("kernel", 1));
-        if let Some((threads, blocks)) =
-            attributes::launch_bounds(function.module.sess, plan.instance.def.def_id())
-        {
-            function.ir.annotations.push(("reqntidx", threads));
-            function
-                .ir
-                .annotations
-                .extend((blocks > 0 || plan.reallocates).then_some(("minctasm", blocks.max(1))));
-        }
+        annotations::apply(&mut function, plan);
         let FunctionBuilder { module, ir, .. } = function;
         module.ir.define(ir);
     }

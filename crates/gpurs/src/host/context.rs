@@ -8,7 +8,7 @@ use std::{
 };
 
 use gpurs_artifact::{Artifact, Kernel, PARAMETERS_OFFSET, RESULT_OFFSET, Target};
-use gpurs_driver::{self as driver, Context, Function, Module, Ownership};
+use gpurs_driver::{self as driver, Context, Function, LaunchAttributes, Module, Ownership};
 
 use crate::{
     Error, Result,
@@ -43,6 +43,7 @@ pub(crate) struct Entry {
     pub linear: Option<Function>,
     pub aligned: Option<[Function; 2]>,
     pub offset: usize,
+    pub attributes: LaunchAttributes,
 }
 
 impl Entry {
@@ -231,12 +232,7 @@ impl Device {
             .parse::<Target>()
             .is_ok_and(|target| target.capability() >= 90);
         let function = |symbol: &str| {
-            let mut function = module.try_function(symbol)?;
-            if programmatic {
-                // SAFETY: entries compiled for sm_90 and later wait on their prerequisite grids
-                // before any other instruction.
-                function = unsafe { function.with_programmatic_serialization() };
-            }
+            let function = module.try_function(symbol)?;
             if shared_bytes > 0 {
                 function.try_reserve_shared(shared_bytes)?;
             }
@@ -255,6 +251,12 @@ impl Device {
                     })
                     .transpose()?,
                 offset: (start / align * align) as usize,
+                // Entries compiled for sm_90 and later wait on their prerequisite grids before
+                // any other instruction, which programmatic serialization requires.
+                attributes: LaunchAttributes {
+                    programmatic_serialization: programmatic,
+                    ..LaunchAttributes::default()
+                },
             },
             offsets,
             size: size as usize,

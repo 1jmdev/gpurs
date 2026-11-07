@@ -1,6 +1,6 @@
 use std::{ffi::c_void, rc::Rc};
 
-use gpurs_driver::{self as driver, Function};
+use gpurs_driver::{self as driver, Function, LaunchAttributes, LaunchRequest};
 
 use crate::{
     Error, Event, ExternalAccess, Gpu, LaunchConfig, Result, Stream,
@@ -169,7 +169,16 @@ impl Kernel {
         tracking::try_order(&stream.raw, &accesses)?;
         unsafe {
             self.function
-                .try_launch_parameters(grid, block, shared, &stream.raw, parameters)
+                .try_launch_parameters(
+                    &LaunchRequest {
+                        grid,
+                        block,
+                        shared_bytes: shared,
+                        attributes: LaunchAttributes::default(),
+                    },
+                    &stream.raw,
+                    parameters,
+                )
                 .map_err(|source| Error::Launch {
                     kernel: self.name.clone(),
                     source,

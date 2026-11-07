@@ -53,21 +53,13 @@ fn main() -> Result<()> {
     let mut output = gpu.zeros::<f32>(1)?;
 
     reduce_blocks(
-        &stream.launch(LaunchConfig {
-            grid: [blocks, 1, 1],
-            block: [BLOCK_SIZE, 1, 1],
-            shared_bytes: 0,
-        }),
+        &stream.launch(LaunchConfig::new([blocks, 1, 1], [BLOCK_SIZE, 1, 1])),
         &input,
         &mut partial,
     )?;
 
     reduce_blocks(
-        &stream.launch(LaunchConfig {
-            grid: [1, 1, 1],
-            block: [BLOCK_SIZE, 1, 1],
-            shared_bytes: 0,
-        }),
+        &stream.launch(LaunchConfig::new([1, 1, 1], [BLOCK_SIZE, 1, 1])),
         &partial,
         &mut output,
     )?;

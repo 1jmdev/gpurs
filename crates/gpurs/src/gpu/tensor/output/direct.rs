@@ -10,7 +10,7 @@ impl<T: OutputElement, const BM: usize, const BN: usize> OutputTile<'_, T, BM, B
     /// stores where the layout allows.
     #[primitive(
         lowering = Body,
-        architecture = 0,
+        targets = ">=sm_0",
         convergence = None,
         memory = PartitionWrite,
         proof = Uniform
@@ -31,7 +31,7 @@ impl<T: OutputElement, const BM: usize, const BN: usize> OutputTile<'_, T, BM, B
     /// Reads this lane's elements of `warp`'s region; absent elements read as zero.
     #[primitive(
         lowering = Body,
-        architecture = 0,
+        targets = ">=sm_0",
         convergence = None,
         memory = PartitionRead,
         proof = Varying

@@ -5,30 +5,8 @@
 
 #![allow(clippy::needless_range_loop)]
 
-/// Declares inline-PTX primitives, each as convergence, minimum architecture, PTX text, LLVM
-/// constraints, and signature. Without convergence they are pure.
-macro_rules! assembly {
-    ($(
-        $(#[$attribute:meta])*
-        $convergence:ident $architecture:literal $text:literal $constraints:literal
-        fn $name:ident($($argument:ident: $type:ty),* $(,)?) -> $result:ty;
-    )*) => {
-        $(
-            #[gpurs_macros::primitive(
-                lowering = Assembly {
-                    text: $text,
-                    constraints: $constraints,
-                },
-                architecture = $architecture,
-                convergence = $convergence,
-                memory = None,
-                proof = Varying
-            )]
-            $(#[$attribute])*
-            pub fn $name($($argument: $type),*) -> $result;
-        )*
-    };
-}
+#[macro_use]
+mod primitives;
 
 pub mod asynchronous;
 pub mod atomic;

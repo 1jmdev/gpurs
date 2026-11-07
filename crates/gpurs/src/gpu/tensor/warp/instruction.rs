@@ -16,234 +16,191 @@
 //! accumulation order, rounding and subnormal handling follow PTX MMA and are unspecified.
 //! TF32 registers must come from Tf32 conversion. FP8 formats stay distinct in fragment types.
 
-use gpurs_macros::primitive;
-
 use super::{Accumulator, FragmentA, FragmentB};
 use crate::gpu::{BFloat16, E4M3, E5M2, Half, Tf32};
 
-macro_rules! multiply_accumulate {
-    ($name:ident, $architecture:literal, $left:ty, $right:ty, $result:ty,
-        $instruction:literal, $constraints:literal) => {
-        #[primitive(
-                            lowering = Assembly { text: $instruction, constraints: $constraints },
-                            architecture = $architecture,
-                            convergence = Warp,
-                            memory = None,
-                            proof = Varying
-                        )]
-        pub fn $name(
-            a: FragmentA<$left>,
-            b: FragmentB<$right>,
-            c: Accumulator<$result>,
-        ) -> Accumulator<$result>;
-    };
-}
+primitives! {
+    convergence = Warp, memory = None, proof = Varying;
 
-multiply_accumulate!(
-    multiply_accumulate_f16,
-    80,
-    Half,
-    Half,
-    f32,
+    >= sm_80
     "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {$0, $1, $2, $3}, {$4, $5, $6, $7}, {$8, \
-     $9}, {$10, $11, $12, $13};",
+         $9}, {$10, $11, $12, $13};"
     "=f,=f,=f,=f,r,r,r,r,r,r,f,f,f,f"
-);
+    fn multiply_accumulate_f16(
+        a: FragmentA<Half>,
+        b: FragmentB<Half>,
+        c: Accumulator<f32>,
+    ) -> Accumulator<f32>;
 
-multiply_accumulate!(
-    multiply_accumulate_bf16,
-    80,
-    BFloat16,
-    BFloat16,
-    f32,
+    >= sm_80
     "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {$0, $1, $2, $3}, {$4, $5, $6, $7}, {$8, \
-     $9}, {$10, $11, $12, $13};",
+         $9}, {$10, $11, $12, $13};"
     "=f,=f,=f,=f,r,r,r,r,r,r,f,f,f,f"
-);
+    fn multiply_accumulate_bf16(
+        a: FragmentA<BFloat16>,
+        b: FragmentB<BFloat16>,
+        c: Accumulator<f32>,
+    ) -> Accumulator<f32>;
 
-/// An f16 product with f16 accumulation; `c` and the result hold the accumulator's values as
-/// packed pairs.
-#[primitive(
-    lowering = Assembly {
-        text: "mma.sync.aligned.m16n8k16.row.col.f16.f16.f16.f16 {$0, $1}, {$2, $3, $4, $5}, {$6, \
-               $7}, {$8, $9};",
-        constraints: "=r,=r,r,r,r,r,r,r,r,r",
-    },
-    architecture = 80,
-    convergence = Warp,
-    memory = None,
-    proof = Varying
-)]
-pub fn multiply_accumulate_f16_f16(a: FragmentA<Half>, b: FragmentB<Half>, c: [u32; 2])
--> [u32; 2];
+    /// An f16 product with f16 accumulation; `c` and the result hold the accumulator's values as
+    /// packed pairs.
+    >= sm_80
+    "mma.sync.aligned.m16n8k16.row.col.f16.f16.f16.f16 {$0, $1}, {$2, $3, $4, $5}, {$6, \
+         $7}, {$8, $9};"
+    "=r,=r,r,r,r,r,r,r,r,r"
+    fn multiply_accumulate_f16_f16(a: FragmentA<Half>, b: FragmentB<Half>, c: [u32; 2]) -> [u32; 2];
 
-macro_rules! load_matrices {
-    ($($name:ident $result:ty, $text:literal, $constraints:literal;)*) => {
-        $(
-            #[primitive(
-                lowering = Assembly { text: $text, constraints: $constraints },
-                architecture = 75,
-                convergence = Warp,
-                memory = None,
-                proof = Varying
-            )]
-            pub fn $name(address: u32) -> $result;
-        )*
-    };
-}
+    >= sm_75 "ldmatrix.sync.aligned.m8n8.x1.shared.b16 {$0}, [$1];"
+    "=r,r"
+    fn load_matrices_1(address: u32) -> u32;
 
-load_matrices! {
-    load_matrices_1 u32, "ldmatrix.sync.aligned.m8n8.x1.shared.b16 {$0}, [$1];", "=r,r";
-    load_matrices_2 [u32; 2], "ldmatrix.sync.aligned.m8n8.x2.shared.b16 {$0, $1}, [$2];", "=r,=r,r";
-    load_matrices_4 [u32; 4],
-        "ldmatrix.sync.aligned.m8n8.x4.shared.b16 {$0, $1, $2, $3}, [$4];", "=r,=r,=r,=r,r";
-    load_matrices_transposed_1 u32,
-        "ldmatrix.sync.aligned.m8n8.x1.trans.shared.b16 {$0}, [$1];", "=r,r";
-    load_matrices_transposed_2 [u32; 2],
-        "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16 {$0, $1}, [$2];", "=r,=r,r";
-    load_matrices_transposed_4 [u32; 4],
-        "ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {$0, $1, $2, $3}, [$4];", "=r,=r,=r,=r,r";
-}
+    >= sm_75 "ldmatrix.sync.aligned.m8n8.x2.shared.b16 {$0, $1}, [$2];"
+    "=r,=r,r"
+    fn load_matrices_2(address: u32) -> [u32; 2];
 
-multiply_accumulate!(
-    multiply_accumulate_tf32,
-    80,
-    Tf32,
-    Tf32,
-    f32,
+    >= sm_75 "ldmatrix.sync.aligned.m8n8.x4.shared.b16 {$0, $1, $2, $3}, [$4];"
+    "=r,=r,=r,=r,r"
+    fn load_matrices_4(address: u32) -> [u32; 4];
+
+    >= sm_75 "ldmatrix.sync.aligned.m8n8.x1.trans.shared.b16 {$0}, [$1];"
+    "=r,r"
+    fn load_matrices_transposed_1(address: u32) -> u32;
+
+    >= sm_75 "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16 {$0, $1}, [$2];"
+    "=r,=r,r"
+    fn load_matrices_transposed_2(address: u32) -> [u32; 2];
+
+    >= sm_75 "ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {$0, $1, $2, $3}, [$4];"
+    "=r,=r,=r,=r,r"
+    fn load_matrices_transposed_4(address: u32) -> [u32; 4];
+
+    >= sm_80
     "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32 {$0, $1, $2, $3}, {$4, $5, $6, $7}, {$8, \
-     $9}, {$10, $11, $12, $13};",
+         $9}, {$10, $11, $12, $13};"
     "=f,=f,=f,=f,r,r,r,r,r,r,f,f,f,f"
-);
+    fn multiply_accumulate_tf32(
+        a: FragmentA<Tf32>,
+        b: FragmentB<Tf32>,
+        c: Accumulator<f32>,
+    ) -> Accumulator<f32>;
 
-multiply_accumulate!(
-    multiply_accumulate_s8_s8,
-    80,
-    i8,
-    i8,
-    i32,
+    >= sm_80
     "mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 {$0, $1, $2, $3}, {$4, $5, $6, $7}, {$8, \
-     $9}, {$10, $11, $12, $13};",
+         $9}, {$10, $11, $12, $13};"
     "=r,=r,=r,=r,r,r,r,r,r,r,r,r,r,r"
-);
+    fn multiply_accumulate_s8_s8(
+        a: FragmentA<i8>,
+        b: FragmentB<i8>,
+        c: Accumulator<i32>,
+    ) -> Accumulator<i32>;
 
-multiply_accumulate!(
-    multiply_accumulate_s8_s8_saturating,
-    80,
-    i8,
-    i8,
-    i32,
+    >= sm_80
     "mma.sync.aligned.m16n8k32.row.col.satfinite.s32.s8.s8.s32 {$0, $1, $2, $3}, {$4, $5, $6, \
-     $7}, {$8, $9}, {$10, $11, $12, $13};",
+         $7}, {$8, $9}, {$10, $11, $12, $13};"
     "=r,=r,=r,=r,r,r,r,r,r,r,r,r,r,r"
-);
+    fn multiply_accumulate_s8_s8_saturating(
+        a: FragmentA<i8>,
+        b: FragmentB<i8>,
+        c: Accumulator<i32>,
+    ) -> Accumulator<i32>;
 
-multiply_accumulate!(
-    multiply_accumulate_s8_u8,
-    80,
-    i8,
-    u8,
-    i32,
+    >= sm_80
     "mma.sync.aligned.m16n8k32.row.col.s32.s8.u8.s32 {$0, $1, $2, $3}, {$4, $5, $6, $7}, {$8, \
-     $9}, {$10, $11, $12, $13};",
+         $9}, {$10, $11, $12, $13};"
     "=r,=r,=r,=r,r,r,r,r,r,r,r,r,r,r"
-);
+    fn multiply_accumulate_s8_u8(
+        a: FragmentA<i8>,
+        b: FragmentB<u8>,
+        c: Accumulator<i32>,
+    ) -> Accumulator<i32>;
 
-multiply_accumulate!(
-    multiply_accumulate_s8_u8_saturating,
-    80,
-    i8,
-    u8,
-    i32,
+    >= sm_80
     "mma.sync.aligned.m16n8k32.row.col.satfinite.s32.s8.u8.s32 {$0, $1, $2, $3}, {$4, $5, $6, \
-     $7}, {$8, $9}, {$10, $11, $12, $13};",
+         $7}, {$8, $9}, {$10, $11, $12, $13};"
     "=r,=r,=r,=r,r,r,r,r,r,r,r,r,r,r"
-);
+    fn multiply_accumulate_s8_u8_saturating(
+        a: FragmentA<i8>,
+        b: FragmentB<u8>,
+        c: Accumulator<i32>,
+    ) -> Accumulator<i32>;
 
-multiply_accumulate!(
-    multiply_accumulate_u8_s8,
-    80,
-    u8,
-    i8,
-    i32,
+    >= sm_80
     "mma.sync.aligned.m16n8k32.row.col.s32.u8.s8.s32 {$0, $1, $2, $3}, {$4, $5, $6, $7}, {$8, \
-     $9}, {$10, $11, $12, $13};",
+         $9}, {$10, $11, $12, $13};"
     "=r,=r,=r,=r,r,r,r,r,r,r,r,r,r,r"
-);
+    fn multiply_accumulate_u8_s8(
+        a: FragmentA<u8>,
+        b: FragmentB<i8>,
+        c: Accumulator<i32>,
+    ) -> Accumulator<i32>;
 
-multiply_accumulate!(
-    multiply_accumulate_u8_s8_saturating,
-    80,
-    u8,
-    i8,
-    i32,
+    >= sm_80
     "mma.sync.aligned.m16n8k32.row.col.satfinite.s32.u8.s8.s32 {$0, $1, $2, $3}, {$4, $5, $6, \
-     $7}, {$8, $9}, {$10, $11, $12, $13};",
+         $7}, {$8, $9}, {$10, $11, $12, $13};"
     "=r,=r,=r,=r,r,r,r,r,r,r,r,r,r,r"
-);
+    fn multiply_accumulate_u8_s8_saturating(
+        a: FragmentA<u8>,
+        b: FragmentB<i8>,
+        c: Accumulator<i32>,
+    ) -> Accumulator<i32>;
 
-multiply_accumulate!(
-    multiply_accumulate_u8_u8,
-    80,
-    u8,
-    u8,
-    i32,
+    >= sm_80
     "mma.sync.aligned.m16n8k32.row.col.s32.u8.u8.s32 {$0, $1, $2, $3}, {$4, $5, $6, $7}, {$8, \
-     $9}, {$10, $11, $12, $13};",
+         $9}, {$10, $11, $12, $13};"
     "=r,=r,=r,=r,r,r,r,r,r,r,r,r,r,r"
-);
+    fn multiply_accumulate_u8_u8(
+        a: FragmentA<u8>,
+        b: FragmentB<u8>,
+        c: Accumulator<i32>,
+    ) -> Accumulator<i32>;
 
-multiply_accumulate!(
-    multiply_accumulate_u8_u8_saturating,
-    80,
-    u8,
-    u8,
-    i32,
+    >= sm_80
     "mma.sync.aligned.m16n8k32.row.col.satfinite.s32.u8.u8.s32 {$0, $1, $2, $3}, {$4, $5, $6, \
-     $7}, {$8, $9}, {$10, $11, $12, $13};",
+         $7}, {$8, $9}, {$10, $11, $12, $13};"
     "=r,=r,=r,=r,r,r,r,r,r,r,r,r,r,r"
-);
+    fn multiply_accumulate_u8_u8_saturating(
+        a: FragmentA<u8>,
+        b: FragmentB<u8>,
+        c: Accumulator<i32>,
+    ) -> Accumulator<i32>;
 
-multiply_accumulate!(
-    multiply_accumulate_e4m3_e4m3,
-    89,
-    E4M3,
-    E4M3,
-    f32,
+    >= sm_89
     "mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32 {$0, $1, $2, $3}, {$4, $5, $6, $7}, {$8, \
-     $9}, {$10, $11, $12, $13};",
+         $9}, {$10, $11, $12, $13};"
     "=f,=f,=f,=f,r,r,r,r,r,r,f,f,f,f"
-);
+    fn multiply_accumulate_e4m3_e4m3(
+        a: FragmentA<E4M3>,
+        b: FragmentB<E4M3>,
+        c: Accumulator<f32>,
+    ) -> Accumulator<f32>;
 
-multiply_accumulate!(
-    multiply_accumulate_e4m3_e5m2,
-    89,
-    E4M3,
-    E5M2,
-    f32,
+    >= sm_89
     "mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e5m2.f32 {$0, $1, $2, $3}, {$4, $5, $6, $7}, {$8, \
-     $9}, {$10, $11, $12, $13};",
+         $9}, {$10, $11, $12, $13};"
     "=f,=f,=f,=f,r,r,r,r,r,r,f,f,f,f"
-);
+    fn multiply_accumulate_e4m3_e5m2(
+        a: FragmentA<E4M3>,
+        b: FragmentB<E5M2>,
+        c: Accumulator<f32>,
+    ) -> Accumulator<f32>;
 
-multiply_accumulate!(
-    multiply_accumulate_e5m2_e4m3,
-    89,
-    E5M2,
-    E4M3,
-    f32,
+    >= sm_89
     "mma.sync.aligned.m16n8k32.row.col.f32.e5m2.e4m3.f32 {$0, $1, $2, $3}, {$4, $5, $6, $7}, {$8, \
-     $9}, {$10, $11, $12, $13};",
+         $9}, {$10, $11, $12, $13};"
     "=f,=f,=f,=f,r,r,r,r,r,r,f,f,f,f"
-);
+    fn multiply_accumulate_e5m2_e4m3(
+        a: FragmentA<E5M2>,
+        b: FragmentB<E4M3>,
+        c: Accumulator<f32>,
+    ) -> Accumulator<f32>;
 
-multiply_accumulate!(
-    multiply_accumulate_e5m2_e5m2,
-    89,
-    E5M2,
-    E5M2,
-    f32,
+    >= sm_89
     "mma.sync.aligned.m16n8k32.row.col.f32.e5m2.e5m2.f32 {$0, $1, $2, $3}, {$4, $5, $6, $7}, {$8, \
-     $9}, {$10, $11, $12, $13};",
+         $9}, {$10, $11, $12, $13};"
     "=f,=f,=f,=f,r,r,r,r,r,r,f,f,f,f"
-);
+    fn multiply_accumulate_e5m2_e5m2(
+        a: FragmentA<E5M2>,
+        b: FragmentB<E5M2>,
+        c: Accumulator<f32>,
+    ) -> Accumulator<f32>;
+}

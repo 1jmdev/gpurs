@@ -152,6 +152,9 @@ fn value(expression: &Expr) -> Result<Value> {
             .map(LitStr::value)
             .collect::<String>()
             .into(),
+        Expr::Macro(expression) if expression.mac.path.is_ident("stringify") => {
+            expression.mac.tokens.to_string().into()
+        }
         Expr::Array(array) => array.elems.iter().map(value).collect::<Result<_>>()?,
         Expr::Call(call) if call.args.len() == 1 => {
             let Expr::Path(function) = &*call.func else {

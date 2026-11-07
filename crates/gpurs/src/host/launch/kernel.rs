@@ -108,11 +108,7 @@ impl<S: Launch> KernelLaunch<'_, S> {
             config
         } else {
             match metadata.extent {
-                Extent::Single => LaunchConfig {
-                    grid: [1, 1, 1],
-                    block: [1, 1, 1],
-                    shared_bytes: 0,
-                },
+                Extent::Single => LaunchConfig::new([1, 1, 1], [1, 1, 1]),
                 Extent::Length(parameter) => {
                     let block = if let Some(block) = kernel.block_size.get() {
                         *block
@@ -122,11 +118,10 @@ impl<S: Launch> KernelLaunch<'_, S> {
                         block
                     };
                     let threads = self.lengths[parameter] as usize;
-                    LaunchConfig {
-                        grid: [threads.div_ceil(block as usize), 1, 1],
-                        block: [block as usize, 1, 1],
-                        shared_bytes: 0,
-                    }
+                    LaunchConfig::new(
+                        [threads.div_ceil(block as usize), 1, 1],
+                        [block as usize, 1, 1],
+                    )
                 }
                 Extent::Explicit => {
                     return Err(Error::InvalidOperation(format!(
@@ -244,7 +239,6 @@ impl<S: Launch> KernelLaunch<'_, S> {
         if threads == 0 {
             return Ok(result);
         }
-        let dimensions = |values: [usize; 3]| values.map(|value| value as u32);
         let linear = config.grid[1] == 1
             && config.grid[2] == 1
             && config.block[1] == 1
@@ -256,6 +250,13 @@ impl<S: Launch> KernelLaunch<'_, S> {
             .filter(|(_, parameter)| matches!(parameter, Parameter::Slice { .. }))
             .all(|(parameter, _)| self.scalar(parameter, 0, 8) % 16 == 0);
         let function = entry.select(linear, aligned);
+        let request = config
+            .shared_bytes(
+                config
+                    .shared_bytes
+                    .max(metadata.shared.dynamic_bytes as usize),
+            )
+            .request(entry.attributes);
         stream.maintain()?;
         if let Some(buffer) = &result {
             self.write_word(RESULT_OFFSET as usize, buffer.allocation.pointer);
@@ -265,12 +266,7 @@ impl<S: Launch> KernelLaunch<'_, S> {
                 .borrow_mut()
                 .push(CapturedOperation::kernel(CapturedKernel {
                     function: *function,
-                    config: LaunchConfig {
-                        shared_bytes: config
-                            .shared_bytes
-                            .max(metadata.shared.dynamic_bytes as usize),
-                        ..config
-                    },
+                    request,
                     arguments: self.arguments[entry.offset..].to_vec(),
                     accesses,
                 }));
@@ -279,15 +275,7 @@ impl<S: Launch> KernelLaunch<'_, S> {
         // SAFETY: the arguments follow the verified layout and accesses retain allocations.
         unsafe {
             function
-                .try_launch(
-                    dimensions(config.grid),
-                    dimensions(config.block),
-                    config
-                        .shared_bytes
-                        .max(metadata.shared.dynamic_bytes as usize) as u32,
-                    &stream.raw,
-                    &mut self.arguments[entry.offset..],
-                )
+                .try_launch(&request, &stream.raw, &mut self.arguments[entry.offset..])
                 .map_err(|source| Error::Launch {
                     kernel: metadata.name.clone(),
                     source,

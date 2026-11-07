@@ -1,27 +1,54 @@
 //! The definition format of GPU primitives. Each primitive is declared once, on its public
 //! item, with `#[gpurs::primitive(...)]`; the attribute validates this definition at expansion
 //! and the compiler reads it back from the item. Every field is required, so a new primitive
-//! must state its lowering, architecture, synchronization, memory effect, and proof meaning.
+//! must state its lowering, targets, synchronization, memory effect, and proof meaning.
 
+use bitflags::bitflags;
 use serde::{Deserialize, Serialize};
 
-use crate::Compatibility;
+use crate::Targets;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Primitive {
     pub lowering: Lowering,
-    /// Minimum `sm_XY` as `XY`.
-    pub architecture: u32,
-    /// Requires an architecture-specific `sm_XYa` or family `sm_XYf` target of the same major
-    /// version as `architecture`.
-    #[serde(default)]
-    pub compatibility: Compatibility,
+    pub targets: Targets,
     pub convergence: Convergence,
     pub memory: Memory,
     pub proof: Proof,
     #[serde(default)]
+    pub effects: Vec<Effect>,
+    #[serde(default)]
     pub volatile: bool,
+}
+
+/// A kernel-wide consequence of calling a primitive, which the entry point must handle.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Effect {
+    /// Issues `cp.async` copies from global addresses, which must land before the block exits.
+    Asynchronous,
+    /// Exchanges registers between warpgroups, which fixes the allocation to one block per SM.
+    RegisterExchange,
+}
+
+bitflags! {
+    /// The effects of a kernel's whole call graph.
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+    pub struct KernelEffects: u8 {
+        /// Reads the linear thread index.
+        const INDEX = 1;
+        const ASYNCHRONOUS = 1 << 1;
+        const REGISTER_EXCHANGE = 1 << 2;
+    }
+}
+
+impl From<Effect> for KernelEffects {
+    fn from(effect: Effect) -> Self {
+        match effect {
+            Effect::Asynchronous => KernelEffects::ASYNCHRONOUS,
+            Effect::RegisterExchange => KernelEffects::REGISTER_EXCHANGE,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -114,6 +141,13 @@ pub enum Proof {
 }
 
 impl Primitive {
+    /// The declared effects, plus [`KernelEffects::INDEX`] when it reads launch geometry.
+    pub fn effects(&self) -> KernelEffects {
+        let declared = self.effects.iter().copied().map(KernelEffects::from);
+        let index = self.geometry().then_some(KernelEffects::INDEX);
+        declared.chain(index).collect()
+    }
+
     /// Lowered directly by codegen instead of compiling a Rust body.
     pub fn leaf(&self) -> bool {
         self.lowering != Lowering::Body

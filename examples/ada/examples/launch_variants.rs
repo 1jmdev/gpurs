@@ -106,11 +106,7 @@ fn main() -> Result<()> {
         })
     );
 
-    let config = LaunchConfig {
-        grid: [2, 1, 1],
-        block: [BLOCK, 1, 1],
-        shared_bytes: 0,
-    };
+    let config = LaunchConfig::new([2, 1, 1], [BLOCK, 1, 1]);
     let ones = gpu.upload(&vec![1.0_f32; 2 * BLOCK])?;
     let mut totals = gpu.zeros::<f32>(2)?;
     block_sum(&stream.launch(config), &ones, &mut totals)?;

@@ -1,6 +1,6 @@
 use std::{alloc::Layout, collections::HashSet, mem::MaybeUninit, rc::Rc, slice};
 
-use gpurs_driver::Module;
+use gpurs_driver::{LaunchAttributes, Module};
 
 use crate::{
     Argument, Buffer, DeviceAddress, DeviceSlice, DeviceSliceMut, Error, ExternalAccess, Gpu,
@@ -245,11 +245,8 @@ impl<T> DeviceScatter<T> {
                     .get()
                     .expect("validation module was loaded")
                     .try_function(name)?,
-                config: LaunchConfig {
-                    grid: [blocks as usize, 1, 1],
-                    block: [256, 1, 1],
-                    shared_bytes: 0,
-                },
+                request: LaunchConfig::new([blocks as usize, 1, 1], [256, 1, 1])
+                    .request(LaunchAttributes::default()),
                 arguments: arguments.clone(),
                 accesses: accesses[1..].to_vec(),
             }));

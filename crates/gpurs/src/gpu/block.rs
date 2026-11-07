@@ -44,7 +44,7 @@ impl<const THREADS: usize> Block<THREADS> {
     /// operation and two-sided identity; the operation need not be commutative.
     #[primitive(
         lowering = Body,
-        architecture = 30,
+        targets = ">=sm_30",
         convergence = Block,
         memory = Encapsulated,
         proof = Varying
@@ -77,7 +77,7 @@ impl<const THREADS: usize> Block<THREADS> {
     /// with the same associative operation and two-sided identity.
     #[primitive(
         lowering = Body,
-        architecture = 30,
+        targets = ">=sm_30",
         convergence = Block,
         memory = Encapsulated,
         proof = Varying
@@ -109,7 +109,7 @@ impl<const THREADS: usize> Block<THREADS> {
     /// the same associative operation and two-sided identity.
     #[primitive(
         lowering = Body,
-        architecture = 30,
+        targets = ">=sm_30",
         convergence = Block,
         memory = Encapsulated,
         proof = Varying
@@ -130,7 +130,7 @@ impl<const THREADS: usize> Block<THREADS> {
     /// with the same `bit`, less than `K::BITS`; signed keys use sign-biased digits.
     #[primitive(
         lowering = Body,
-        architecture = 30,
+        targets = ">=sm_30",
         convergence = Block,
         memory = Encapsulated,
         proof = Varying
@@ -156,7 +156,7 @@ impl<const THREADS: usize> Block<THREADS> {
     /// Every thread participates, including across repeated calls.
     #[primitive(
         lowering = Body,
-        architecture = 30,
+        targets = ">=sm_30",
         convergence = Block,
         memory = Encapsulated,
         proof = Varying

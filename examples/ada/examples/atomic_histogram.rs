@@ -38,11 +38,7 @@ fn main() -> Result<()> {
 
     let output = gpu.zeros::<AtomicU32>(BIN_COUNT)?;
     copy_counts(
-        &first_stream.launch(LaunchConfig {
-            grid: [1, 1, 1],
-            block: [32, 1, 1],
-            shared_bytes: 0,
-        }),
+        &first_stream.launch(LaunchConfig::new([1, 1, 1], [32, 1, 1])),
         &bins,
         &output,
     )?;

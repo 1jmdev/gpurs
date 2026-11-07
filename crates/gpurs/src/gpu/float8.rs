@@ -5,9 +5,6 @@
 //! to canonical NaN. Storage/host conversions need no GPU; native conversion needs `sm_89`.
 //! There is no generic FP8 arithmetic API. Numerical equality uses `to_f32`; derives compare bits.
 
-#[cfg(gpurs_device)]
-use gpurs_macros::primitive;
-
 use super::Half2;
 
 #[repr(transparent)]
@@ -91,17 +88,13 @@ impl E4M3x2 {
     }
 
     #[cfg(gpurs_device)]
-    #[primitive(
-        lowering = Assembly {
-            text: "cvt.rn.satfinite.e4m3x2.f32 $0, $2, $1;",
-            constraints: "=h,f,f",
-        },
-        architecture = 89,
-        convergence = None,
-        memory = None,
-        proof = Varying
-    )]
-    pub fn from_f32(low: f32, high: f32) -> Self;
+    primitives! {
+        targets = ">=sm_89", convergence = None, memory = None, proof = Varying;
+
+        "cvt.rn.satfinite.e4m3x2.f32 $0, $2, $1;"
+        "=h,f,f"
+        fn from_f32(low: f32, high: f32) -> Self;
+    }
 
     #[cfg(not(gpurs_device))]
     pub fn to_half2(self) -> Half2 {
@@ -110,17 +103,13 @@ impl E4M3x2 {
     }
 
     #[cfg(gpurs_device)]
-    #[primitive(
-        lowering = Assembly {
-            text: "cvt.rn.f16x2.e4m3x2 $0, $1;",
-            constraints: "=r,h",
-        },
-        architecture = 89,
-        convergence = None,
-        memory = None,
-        proof = Varying
-    )]
-    pub fn to_half2(self) -> Half2;
+    primitives! {
+        targets = ">=sm_89", convergence = None, memory = None, proof = Varying;
+
+        "cvt.rn.f16x2.e4m3x2 $0, $1;"
+        "=r,h"
+        fn to_half2(self) -> Half2;
+    }
 }
 
 #[repr(transparent)]
@@ -210,17 +199,13 @@ impl E5M2x2 {
     }
 
     #[cfg(gpurs_device)]
-    #[primitive(
-        lowering = Assembly {
-            text: "cvt.rn.satfinite.e5m2x2.f32 $0, $2, $1;",
-            constraints: "=h,f,f",
-        },
-        architecture = 89,
-        convergence = None,
-        memory = None,
-        proof = Varying
-    )]
-    pub fn from_f32(low: f32, high: f32) -> Self;
+    primitives! {
+        targets = ">=sm_89", convergence = None, memory = None, proof = Varying;
+
+        "cvt.rn.satfinite.e5m2x2.f32 $0, $2, $1;"
+        "=h,f,f"
+        fn from_f32(low: f32, high: f32) -> Self;
+    }
 
     #[cfg(not(gpurs_device))]
     pub fn to_half2(self) -> Half2 {
@@ -229,17 +214,13 @@ impl E5M2x2 {
     }
 
     #[cfg(gpurs_device)]
-    #[primitive(
-        lowering = Assembly {
-            text: "cvt.rn.f16x2.e5m2x2 $0, $1;",
-            constraints: "=r,h",
-        },
-        architecture = 89,
-        convergence = None,
-        memory = None,
-        proof = Varying
-    )]
-    pub fn to_half2(self) -> Half2;
+    primitives! {
+        targets = ">=sm_89", convergence = None, memory = None, proof = Varying;
+
+        "cvt.rn.f16x2.e5m2x2 $0, $1;"
+        "=r,h"
+        fn to_half2(self) -> Half2;
+    }
 }
 
 /// Opaque `TensorFloat32` registers. PTX leaves the encoding implementation-defined; host
@@ -261,17 +242,13 @@ impl Tf32 {
     }
 
     #[cfg(gpurs_device)]
-    #[primitive(
-        lowering = Assembly {
-            text: "cvt.rna.tf32.f32 $0, $1;",
-            constraints: "=r,f",
-        },
-        architecture = 80,
-        convergence = None,
-        memory = None,
-        proof = Varying
-    )]
-    pub fn from_f32(value: f32) -> Self;
+    primitives! {
+        targets = ">=sm_80", convergence = None, memory = None, proof = Varying;
+
+        "cvt.rna.tf32.f32 $0, $1;"
+        "=r,f"
+        fn from_f32(value: f32) -> Self;
+    }
 
     pub const fn to_bits(self) -> u32 {
         self.0
@@ -290,17 +267,13 @@ impl E4M3x2 {
     }
 
     #[cfg(gpurs_device)]
-    #[primitive(
-        lowering = Assembly {
-            text: "cvt.rn.satfinite.e4m3x2.f16x2 $0, $1;",
-            constraints: "=h,r",
-        },
-        architecture = 89,
-        convergence = None,
-        memory = None,
-        proof = Varying
-    )]
-    pub fn from_half2(value: Half2) -> Self;
+    primitives! {
+        targets = ">=sm_89", convergence = None, memory = None, proof = Varying;
+
+        "cvt.rn.satfinite.e4m3x2.f16x2 $0, $1;"
+        "=h,r"
+        fn from_half2(value: Half2) -> Self;
+    }
 }
 
 impl E5M2x2 {
@@ -311,15 +284,11 @@ impl E5M2x2 {
     }
 
     #[cfg(gpurs_device)]
-    #[primitive(
-        lowering = Assembly {
-            text: "cvt.rn.satfinite.e5m2x2.f16x2 $0, $1;",
-            constraints: "=h,r",
-        },
-        architecture = 89,
-        convergence = None,
-        memory = None,
-        proof = Varying
-    )]
-    pub fn from_half2(value: Half2) -> Self;
+    primitives! {
+        targets = ">=sm_89", convergence = None, memory = None, proof = Varying;
+
+        "cvt.rn.satfinite.e5m2x2.f16x2 $0, $1;"
+        "=h,r"
+        fn from_half2(value: Half2) -> Self;
+    }
 }

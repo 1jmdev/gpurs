@@ -19,7 +19,7 @@ impl<T: OutputElement, const BM: usize, const BN: usize> OutputTile<'_, T, BM, B
     /// the block takes part.
     #[primitive(
         lowering = Body,
-        architecture = 0,
+        targets = ">=sm_0",
         convergence = Block,
         memory = PartitionWrite,
         proof = Uniform

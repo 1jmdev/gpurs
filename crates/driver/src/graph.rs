@@ -1,6 +1,6 @@
 use std::{ffi::c_void, ptr};
 
-use crate::{Context, Ownership, Result, Stream, ffi};
+use crate::{Context, Function, LaunchRequest, Ownership, Result, Stream, ffi};
 
 #[derive(Debug)]
 pub struct Graph {
@@ -25,6 +25,24 @@ pub struct KernelNodeParameters {
     pub shared_bytes: u32,
     pub parameters: *mut *mut c_void,
     pub extra: *mut *mut c_void,
+}
+
+impl KernelNodeParameters {
+    /// The node parameters of `request` launching `function` with `parameters`.
+    pub fn new(
+        function: &Function,
+        request: &LaunchRequest,
+        parameters: &mut [*mut c_void],
+    ) -> Self {
+        KernelNodeParameters {
+            function: function.as_raw(),
+            grid: request.grid,
+            block: request.block,
+            shared_bytes: request.shared_bytes,
+            parameters: parameters.as_mut_ptr(),
+            extra: ptr::null_mut(),
+        }
+    }
 }
 
 impl Graph {

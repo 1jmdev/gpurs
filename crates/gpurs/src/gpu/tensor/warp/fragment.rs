@@ -6,7 +6,7 @@ use gpurs_macros::primitive;
 
 use super::super::{Element, element};
 use crate::gpu::{
-    self, BFloat16, Half,
+    BFloat16, BFloat162, Half, Half2,
     warp::{self, Shuffle},
 };
 
@@ -82,7 +82,7 @@ impl<T: Shuffle> Accumulator<T> {
     /// the two results name rows `lane / 4` and `lane / 4 + 8`, replicated across four lanes.
     #[primitive(
         lowering = Body,
-        architecture = 30,
+        targets = ">=sm_30",
         convergence = Warp,
         memory = None,
         proof = Varying
@@ -141,7 +141,7 @@ macro_rules! operand_conversion {
                 /// Redistributes a 16x8 accumulator as a B operand. Every lane participates.
                 #[primitive(
                     lowering = Body,
-                    architecture = 30,
+                    targets = ">=sm_30",
                     convergence = Warp,
                     memory = None,
                     proof = Varying
@@ -171,10 +171,7 @@ impl Accumulator<f32> {
     /// The values rounded to nearest f16.
     pub fn to_half(&self) -> Accumulator<Half> {
         let [a, b, c, d] = self.values;
-        let [a, b, c, d] = element::unpack([
-            gpu::intrinsics::pack_half(a, b),
-            gpu::intrinsics::pack_half(c, d),
-        ]);
+        let [a, b, c, d] = element::unpack([Half2::from_f32(a, b).0, Half2::from_f32(c, d).0]);
         Accumulator {
             values: [Half(a), Half(b), Half(c), Half(d)],
         }
@@ -183,10 +180,8 @@ impl Accumulator<f32> {
     /// The values rounded to nearest bf16.
     pub fn to_bfloat16(&self) -> Accumulator<BFloat16> {
         let [a, b, c, d] = self.values;
-        let [a, b, c, d] = element::unpack([
-            gpu::intrinsics::pack_bfloat16(a, b),
-            gpu::intrinsics::pack_bfloat16(c, d),
-        ]);
+        let [a, b, c, d] =
+            element::unpack([BFloat162::from_f32(a, b).0, BFloat162::from_f32(c, d).0]);
         Accumulator {
             values: [BFloat16(a), BFloat16(b), BFloat16(c), BFloat16(d)],
         }

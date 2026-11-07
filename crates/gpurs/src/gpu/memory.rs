@@ -18,7 +18,7 @@ use crate::DeviceAddress;
 /// Reads an element when its index is in bounds, otherwise returning `default`.
 #[primitive(
     lowering = Body,
-    architecture = 0,
+    targets = ">=sm_0",
     convergence = None,
     memory = ReadReachable(0),
     proof = Varying
@@ -38,7 +38,7 @@ pub fn load_or<T: Copy>(input: &[T], index: usize, default: T) -> T {
 /// No other thread may read or write it concurrently, including through aliases.
 #[primitive(
     lowering = Body,
-    architecture = 0,
+    targets = ">=sm_0",
     convergence = None,
     memory = Encapsulated,
     proof = Varying
@@ -61,68 +61,54 @@ pub struct Vector4(pub [u32; 4]);
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Vector2Wide(pub [u64; 2]);
 
-macro_rules! transfer {
-    ($effect:ident $text:expr, $constraints:literal; $signature:item) => {
-        transfer!(20 $effect $text, $constraints; $signature);
-    };
-    ($architecture:literal $effect:ident $text:expr, $constraints:literal; $signature:item) => {
-        /// # Safety
-        /// Follow this module's storage, alignment, initialization, lane and aliasing contract.
-        #[primitive(
-            lowering = Assembly { text: $text, constraints: $constraints },
-            architecture = $architecture,
-            convergence = None,
-            memory = $effect,
-            proof = Varying
-        )]
-        $signature
-    };
-}
-
 macro_rules! cache_policy {
     ($policy:ident, $load:literal, $store:literal) => {
         #[derive(Debug)]
         pub struct $policy;
 
         impl $policy {
-            transfer! {
-                Encapsulated concat!("ld.global.", $load, ".b32 $0, [$1];"), "=r,l";
-                pub unsafe fn load(address: DeviceAddress<u32>) -> u32;
-            }
+            primitives! {
+                targets = ">=sm_20", convergence = None, memory = Encapsulated, proof = Varying;
 
-            transfer! {
-                Encapsulated concat!("st.global.", $store, ".b32 [$0], $1;"), "l,r";
-                pub unsafe fn store(address: DeviceAddress<u32>, value: u32);
-            }
+                /// # Safety
+                /// Follow this module's storage, alignment, initialization, lane and aliasing contract.
+                unsafe concat!("ld.global.", $load, ".b32 $0, [$1];") "=r,l"
+                fn load(address: DeviceAddress<u32>) -> u32;
 
-            transfer! {
-                Encapsulated concat!("ld.global.", $load, ".v2.b32 {$0, $1}, [$2];"), "=r,=r,l";
-                pub unsafe fn load_2(address: DeviceAddress<Vector2>) -> Vector2;
-            }
+                /// # Safety
+                /// Follow this module's storage, alignment, initialization, lane and aliasing contract.
+                unsafe concat!("st.global.", $store, ".b32 [$0], $1;") "l,r"
+                fn store(address: DeviceAddress<u32>, value: u32);
 
-            transfer! {
-                Encapsulated concat!("st.global.", $store, ".v2.b32 [$0], {$1, $2};"), "l,r,r";
-                pub unsafe fn store_2(address: DeviceAddress<Vector2>, value: Vector2);
-            }
+                /// # Safety
+                /// Follow this module's storage, alignment, initialization, lane and aliasing contract.
+                unsafe concat!("ld.global.", $load, ".v2.b32 {$0, $1}, [$2];") "=r,=r,l"
+                fn load_2(address: DeviceAddress<Vector2>) -> Vector2;
 
-            transfer! {
-                Encapsulated concat!("ld.global.", $load, ".v4.b32 {$0, $1, $2, $3}, [$4];"), "=r,=r,=r,=r,l";
-                pub unsafe fn load_4(address: DeviceAddress<Vector4>) -> Vector4;
-            }
+                /// # Safety
+                /// Follow this module's storage, alignment, initialization, lane and aliasing contract.
+                unsafe concat!("st.global.", $store, ".v2.b32 [$0], {$1, $2};") "l,r,r"
+                fn store_2(address: DeviceAddress<Vector2>, value: Vector2);
 
-            transfer! {
-                Encapsulated concat!("st.global.", $store, ".v4.b32 [$0], {$1, $2, $3, $4};"), "l,r,r,r,r";
-                pub unsafe fn store_4(address: DeviceAddress<Vector4>, value: Vector4);
-            }
+                /// # Safety
+                /// Follow this module's storage, alignment, initialization, lane and aliasing contract.
+                unsafe concat!("ld.global.", $load, ".v4.b32 {$0, $1, $2, $3}, [$4];") "=r,=r,=r,=r,l"
+                fn load_4(address: DeviceAddress<Vector4>) -> Vector4;
 
-            transfer! {
-                Encapsulated concat!("ld.global.", $load, ".v2.b64 {$0, $1}, [$2];"), "=l,=l,l";
-                pub unsafe fn load_2_wide(address: DeviceAddress<Vector2Wide>) -> Vector2Wide;
-            }
+                /// # Safety
+                /// Follow this module's storage, alignment, initialization, lane and aliasing contract.
+                unsafe concat!("st.global.", $store, ".v4.b32 [$0], {$1, $2, $3, $4};") "l,r,r,r,r"
+                fn store_4(address: DeviceAddress<Vector4>, value: Vector4);
 
-            transfer! {
-                Encapsulated concat!("st.global.", $store, ".v2.b64 [$0], {$1, $2};"), "l,l,l";
-                pub unsafe fn store_2_wide(address: DeviceAddress<Vector2Wide>, value: Vector2Wide);
+                /// # Safety
+                /// Follow this module's storage, alignment, initialization, lane and aliasing contract.
+                unsafe concat!("ld.global.", $load, ".v2.b64 {$0, $1}, [$2];") "=l,=l,l"
+                fn load_2_wide(address: DeviceAddress<Vector2Wide>) -> Vector2Wide;
+
+                /// # Safety
+                /// Follow this module's storage, alignment, initialization, lane and aliasing contract.
+                unsafe concat!("st.global.", $store, ".v2.b64 [$0], {$1, $2};") "l,l,l"
+                fn store_2_wide(address: DeviceAddress<Vector2Wide>, value: Vector2Wide);
             }
         }
     };
@@ -137,83 +123,73 @@ cache_policy!(VolatileCache, "cv", "wt");
 pub struct ReadOnly;
 
 impl ReadOnly {
-    transfer! {
-        32 Encapsulated "ld.global.nc.b32 $0, [$1];", "=r,l";
-        pub unsafe fn load(address: DeviceAddress<u32>) -> u32;
+    primitives! {
+        targets = ">=sm_32", convergence = None, memory = Encapsulated, proof = Varying;
+
+        /// # Safety
+        /// Follow this module's storage, alignment, initialization, lane and aliasing contract.
+        unsafe "ld.global.nc.b32 $0, [$1];" "=r,l"
+        fn load(address: DeviceAddress<u32>) -> u32;
+
+        /// # Safety
+        /// Follow this module's storage, alignment, initialization, lane and aliasing contract.
+        unsafe "ld.global.nc.v4.b32 {$0, $1, $2, $3}, [$4];" "=r,=r,=r,=r,l"
+        fn load_4(address: DeviceAddress<Vector4>) -> Vector4;
     }
-
-    transfer! {
-        32 Encapsulated "ld.global.nc.v4.b32 {$0, $1, $2, $3}, [$4];", "=r,=r,=r,=r,l";
-        pub unsafe fn load_4(address: DeviceAddress<Vector4>) -> Vector4;
-    }
 }
 
-transfer! {
-    Encapsulated "ld.shared.v2.b32 {$0, $1}, [$2];", "=r,=r,r";
-    pub unsafe fn load_shared_2(address: u32) -> Vector2;
+primitives! {
+    targets = ">=sm_20", convergence = None, memory = Encapsulated, proof = Varying;
+
+    /// # Safety
+    /// Follow this module's storage, alignment, initialization, lane and aliasing contract.
+    unsafe "ld.shared.v2.b32 {$0, $1}, [$2];" "=r,=r,r"
+    fn load_shared_2(address: u32) -> Vector2;
+
+    /// # Safety
+    /// Follow this module's storage, alignment, initialization, lane and aliasing contract.
+    unsafe "st.shared.v2.b32 [$0], {$1, $2};" "r,r,r"
+    fn store_shared_2(address: u32, value: Vector2);
+
+    /// # Safety
+    /// Follow this module's storage, alignment, initialization, lane and aliasing contract.
+    unsafe "ld.shared.v4.b32 {$0, $1, $2, $3}, [$4];" "=r,=r,=r,=r,r"
+    fn load_shared_4(address: u32) -> Vector4;
+
+    /// # Safety
+    /// Follow this module's storage, alignment, initialization, lane and aliasing contract.
+    unsafe "st.shared.v4.b32 [$0], {$1, $2, $3, $4};" "r,r,r,r,r"
+    fn store_shared_4(address: u32, value: Vector4);
+
+    /// # Safety
+    /// Follow this module's storage, alignment, initialization, lane and aliasing contract.
+    unsafe "ld.shared.v2.b64 {$0, $1}, [$2];" "=l,=l,r"
+    fn load_shared_2_wide(address: u32) -> Vector2Wide;
+
+    /// # Safety
+    /// Follow this module's storage, alignment, initialization, lane and aliasing contract.
+    unsafe "st.shared.v2.b64 [$0], {$1, $2};" "r,l,l"
+    fn store_shared_2_wide(address: u32, value: Vector2Wide);
+
+    /// # Safety
+    /// Follow this module's storage, alignment, initialization, lane and aliasing contract.
+    unsafe "prefetch.global.L1 [$0];" "l"
+    fn prefetch_l1(address: DeviceAddress<u32>);
+
+    /// # Safety
+    /// Follow this module's storage, alignment, initialization, lane and aliasing contract.
+    unsafe "prefetch.global.L2 [$0];" "l"
+    fn prefetch_l2(address: DeviceAddress<u32>);
+
+    /// Fetches an L2 line with evict-last priority; a hint, not a persistence guarantee.
+    /// # Safety
+    /// Follow this module's global address and queued lifetime contract.
+    unsafe >= sm_80 "prefetch.global.L2::evict_last [$0];" "l,~{memory}"
+    fn prefetch_l2_retained(address: DeviceAddress<u32>);
+
+    /// Loads a vector with L1 evict-last priority; no synchronization or persistence guarantee.
+    /// # Safety
+    /// Follow this module's alignment, initialization, aliasing and queued lifetime contract.
+    unsafe >= sm_70 "ld.global.L1::evict_last.v4.b32 {$0, $1, $2, $3}, [$4];" "=r,=r,=r,=r,l,~{memory}"
+    fn load_4_retained(address: DeviceAddress<Vector4>) -> Vector4;
 }
-
-transfer! {
-    Encapsulated "st.shared.v2.b32 [$0], {$1, $2};", "r,r,r";
-    pub unsafe fn store_shared_2(address: u32, value: Vector2);
-}
-
-transfer! {
-    Encapsulated "ld.shared.v4.b32 {$0, $1, $2, $3}, [$4];", "=r,=r,=r,=r,r";
-    pub unsafe fn load_shared_4(address: u32) -> Vector4;
-}
-
-transfer! {
-    Encapsulated "st.shared.v4.b32 [$0], {$1, $2, $3, $4};", "r,r,r,r,r";
-    pub unsafe fn store_shared_4(address: u32, value: Vector4);
-}
-
-transfer! {
-    Encapsulated "ld.shared.v2.b64 {$0, $1}, [$2];", "=l,=l,r";
-    pub unsafe fn load_shared_2_wide(address: u32) -> Vector2Wide;
-}
-
-transfer! {
-    Encapsulated "st.shared.v2.b64 [$0], {$1, $2};", "r,l,l";
-    pub unsafe fn store_shared_2_wide(address: u32, value: Vector2Wide);
-}
-
-transfer! {
-    Encapsulated "prefetch.global.L1 [$0];", "l";
-    pub unsafe fn prefetch_l1(address: DeviceAddress<u32>);
-}
-
-transfer! {
-    Encapsulated "prefetch.global.L2 [$0];", "l";
-    pub unsafe fn prefetch_l2(address: DeviceAddress<u32>);
-}
-
-/// Fetches an L2 line with evict-last priority; a hint, not a persistence guarantee.
-/// # Safety
-/// Follow this module's global address and queued lifetime contract.
-#[primitive(
-    lowering = Assembly {
-        text: "prefetch.global.L2::evict_last [$0];",
-        constraints: "l,~{memory}",
-    },
-    architecture = 80,
-    convergence = None,
-    memory = Encapsulated,
-    proof = Varying
-)]
-pub unsafe fn prefetch_l2_retained(address: DeviceAddress<u32>);
-
-/// Loads a vector with L1 evict-last priority; no synchronization or persistence guarantee.
-/// # Safety
-/// Follow this module's alignment, initialization, aliasing and queued lifetime contract.
-#[primitive(
-    lowering = Assembly {
-        text: "ld.global.L1::evict_last.v4.b32 {$0, $1, $2, $3}, [$4];",
-        constraints: "=r,=r,=r,=r,l,~{memory}",
-    },
-    architecture = 70,
-    convergence = None,
-    memory = Encapsulated,
-    proof = Varying
-)]
-pub unsafe fn load_4_retained(address: DeviceAddress<Vector4>) -> Vector4;

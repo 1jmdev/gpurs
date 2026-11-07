@@ -6,6 +6,7 @@ use std::{
 };
 
 use fixedbitset::FixedBitSet;
+use gpurs_artifact::KernelEffects;
 use gpurs_rustc::{Body, Dominators, FxHashSet, Instance, Span};
 
 use crate::{
@@ -297,6 +298,6 @@ pub struct Findings {
     pub collectives: Vec<(usize, u8, Span, Instance)>,
     pub requirements: Vec<Clause>,
     pub lengths: Vec<usize>,
-    pub uses_index: bool,
+    pub effects: KernelEffects,
     pub geometry: bool,
 }

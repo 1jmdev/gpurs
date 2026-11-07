@@ -1,18 +1,12 @@
-use gpurs_artifact::{Compatibility, Lowering};
+use gpurs_artifact::KernelEffects;
 use gpurs_rustc::{
     CrateDef, FxHashSet, Graph, Instance, InstanceKind, Item, RigidTy, Session, Span,
     TerminatorKind, TyKind, attributes, call_graph,
 };
 
-#[derive(Default)]
-pub struct Effects {
-    pub asynchronous: bool,
-    pub reallocates: bool,
-}
-
-/// Rejects unsupported call graphs and determines whether they issue asynchronous copies.
-pub fn check(sess: Session<'_>, root: Instance) -> Effects {
-    let mut effects = Effects::default();
+/// Rejects unsupported call graphs and unions the effects their primitives declare.
+pub fn check(sess: Session<'_>, root: Instance) -> KernelEffects {
+    let mut effects = KernelEffects::empty();
     visit(
         sess,
         root,
@@ -21,7 +15,7 @@ pub fn check(sess: Session<'_>, root: Instance) -> Effects {
         &mut FxHashSet::default(),
         &mut effects,
     );
-    if effects.reallocates
+    if effects.contains(KernelEffects::REGISTER_EXCHANGE)
         && !attributes::launch_bounds(sess, root.def.def_id())
             .is_some_and(|(_, blocks)| blocks <= 1)
     {
@@ -40,7 +34,7 @@ fn visit(
     span: Span,
     active: &mut Vec<Instance>,
     checked: &mut FxHashSet<Instance>,
-    effects: &mut Effects,
+    effects: &mut KernelEffects,
 ) {
     if active.contains(&instance) {
         sess.error_help(
@@ -117,32 +111,20 @@ fn visit(
                         "let the resource leave scope normally, or complete its operation",
                     );
                 }
-                let primitive = attributes::primitive(sess, callee.def.def_id());
-                effects.asynchronous |= primitive.as_ref().is_some_and(|primitive| {
-                    matches!(&primitive.lowering, Lowering::Assembly { text, .. } if text.contains("cp.async."))
-                });
-                effects.reallocates |= primitive.as_ref().is_some_and(|primitive| {
-                    matches!(&primitive.lowering, Lowering::Assembly { text, .. } if text.contains("setmaxnreg."))
-                });
-                if let Some(primitive) = primitive
-                    && !sess
-                        .target
-                        .provides(primitive.architecture, primitive.compatibility)
-                {
-                    let suffix = match primitive.compatibility {
-                        Compatibility::Generic => "",
-                        Compatibility::Architecture => "a",
-                        Compatibility::Family => "f",
-                    };
-                    sess.error_help(
-                        terminator.source_info.span,
-                        format!(
-                            "`{}` requires sm_{}{suffix}",
-                            callee.name(),
-                            primitive.architecture
-                        ),
-                        "select the GPU architecture that provides it in gpurs_build::compile",
-                    );
+                if let Some(primitive) = attributes::primitive(sess, callee.def.def_id()) {
+                    *effects |= primitive.effects() - KernelEffects::INDEX;
+                    if !sess.target.provides(&primitive.targets) {
+                        sess.error_help(
+                            terminator.source_info.span,
+                            format!(
+                                "`{}` requires {}, not {}",
+                                callee.name(),
+                                primitive.targets,
+                                sess.target
+                            ),
+                            "select a GPU architecture that provides it in gpurs_build::compile",
+                        );
+                    }
                 }
                 if allowed(sess, callee, terminator.source_info.span) {
                     visit(

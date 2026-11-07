@@ -97,7 +97,7 @@ impl<T: OutputElement, const BM: usize, const BN: usize> LockedTile<'_, '_, T, B
     /// block takes part.
     #[primitive(
         lowering = Body,
-        architecture = 70,
+        targets = ">=sm_70",
         convergence = Block,
         memory = Encapsulated,
         proof = Uniform
@@ -115,7 +115,7 @@ impl<T: OutputElement, const BM: usize, const BN: usize> LockedTile<'_, '_, T, B
 /// Waits until `word` holds `ticket`, then lets the whole block proceed.
 #[primitive(
     lowering = Body,
-    architecture = 70,
+    targets = ">=sm_70",
     convergence = Block,
     memory = ReadReachable(1),
     proof = Uniform
@@ -149,7 +149,7 @@ impl OutputMatrix<'_, f32> {
     /// atomic reductions, so any number of slices may accumulate into the same tile at once.
     #[primitive(
         lowering = Body,
-        architecture = 20,
+        targets = ">=sm_20",
         convergence = None,
         memory = PartitionWrite,
         proof = Uniform
@@ -191,47 +191,35 @@ impl OutputMatrix<'_, f32> {
     }
 }
 
-/// Atomically adds `value` to the f32 at the global address `address`.
-/// # Safety
-/// The address names a live, aligned f32 that only atomic operations access concurrently.
-#[primitive(
-    lowering = Assembly {
-        text: "red.global.add.f32 [$0], $1;",
-        constraints: "l,f,~{memory}",
-    },
-    architecture = 20,
-    convergence = None,
-    memory = Encapsulated,
-    proof = Varying
-)]
-unsafe fn reduce_add(address: u64, value: f32);
+primitives! {
+    targets = ">=sm_20", convergence = None, memory = Encapsulated, proof = Varying;
 
-/// Reads the u32 at the global address `address` with acquire semantics at device scope.
-/// # Safety
-/// The address names a live, aligned u32 that only atomic operations access concurrently.
-#[primitive(
-    lowering = Assembly {
-        text: "ld.acquire.gpu.global.b32 $0, [$1];",
-        constraints: "=r,l,~{memory}",
-    },
-    architecture = 70,
-    convergence = None,
-    memory = Encapsulated,
-    proof = Varying
-)]
-unsafe fn load_acquire(address: u64) -> u32;
+    /// Atomically adds `value` to the f32 at the global address `address`.
+    /// # Safety
+    /// The address names a live, aligned f32 that only atomic operations access concurrently.
+    unsafe "red.global.add.f32 [$0], $1;"
+    "l,f,~{memory}"
+    pub(self) fn reduce_add(address: u64, value: f32);
+}
 
-/// Writes the u32 at the global address `address` with release semantics at device scope.
-/// # Safety
-/// As for [`load_acquire`].
-#[primitive(
-    lowering = Assembly {
-        text: "st.release.gpu.global.b32 [$0], $1;",
-        constraints: "l,r,~{memory}",
-    },
-    architecture = 70,
-    convergence = None,
-    memory = Encapsulated,
-    proof = Varying
-)]
-unsafe fn store_release(address: u64, value: u32);
+primitives! {
+    targets = ">=sm_70", convergence = None, memory = Encapsulated, proof = Varying;
+
+    /// Reads the u32 at the global address `address` with acquire semantics at device scope.
+    /// # Safety
+    /// The address names a live, aligned u32 that only atomic operations access concurrently.
+    unsafe "ld.acquire.gpu.global.b32 $0, [$1];"
+    "=r,l,~{memory}"
+    pub(self) fn load_acquire(address: u64) -> u32;
+}
+
+primitives! {
+    targets = ">=sm_70", convergence = None, memory = Encapsulated, proof = Varying;
+
+    /// Writes the u32 at the global address `address` with release semantics at device scope.
+    /// # Safety
+    /// As for [`load_acquire`].
+    unsafe "st.release.gpu.global.b32 [$0], $1;"
+    "l,r,~{memory}"
+    pub(self) fn store_release(address: u64, value: u32);
+}

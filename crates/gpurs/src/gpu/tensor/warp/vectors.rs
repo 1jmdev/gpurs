@@ -29,7 +29,7 @@ impl<const BM: usize, const BN: usize, const FM: usize, const FN: usize>
     /// column is `first`, with one paired load per fragment column when aligned.
     #[primitive(
         lowering = Body,
-        architecture = 0,
+        targets = ">=sm_0",
         convergence = None,
         memory = ReadReachable(1),
         proof = Varying
@@ -63,7 +63,7 @@ impl<const BM: usize, const BN: usize, const FM: usize, const FN: usize>
     /// is `first`.
     #[primitive(
         lowering = Body,
-        architecture = 0,
+        targets = ">=sm_0",
         convergence = None,
         memory = ReadReachable(1),
         proof = Varying

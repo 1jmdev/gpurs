@@ -63,7 +63,8 @@ pub fn device(attribute: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 /// Declares a GPU primitive: its signature is the item, and the attribute defines lowering,
-/// minimum architecture, convergence, memory effect, and proof meaning.
+/// targets, convergence, memory effect, kernel effects, and proof meaning. A later field
+/// overrides an earlier one of the same name.
 #[doc(hidden)]
 #[proc_macro_attribute]
 pub fn primitive(attribute: TokenStream, item: TokenStream) -> TokenStream {
@@ -74,7 +75,8 @@ pub fn primitive(attribute: TokenStream, item: TokenStream) -> TokenStream {
 
 /// Declares an unsafe PTX extension using the primitive definition format.
 /// Operand and result types follow the Rust signature; LLVM constraints bind their scalar
-/// leaves. Declare minimum architecture, compatibility, convergence, memory and Varying proof.
+/// leaves. Declare targets such as `">=sm_80"` or `"sm_90a | sm_100a"`, convergence, memory,
+/// effects such as `[Asynchronous]`, and Varying proof.
 /// Set `volatile = true` for observable register-only operations.
 ///
 /// # Safety

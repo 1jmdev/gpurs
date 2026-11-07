@@ -86,11 +86,10 @@ fn main() -> gpurs::Result<()> {
     let weight = gpu.upload(&weight_host)?;
     let mut output = gpu.zeros::<Half>(TOKENS * COLUMNS)?;
     experts(
-        &stream.launch(LaunchConfig {
-            grid: Grouped::dimensions::<TILE_ROWS, TILE_COLUMNS>(TOKENS, COLUMNS, EXPERTS),
-            block: [THREADS, 1, 1],
-            shared_bytes: 0,
-        }),
+        &stream.launch(LaunchConfig::new(
+            Grouped::dimensions::<TILE_ROWS, TILE_COLUMNS>(TOKENS, COLUMNS, EXPERTS),
+            [THREADS, 1, 1],
+        )),
         &input,
         &routes,
         &offsets,

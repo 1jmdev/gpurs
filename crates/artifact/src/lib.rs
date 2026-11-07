@@ -20,6 +20,8 @@ pub use kernel::{
     Access, Clause, Entry, Extent, Kernel, PARAMETERS_OFFSET, Parameter, Polynomial, Predicate,
     RESULT_OFFSET, Relation, SharedMemory, TransferType, Value, Variable, parameter_offsets,
 };
-pub use primitive::{Convergence, Lowering, Memory, Operand, Primitive, Proof};
+pub use primitive::{
+    Convergence, Effect, KernelEffects, Lowering, Memory, Operand, Primitive, Proof,
+};
 pub use store::{Key, Kind, Store, digest};
-pub use target::{Compatibility, ParseTargetError, Target};
+pub use target::{ParseTargetError, Target, Targets};

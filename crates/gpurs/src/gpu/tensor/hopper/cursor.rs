@@ -55,7 +55,7 @@ impl<T: Element, const ROWS: usize, const COLUMNS: usize> TensorCursor<'_, T, RO
     /// part, and the first issues the copy.
     #[primitive(
         lowering = Body,
-        architecture = 90,
+        targets = ">=sm_90",
         convergence = Block,
         memory = ReadReachable(0),
         proof = Initialized

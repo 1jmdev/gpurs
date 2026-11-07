@@ -68,8 +68,7 @@ impl<const COLUMNS: usize> TensorMemoryAccumulator<COLUMNS> {
     /// Reserves the accumulator's block-shared state; each call site owns distinct storage.
     #[primitive(
         lowering = SharedArray,
-        architecture = 100,
-        compatibility = Architecture,
+        targets = "sm_100a",
         convergence = None,
         memory = SharedAllocation,
         proof = Uniform
@@ -82,8 +81,7 @@ impl<const COLUMNS: usize> TensorMemoryAccumulator<COLUMNS> {
     /// products.
     #[primitive(
         lowering = Body,
-        architecture = 100,
-        compatibility = Architecture,
+        targets = "sm_100a",
         convergence = Block,
         memory = Encapsulated,
         proof = Uniform
@@ -128,8 +126,7 @@ impl<const COLUMNS: usize> TensorMemoryAccumulator<COLUMNS> {
     /// formats and depth. Keep operands alive until `store_tensor_memory` or destruction completes.
     #[primitive(
         lowering = Body,
-        architecture = 100,
-        compatibility = Architecture,
+        targets = "sm_100a",
         convergence = Block,
         memory = Encapsulated,
         proof = Uniform
@@ -205,8 +202,7 @@ impl<const COLUMNS: usize> TensorMemoryAccumulator<COLUMNS> {
 impl<const COLUMNS: usize> Drop for TensorMemoryAccumulator<COLUMNS> {
     #[primitive(
         lowering = Body,
-        architecture = 100,
-        compatibility = Architecture,
+        targets = "sm_100a",
         convergence = Block,
         memory = Encapsulated,
         proof = Uniform
@@ -226,8 +222,7 @@ impl<T: OutputElement, const COLUMNS: usize> OutputTile<'_, T, 128, COLUMNS> {
     /// takes part.
     #[primitive(
         lowering = Body,
-        architecture = 100,
-        compatibility = Architecture,
+        targets = "sm_100a",
         convergence = Block,
         memory = PartitionWrite,
         proof = Uniform

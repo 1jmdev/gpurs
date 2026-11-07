@@ -1,4 +1,3 @@
-use gpurs_artifact::Compatibility;
 use gpurs_ir::{Access, Conversion, Modification, Ordering, Predicate, Type};
 use gpurs_rustc::{GenericArgKind, Instance, TyConst, TyConstKind};
 
@@ -61,7 +60,7 @@ impl FunctionBuilder<'_, '_> {
                     | "atomic_cxchgweak"
             )
         {
-            if !self.sess.target.provides(70, Compatibility::Generic) {
+            if self.sess.target.capability() < 70 {
                 return self.unsupported("16-bit atomics require sm_70 or later");
             }
             let failure = orders.get(1).copied().unwrap_or(Ordering::Monotonic);

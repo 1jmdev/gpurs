@@ -18,7 +18,9 @@ pub const CUDA_SUCCESS: CUresult = 0;
 pub const CUDA_ERROR_NOT_READY: CUresult = 600;
 pub const CU_STREAM_NON_BLOCKING: c_uint = 1;
 pub const CU_EVENT_DISABLE_TIMING: c_uint = 2;
+pub const CU_LAUNCH_ATTRIBUTE_CLUSTER_DIMENSION: c_int = 4;
 pub const CU_LAUNCH_ATTRIBUTE_PROGRAMMATIC_STREAM_SERIALIZATION: c_int = 6;
+pub const CU_LAUNCH_ATTRIBUTE_PRIORITY: c_int = 8;
 pub const CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR: c_int = 75;
 pub const CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR: c_int = 76;
 pub const CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES: c_int = 8;
@@ -122,19 +124,6 @@ unsafe extern "C" {
         function: CUfunction,
         block_size: c_int,
         dynamic_shared_memory_size: usize,
-    ) -> CUresult;
-    pub fn cuLaunchKernel(
-        function: CUfunction,
-        grid_x: c_uint,
-        grid_y: c_uint,
-        grid_z: c_uint,
-        block_x: c_uint,
-        block_y: c_uint,
-        block_z: c_uint,
-        shared_memory_bytes: c_uint,
-        stream: CUstream,
-        parameters: *mut *mut c_void,
-        extra: *mut *mut c_void,
     ) -> CUresult;
     pub fn cuLaunchKernelEx(
         config: *const CUlaunchConfig,

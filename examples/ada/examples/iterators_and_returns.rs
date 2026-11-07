@@ -74,11 +74,7 @@ fn main() -> Result<()> {
     let integer_product = dot(&stream, &integers, &integer_weights, 0)?.into_value();
 
     let samples = sample(
-        &stream.launch(LaunchConfig {
-            grid: [2, 1, 1],
-            block: [32, 1, 1],
-            shared_bytes: 0,
-        }),
+        &stream.launch(LaunchConfig::new([2, 1, 1], [32, 1, 1])),
         1.0,
         0.5,
     )?;

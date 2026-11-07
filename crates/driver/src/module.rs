@@ -1,11 +1,7 @@
-use std::{
-    ffi::{CString, c_void},
-    mem::MaybeUninit,
-    ptr,
-};
+use std::{ffi::CString, ptr};
 
 use crate::{
-    Context, Result, Stream,
+    Context, Result,
     ffi::{self, CUfunction, CUmodule},
 };
 
@@ -60,10 +56,7 @@ impl Module {
             unsafe { ffi::cuModuleGetFunction(&raw mut raw, self.raw, name.as_ptr()) },
             "cuModuleGetFunction",
         )?;
-        Ok(Function {
-            raw,
-            programmatic: false,
-        })
+        Ok(Function { raw })
     }
 }
 
@@ -81,73 +74,11 @@ impl Drop for Module {
 #[derive(Debug, Clone, Copy)]
 pub struct Function {
     raw: CUfunction,
-    programmatic: bool,
 }
 
 impl Function {
     pub fn as_raw(&self) -> CUfunction {
         self.raw
-    }
-
-    /// Lets launches of this function begin before the preceding kernel in the stream
-    /// completes.
-    ///
-    /// # Safety
-    /// The function must execute `griddepcontrol.wait` before any memory access that depends
-    /// on preceding work.
-    pub unsafe fn with_programmatic_serialization(self) -> Self {
-        Self {
-            programmatic: true,
-            ..self
-        }
-    }
-
-    /// Launches using CUDA's array of pointers to individual parameter values.
-    ///
-    /// # Safety
-    /// Parameters must match the CUDA ABI. The module, context, and device addresses must
-    /// remain live until completion; parameter values need only outlive this call.
-    pub unsafe fn launch_parameters(
-        &self,
-        grid: [u32; 3],
-        block: [u32; 3],
-        shared_bytes: u32,
-        stream: &Stream,
-        parameters: &mut [*mut c_void],
-    ) {
-        unsafe { self.try_launch_parameters(grid, block, shared_bytes, stream, parameters) }
-            .unwrap_or_else(|error| panic!("{error}"));
-    }
-
-    /// # Safety
-    /// The resource and lifetime requirements of [`Self::launch_parameters`] apply.
-    pub unsafe fn try_launch_parameters(
-        &self,
-        grid: [u32; 3],
-        block: [u32; 3],
-        shared_bytes: u32,
-        stream: &Stream,
-        parameters: &mut [*mut c_void],
-    ) -> Result<()> {
-        ffi::result(
-            unsafe {
-                ffi::cuLaunchKernel(
-                    self.raw,
-                    grid[0],
-                    grid[1],
-                    grid[2],
-                    block[0],
-                    block[1],
-                    block[2],
-                    shared_bytes,
-                    stream.raw,
-                    parameters.as_mut_ptr(),
-                    ptr::null_mut(),
-                )
-            },
-            "cuLaunchKernel",
-        )?;
-        Ok(())
     }
 
     /// CUDA function attribute identifier, as defined by `CUfunction_attribute`.
@@ -232,62 +163,6 @@ impl Function {
                 )
             },
             "cuFuncSetAttribute",
-        )?;
-        Ok(())
-    }
-
-    /// Launches with a single argument block passed by value as the only kernel parameter.
-    ///
-    /// # Safety
-    /// The argument block must match the kernel's parameter layout and every device
-    /// pointer inside it must stay valid until the launch completes.
-    pub unsafe fn launch(
-        &self,
-        grid: [u32; 3],
-        block: [u32; 3],
-        shared_bytes: u32,
-        stream: &Stream,
-        arguments: &mut [MaybeUninit<u8>],
-    ) {
-        unsafe { self.try_launch(grid, block, shared_bytes, stream, arguments) }
-            .unwrap_or_else(|error| panic!("{error}"));
-    }
-
-    /// # Safety
-    /// The resource and lifetime requirements of [`Self::launch`] apply.
-    pub unsafe fn try_launch(
-        &self,
-        grid: [u32; 3],
-        block: [u32; 3],
-        shared_bytes: u32,
-        stream: &Stream,
-        arguments: &mut [MaybeUninit<u8>],
-    ) -> Result<()> {
-        let mut parameters = [arguments.as_mut_ptr().cast::<c_void>()];
-        let mut attribute = ffi::CUlaunchAttribute {
-            id: ffi::CU_LAUNCH_ATTRIBUTE_PROGRAMMATIC_STREAM_SERIALIZATION,
-            padding: 0,
-            value: [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-        };
-        let config = ffi::CUlaunchConfig {
-            grid,
-            block,
-            shared_memory_bytes: shared_bytes,
-            stream: stream.raw,
-            attributes: &raw mut attribute,
-            attribute_count: self.programmatic.into(),
-        };
-        // SAFETY: guaranteed by the caller; the driver copies the block during the call.
-        ffi::result(
-            unsafe {
-                ffi::cuLaunchKernelEx(
-                    &raw const config,
-                    self.raw,
-                    parameters.as_mut_ptr(),
-                    ptr::null_mut(),
-                )
-            },
-            "cuLaunchKernelEx",
         )?;
         Ok(())
     }

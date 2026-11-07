@@ -388,7 +388,7 @@ impl<T: Element, L: Layout, const THREADS: usize, const R: usize, const C: usize
     /// thread of the block takes part, each copying its own chunks.
     #[primitive(
         lowering = Body,
-        architecture = 80,
+        targets = ">=sm_80",
         convergence = None,
         memory = ReadReachable(0),
         proof = Initialized
@@ -415,7 +415,7 @@ impl<
     /// Every producer thread takes part, each copying its own chunks.
     #[primitive(
         lowering = Body,
-        architecture = 80,
+        targets = ">=sm_80",
         convergence = None,
         memory = ReadReachable(0),
         proof = Initialized

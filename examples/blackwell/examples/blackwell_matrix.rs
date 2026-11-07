@@ -65,11 +65,10 @@ fn main() -> gpurs::Result<()> {
     let left_map = DeviceTensorMap::new(&stream, &left, SIZE, SIZE)?;
     let right_map = DeviceTensorMap::new(&stream, &right_transposed, SIZE, SIZE)?;
     let mut output = gpu.zeros::<f32>(SIZE * SIZE)?;
-    let configured = stream.launch(LaunchConfig {
-        grid: Grid::<Swizzle<8>>::dimensions::<TILE_ROWS, TILE_COLUMNS>([SIZE, SIZE], 1),
-        block: [THREADS, 1, 1],
-        shared_bytes: 0,
-    });
+    let configured = stream.launch(LaunchConfig::new(
+        Grid::<Swizzle<8>>::dimensions::<TILE_ROWS, TILE_COLUMNS>([SIZE, SIZE], 1),
+        [THREADS, 1, 1],
+    ));
     let seconds = matrix_benchmark::measure(&stream, || {
         multiply(&configured, &left_map, &right_map, &mut output)
     })?;

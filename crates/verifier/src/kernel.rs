@@ -1,4 +1,4 @@
-use gpurs_artifact::{self as artifact, Access, Extent, Parameter, Value};
+use gpurs_artifact::{self as artifact, Access, Extent, KernelEffects, Parameter, Value};
 use gpurs_rustc::{
     CrateDef, Instance, Mutability, RigidTy, Session, Shape, TyKind, layout, session,
 };
@@ -26,12 +26,7 @@ pub struct KernelPlan {
     pub result: Option<Value>,
     pub requirements: Vec<artifact::Clause>,
     pub preconditions: Vec<artifact::Clause>,
-    /// Whether the kernel reads the linear thread index.
-    pub uses_index: bool,
-    /// Whether the kernel issues asynchronous copies, which must land before the block exits.
-    pub asynchronous: bool,
-    /// Whether warpgroups exchange registers, which fixes the allocation to one block per SM.
-    pub reallocates: bool,
+    pub effects: KernelEffects,
 }
 
 /// The outcome of verifying one kernel.
@@ -115,7 +110,8 @@ pub fn kernel(
         analysis.collective_control();
         analysis.races();
     }
-    let extent = if result.is_some() || !analysis.findings.uses_index {
+    let effects = effects | analysis.findings.effects;
+    let extent = if result.is_some() || !effects.contains(KernelEffects::INDEX) {
         Extent::Single
     } else if !analysis.findings.geometry && analysis.findings.lengths.len() == 1 {
         Extent::Length(analysis.findings.lengths[0])
@@ -129,7 +125,7 @@ pub fn kernel(
                 "launch dimensions of `{}` cannot be inferred",
                 instance.name()
             ),
-            "launch this kernel with stream.launch(LaunchConfig { grid, block, shared_bytes })",
+            "launch this kernel with stream.launch(LaunchConfig::new(grid, block))",
         );
     }
     let residual: Vec<&Obligation> = analysis
@@ -174,7 +170,6 @@ pub fn kernel(
     let summary = diagnostic::summary(&analysis, &preconditions);
     let requirements = clauses(&analysis.findings.requirements);
     let preconditions = clauses(&preconditions);
-    let uses_index = analysis.findings.uses_index;
     drop(analysis);
     Some(Verification {
         plan: KernelPlan {
@@ -185,9 +180,7 @@ pub fn kernel(
             result,
             requirements,
             preconditions,
-            uses_index,
-            asynchronous: effects.asynchronous,
-            reallocates: effects.reallocates,
+            effects,
         },
         summary,
     })

@@ -23,7 +23,7 @@ impl<T: Copy> Scatter<T> {
     #[cfg_attr(gpurs_device, rustc_diagnostic_item = "gpurs_scatter_load")]
     #[primitive(
         lowering = Body,
-        architecture = 0,
+        targets = ">=sm_0",
         convergence = None,
         memory = Encapsulated,
         proof = Varying
@@ -41,7 +41,7 @@ impl<T: Copy> Scatter<T> {
     #[cfg_attr(gpurs_device, rustc_diagnostic_item = "gpurs_scatter_store")]
     #[primitive(
         lowering = Body,
-        architecture = 0,
+        targets = ">=sm_0",
         convergence = None,
         memory = Encapsulated,
         proof = Varying

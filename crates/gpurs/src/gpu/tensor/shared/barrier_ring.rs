@@ -34,7 +34,7 @@ impl<S: Stage<Produced>, const STAGES: usize, const PRODUCERS: usize>
 {
     #[primitive(
         lowering = SharedArray,
-        architecture = 80,
+        targets = ">=sm_80",
         convergence = None,
         memory = SharedAllocation,
         proof = Uniform
@@ -45,7 +45,7 @@ impl<S: Stage<Produced>, const STAGES: usize, const PRODUCERS: usize>
     /// site owns distinct storage. Every thread of the block takes part.
     #[primitive(
         lowering = Body,
-        architecture = 80,
+        targets = ">=sm_80",
         convergence = Block,
         memory = Encapsulated,
         proof = Uniform
@@ -83,7 +83,7 @@ impl<S: Stage<Produced>, const STAGES: usize, const PRODUCERS: usize>
     /// writer's load proof from the closure. Every producer thread takes part.
     #[primitive(
         lowering = Body,
-        architecture = 80,
+        targets = ">=sm_80",
         convergence = Warp,
         memory = ReadReachable(2),
         proof = Uniform
@@ -116,7 +116,7 @@ impl<S: Stage<Produced>, const STAGES: usize, const PRODUCERS: usize>
     /// Every consumer thread takes part.
     #[primitive(
         lowering = Body,
-        architecture = 80,
+        targets = ">=sm_80",
         convergence = Warp,
         memory = Encapsulated,
         proof = Uniform
@@ -167,18 +167,14 @@ fn barrier<const STAGES: usize>(barriers: *mut [u64; STAGES], index: u32) -> u32
     gpu::intrinsics::shared_window(barriers as u64) as u32 + index % STAGES as u32 * 8
 }
 
-/// Arrives on `barrier` once every prior `cp.async` of this thread completes, as one of the
-/// barrier's expected arrivals.
-/// # Safety
-/// The barrier is initialized and its current phase expects this arrival.
-#[primitive(
-    lowering = Assembly {
-        text: "cp.async.mbarrier.arrive.noinc.shared.b64 [$0];",
-        constraints: "r,~{memory}",
-    },
-    architecture = 80,
-    convergence = None,
-    memory = Encapsulated,
-    proof = Uniform
-)]
-unsafe fn arrive_on_completion(barrier: u32);
+primitives! {
+    targets = ">=sm_80", convergence = None, memory = Encapsulated, proof = Uniform;
+
+    /// Arrives on `barrier` once every prior `cp.async` of this thread completes, as one of the
+    /// barrier's expected arrivals.
+    /// # Safety
+    /// The barrier is initialized and its current phase expects this arrival.
+    unsafe "cp.async.mbarrier.arrive.noinc.shared.b64 [$0];"
+    "r,~{memory}"
+    pub(self) fn arrive_on_completion(barrier: u32);
+}

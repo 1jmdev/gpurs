@@ -7,7 +7,7 @@ use std::{
     slice,
 };
 
-use gpurs_driver::{self as driver, Function};
+use gpurs_driver::{self as driver, Function, LaunchRequest};
 
 use crate::{
     DeviceSlice, DeviceSliceMut, Error, Event, ExternalAccess, Launch, LaunchConfig, Ownership,
@@ -21,7 +21,7 @@ use crate::{
 
 pub struct CapturedKernel {
     pub(crate) function: Function,
-    pub(crate) config: LaunchConfig,
+    pub(crate) request: LaunchRequest,
     pub(crate) arguments: Vec<MaybeUninit<u8>>,
     pub(crate) accesses: Vec<Access>,
 }
@@ -52,13 +52,9 @@ impl CapturedOperation {
         unsafe {
             match &mut self.0 {
                 Operation::Kernel(kernel) => {
-                    kernel.function.try_launch(
-                        kernel.config.grid.map(|value| value as u32),
-                        kernel.config.block.map(|value| value as u32),
-                        kernel.config.shared_bytes as u32,
-                        stream,
-                        &mut kernel.arguments,
-                    )?;
+                    kernel
+                        .function
+                        .try_launch(&kernel.request, stream, &mut kernel.arguments)?;
                 }
                 Operation::Fill { access, value } => {
                     driver::try_fill_async(

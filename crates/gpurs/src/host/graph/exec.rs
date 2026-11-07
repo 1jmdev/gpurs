@@ -1,4 +1,4 @@
-use std::{cell::RefCell, ffi::c_void, ptr, rc::Rc};
+use std::{cell::RefCell, ffi::c_void, rc::Rc};
 
 use gpurs_driver::KernelNodeParameters;
 
@@ -135,14 +135,7 @@ impl GraphExec {
         unsafe {
             self.raw.try_set_kernel(
                 self.origin.0.nodes[index],
-                &KernelNodeParameters {
-                    function: kernel.function.as_raw(),
-                    grid: kernel.config.grid.map(|value| value as u32),
-                    block: kernel.config.block.map(|value| value as u32),
-                    shared_bytes: kernel.config.shared_bytes as u32,
-                    parameters: parameters.as_mut_ptr(),
-                    extra: ptr::null_mut(),
-                },
+                &KernelNodeParameters::new(&kernel.function, &kernel.request, &mut parameters),
             )?;
         }
         self.replacements[index] = Some(kernel.accesses);

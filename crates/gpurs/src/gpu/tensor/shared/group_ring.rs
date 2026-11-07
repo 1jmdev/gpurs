@@ -24,7 +24,7 @@ impl<S: Stage<Asynchronous>, const STAGES: usize> GroupRing<S, STAGES> {
     /// Allocates the stages in block-shared memory; each call site owns distinct storage.
     #[primitive(
         lowering = SharedArray,
-        architecture = 80,
+        targets = ">=sm_80",
         convergence = None,
         memory = SharedAllocation,
         proof = SharedRegion
@@ -36,7 +36,7 @@ impl<S: Stage<Asynchronous>, const STAGES: usize> GroupRing<S, STAGES> {
     /// stage.
     #[primitive(
         lowering = Body,
-        architecture = 80,
+        targets = ">=sm_80",
         convergence = Block,
         memory = ReadReachable(1),
         proof = Uniform
@@ -55,7 +55,7 @@ impl<S: Stage<Asynchronous>, const STAGES: usize> GroupRing<S, STAGES> {
     /// Returns the oldest completed stage while initializing every tile of the next stage.
     #[primitive(
         lowering = Body,
-        architecture = 80,
+        targets = ">=sm_80",
         convergence = Block,
         memory = BlockFenceReadReachable(1),
         proof = Uniform
@@ -73,7 +73,7 @@ impl<S: Stage<Asynchronous>, const STAGES: usize> GroupRing<S, STAGES> {
     /// Returns the oldest completed stage without filling another; an empty ring yields zeros.
     #[primitive(
         lowering = Body,
-        architecture = 80,
+        targets = ">=sm_80",
         convergence = Block,
         memory = BlockFence,
         proof = Uniform
@@ -88,7 +88,7 @@ impl<S: Stage<Asynchronous>, const STAGES: usize> GroupRing<S, STAGES> {
     /// tile.
     #[primitive(
         lowering = Body,
-        architecture = 80,
+        targets = ">=sm_80",
         convergence = Block,
         memory = BlockFence,
         proof = Uniform

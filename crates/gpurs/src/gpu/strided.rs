@@ -24,7 +24,7 @@ impl<T: Copy, const N: usize> Strided<T, N> {
     /// Loads a row-major logical index, wrapping indices beyond the logical extent.
     #[primitive(
         lowering = Body,
-        architecture = 0,
+        targets = ">=sm_0",
         convergence = None,
         memory = Encapsulated,
         proof = Varying
@@ -48,11 +48,10 @@ impl<T: Copy, const N: usize> Strided<T, N> {
     }
 }
 
-#[primitive(
-    lowering = Assembly { text: "div.u64 $0, $1, $2;", constraints: "=l,l,l" },
-    architecture = 20,
-    convergence = None,
-    memory = None,
-    proof = Varying
-)]
-pub(super) fn divide(dividend: u64, divisor: u64) -> u64;
+primitives! {
+    targets = ">=sm_20", convergence = None, memory = None, proof = Varying;
+
+    "div.u64 $0, $1, $2;"
+    "=l,l,l"
+    pub(super) fn divide(dividend: u64, divisor: u64) -> u64;
+}

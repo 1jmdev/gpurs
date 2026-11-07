@@ -4,7 +4,7 @@ use super::{
     Accumulator, FragmentA, FragmentB, hopper::intrinsics as hopper_intrinsics, instruction,
     sealed::Sealed,
 };
-use crate::gpu::{BFloat16, Half, intrinsics};
+use crate::gpu::{BFloat16, BFloat162, Half, Half2};
 
 /// An element type of tensor-core operands: 16-bit floats multiplied by `mma.sync.m16n8k16`.
 pub trait Element: Copy + Default + 'static + Sealed {
@@ -41,7 +41,7 @@ impl Element for Half {
 
     #[inline]
     fn pack(low: f32, high: f32) -> u32 {
-        intrinsics::pack_half(low, high)
+        Half2::from_f32(low, high).0
     }
 
     #[inline]
@@ -69,7 +69,7 @@ impl Element for BFloat16 {
 
     #[inline]
     fn pack(low: f32, high: f32) -> u32 {
-        intrinsics::pack_bfloat16(low, high)
+        BFloat162::from_f32(low, high).0
     }
 
     #[inline]

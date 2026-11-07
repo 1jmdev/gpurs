@@ -1,4 +1,4 @@
-use gpurs_artifact::{Convergence, Memory, Primitive, Proof};
+use gpurs_artifact::{Convergence, KernelEffects, Memory, Primitive, Proof};
 use gpurs_rustc::{CrateDef, Instance, Item};
 
 use super::{Analysis, Origin, Pointer, Region, State, Value, ValueData, state};
@@ -71,7 +71,7 @@ impl Analysis<'_, '_> {
             Memory::None | Memory::BlockFence | Memory::SharedAllocation | Memory::Encapsulated => {
             }
         }
-        self.findings.uses_index |= primitive.geometry();
+        self.findings.effects |= primitive.effects() & KernelEffects::INDEX;
         self.findings.geometry |= primitive.proof != Proof::Index
             && (primitive.geometry()
                 || primitive.convergence != Convergence::None

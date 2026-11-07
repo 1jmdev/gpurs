@@ -24,7 +24,7 @@ impl<T: Copy> Indexed<T> {
     /// Wraps the logical index, then clamps the loaded source index before gathering.
     #[primitive(
         lowering = Body,
-        architecture = 0,
+        targets = ">=sm_0",
         convergence = None,
         memory = Encapsulated,
         proof = Varying

@@ -19,8 +19,6 @@ pub use core::sync::atomic::{
     AtomicI32, AtomicI64, AtomicIsize, AtomicU32, AtomicU64, AtomicUsize, Ordering,
 };
 
-use gpurs_macros::primitive;
-
 use super::{BFloat16, BFloat162, Half, Half2};
 
 macro_rules! floating_atomic {
@@ -147,64 +145,65 @@ macro_rules! packed_atomic {
 packed_atomic!(AtomicHalf2, Half2, Half, AtomicHalf);
 packed_atomic!(AtomicBFloat162, BFloat162, BFloat16, AtomicBFloat16);
 
-macro_rules! native_add {
-    ($name:ident, $value:ty, $architecture:literal, $text:literal, $constraints:literal) => {
-        impl $name {
-            /// Native relaxed GPU-scope add, returning the previous value.
-            #[primitive(
-                                lowering = Assembly { text: $text, constraints: $constraints },
-                                architecture = $architecture,
-                                convergence = None,
-                                memory = Atomic,
-                                proof = Varying
-                            )]
-            pub fn fetch_add(&self, value: $value) -> $value;
-        }
-    };
+impl AtomicF32 {
+    primitives! {
+        convergence = None, memory = Atomic, proof = Varying;
+
+        /// Native relaxed GPU-scope add, returning the previous value.
+        >= sm_60 "atom.gpu.add.f32 $0, [$1], $2;" "=f,l,f"
+        fn fetch_add(&self, value: f32) -> f32;
+    }
 }
 
-native_add!(
-    AtomicF32,
-    f32,
-    60,
-    "atom.gpu.add.f32 $0, [$1], $2;",
-    "=f,l,f"
-);
-native_add!(
-    AtomicF64,
-    f64,
-    60,
-    "atom.gpu.add.f64 $0, [$1], $2;",
-    "=d,l,d"
-);
-native_add!(
-    AtomicHalf,
-    Half,
-    70,
-    "atom.gpu.add.noftz.f16 $0, [$1], $2;",
-    "=h,l,h"
-);
-native_add!(
-    AtomicBFloat16,
-    BFloat16,
-    90,
-    "atom.gpu.add.noftz.bf16 $0, [$1], $2;",
-    "=h,l,h"
-);
-native_add!(
-    AtomicHalf2,
-    Half2,
-    60,
-    "atom.gpu.add.noftz.f16x2 $0, [$1], $2;",
-    "=r,l,r"
-);
-native_add!(
-    AtomicBFloat162,
-    BFloat162,
-    90,
-    "atom.gpu.add.noftz.bf16x2 $0, [$1], $2;",
-    "=r,l,r"
-);
+impl AtomicF64 {
+    primitives! {
+        convergence = None, memory = Atomic, proof = Varying;
+
+        /// Native relaxed GPU-scope add, returning the previous value.
+        >= sm_60 "atom.gpu.add.f64 $0, [$1], $2;" "=d,l,d"
+        fn fetch_add(&self, value: f64) -> f64;
+    }
+}
+
+impl AtomicHalf {
+    primitives! {
+        convergence = None, memory = Atomic, proof = Varying;
+
+        /// Native relaxed GPU-scope add, returning the previous value.
+        >= sm_70 "atom.gpu.add.noftz.f16 $0, [$1], $2;" "=h,l,h"
+        fn fetch_add(&self, value: Half) -> Half;
+    }
+}
+
+impl AtomicBFloat16 {
+    primitives! {
+        convergence = None, memory = Atomic, proof = Varying;
+
+        /// Native relaxed GPU-scope add, returning the previous value.
+        >= sm_90 "atom.gpu.add.noftz.bf16 $0, [$1], $2;" "=h,l,h"
+        fn fetch_add(&self, value: BFloat16) -> BFloat16;
+    }
+}
+
+impl AtomicHalf2 {
+    primitives! {
+        convergence = None, memory = Atomic, proof = Varying;
+
+        /// Native relaxed GPU-scope add, returning the previous value.
+        >= sm_60 "atom.gpu.add.noftz.f16x2 $0, [$1], $2;" "=r,l,r"
+        fn fetch_add(&self, value: Half2) -> Half2;
+    }
+}
+
+impl AtomicBFloat162 {
+    primitives! {
+        convergence = None, memory = Atomic, proof = Varying;
+
+        /// Native relaxed GPU-scope add, returning the previous value.
+        >= sm_90 "atom.gpu.add.noftz.bf16x2 $0, [$1], $2;" "=r,l,r"
+        fn fetch_add(&self, value: BFloat162) -> BFloat162;
+    }
+}
 
 impl AtomicF32 {
     /// CAS fallback; relaxed GPU ordering. See the module's NaN and zero contract.

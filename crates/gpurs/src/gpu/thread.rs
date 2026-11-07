@@ -10,7 +10,7 @@ pub struct Dim3 {
 
 #[primitive(
     lowering = Dimensions("tid"),
-    architecture = 0,
+    targets = ">=sm_0",
     convergence = None,
     memory = None,
     proof = ThreadAxes
@@ -19,7 +19,7 @@ pub fn thread_id() -> Dim3;
 
 #[primitive(
     lowering = Dimensions("ctaid"),
-    architecture = 0,
+    targets = ">=sm_0",
     convergence = None,
     memory = None,
     proof = BlockAxes
@@ -29,7 +29,7 @@ pub fn block_id() -> Dim3;
 /// Threads per block in each dimension.
 #[primitive(
     lowering = Dimensions("ntid"),
-    architecture = 0,
+    targets = ">=sm_0",
     convergence = None,
     memory = None,
     proof = BlockDimensionAxes
@@ -39,7 +39,7 @@ pub fn block_dim() -> Dim3;
 /// Blocks per grid in each dimension.
 #[primitive(
     lowering = Dimensions("nctaid"),
-    architecture = 0,
+    targets = ">=sm_0",
     convergence = None,
     memory = None,
     proof = GridDimensionAxes
@@ -49,7 +49,7 @@ pub fn grid_dim() -> Dim3;
 /// Global linear thread index, with x varying fastest within both grid and block.
 #[primitive(
     lowering = Index,
-    architecture = 0,
+    targets = ">=sm_0",
     convergence = None,
     memory = None,
     proof = Index
@@ -59,7 +59,7 @@ pub fn index() -> usize;
 /// Waits until every thread of the block reaches this barrier.
 #[primitive(
     lowering = Barrier,
-    architecture = 20,
+    targets = ">=sm_20",
     convergence = Block,
     memory = BlockFence,
     proof = Uniform
@@ -70,7 +70,7 @@ pub fn sync_block();
 /// Every thread must participate, including when called repeatedly inside a loop.
 #[primitive(
     lowering = Body,
-    architecture = 20,
+    targets = ">=sm_20",
     convergence = Block,
     memory = Encapsulated,
     proof = Uniform
@@ -102,7 +102,7 @@ impl<const THREADS: usize> Default for Block<THREADS> {
 impl<const THREADS: usize> Block<THREADS> {
     #[primitive(
         lowering = Body,
-        architecture = 0,
+        targets = ">=sm_0",
         convergence = None,
         memory = None,
         proof = BlockShape

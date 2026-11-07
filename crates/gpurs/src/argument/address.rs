@@ -44,7 +44,7 @@ impl<T> DeviceAddress<T> {
     /// readable, with storage retained and dependencies registered for the queued work.
     #[primitive(
         lowering = Body,
-        architecture = 0,
+        targets = ">=sm_0",
         convergence = None,
         memory = Encapsulated,
         proof = Varying
@@ -59,7 +59,7 @@ impl<T> DeviceAddress<T> {
     /// without racing or violating aliases. Retain storage and register all queued writes.
     #[primitive(
         lowering = Body,
-        architecture = 0,
+        targets = ">=sm_0",
         convergence = None,
         memory = Encapsulated,
         proof = Varying

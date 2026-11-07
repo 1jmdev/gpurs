@@ -62,6 +62,7 @@ dependencies = [
 name = "gpurs-artifact"
 version = "0.1.0"
 dependencies = [
+ "bitflags",
  "postcard",
  "serde",
  "serde_json",

@@ -7,6 +7,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+bitflags.workspace = true
 postcard.workspace = true
 serde.workspace = true
 serde_json.workspace = true
