@@ -25,6 +25,7 @@ impl Proofs<'_> {
                 .map_or_else(Polynomial::default, Polynomial::constant)
         });
         let mut goals = Vec::new();
+        let mut slot = None;
         match expression.variable() {
             Some(Atom::Thread(axis)) => coordinates[*axis] = index.clone(),
             Some(atom @ Atom::Quotient(..))
@@ -43,6 +44,25 @@ impl Proofs<'_> {
                     return None;
                 }
                 coordinates[*axis] = index.scale(divisor as i128)?.offset(lane)?;
+            }
+            _ if let Some((variable, stride)) = slots(expression) => {
+                goals.push(Predicate::new(index.clone(), Relation::NonNegative));
+                goals.push(Predicate::new(
+                    Polynomial::atom(Atom::BlockDimension(0)).offset(-stride)?,
+                    Relation::NonNegative,
+                ));
+                coordinates[0] = Polynomial::remainder(index.clone(), Polynomial::constant(stride));
+                let value = Polynomial::quotient(index.clone(), Polynomial::constant(stride));
+                let bounds = &self.variables[variable];
+                goals.push(Predicate::new(
+                    value.add(&bounds.lower, -1)?,
+                    Relation::NonNegative,
+                ));
+                goals.push(Predicate::new(
+                    bounds.upper.as_ref()?.add(&value, -1)?,
+                    Relation::NonNegative,
+                ));
+                slot = Some((variable, value));
             }
             _ => {
                 let offset = expression.coefficient(&[]).copied().unwrap_or(0);
@@ -96,8 +116,12 @@ impl Proofs<'_> {
             requirement.extend(engine.prove(&goal, reason)?);
         }
         for guard in guards {
+            let polynomial = match &slot {
+                Some((variable, value)) => replace(&guard.predicate.polynomial, *variable, value)?,
+                None => guard.predicate.polynomial.clone(),
+            };
             let predicate = Predicate::new(
-                self.substitute(&guard.predicate.polynomial, &coordinates)?,
+                self.substitute(&polynomial, &coordinates)?,
                 guard.predicate.relation,
             );
             requirement.extend(engine.prove(&predicate, reason)?);
@@ -105,4 +129,37 @@ impl Proofs<'_> {
         }
         Some(requirement)
     }
+}
+
+/// The loop variable and stride of a write `thread_id.x + stride * slot`.
+pub fn slots(expression: &Polynomial) -> Option<(usize, i128)> {
+    if expression.0.len() != 2 || expression.coefficient(&[Atom::Thread(0)]) != Some(&1) {
+        return None;
+    }
+    expression
+        .0
+        .iter()
+        .find_map(|(monomial, coefficient)| match monomial.as_slice() {
+            [Atom::Variable(variable)] if *coefficient > 0 => Some((*variable, *coefficient)),
+            _ => None,
+        })
+}
+
+/// `expression` with `variable` replaced by `value`; `None` when it occurs nested.
+fn replace(expression: &Polynomial, variable: usize, value: &Polynomial) -> Option<Polynomial> {
+    let replaced = expression
+        .0
+        .iter()
+        .try_fold(Polynomial::default(), |sum, (monomial, coefficient)| {
+            let product = monomial
+                .iter()
+                .try_fold(Polynomial::constant(*coefficient), |product, atom| {
+                    product.multiply(&match atom {
+                        Atom::Variable(found) if *found == variable => value.clone(),
+                        _ => Polynomial::atom(atom.clone()),
+                    })
+                })?;
+            sum.add(&product, 1)
+        })?;
+    (!replaced.variables().contains(&variable)).then_some(replaced)
 }

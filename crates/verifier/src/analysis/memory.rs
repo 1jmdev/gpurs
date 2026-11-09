@@ -1,3 +1,4 @@
+use gpurs_artifact::{Access, Parameter};
 use gpurs_rustc::{BinOp, FxHashSet};
 
 use super::{Analysis, Region, program};
@@ -7,6 +8,144 @@ use crate::{
 };
 
 impl Analysis<'_, '_> {
+    /// Read and written slices whose accesses all share one per-thread index.
+    pub fn in_place(&self) -> Vec<[usize; 2]> {
+        let accesses = &self.findings.accesses;
+        if self.failure.is_some()
+            || accesses
+                .iter()
+                .any(|access| access.origin.region == Region::Unknown)
+        {
+            return Vec::new();
+        }
+        let index = |parameter: usize| {
+            let mut indices = accesses
+                .iter()
+                .filter(|access| access.origin.region == Region::Parameter(parameter))
+                .map(|access| {
+                    access
+                        .origin
+                        .index
+                        .as_ref()
+                        .filter(|_| !access.atomic && access.partition.is_none())
+                });
+            let first = indices.next()??;
+            indices.all(|index| index == Some(first)).then_some(first)
+        };
+        let slices = |wanted: Access| {
+            self.parameters
+                .iter()
+                .enumerate()
+                .filter(move |(_, parameter)| {
+                    matches!(parameter.metadata, Parameter::Slice { access } if access == wanted)
+                })
+                .map(|(position, _)| position)
+        };
+        slices(Access::Read)
+            .flat_map(|read| slices(Access::Write).map(move |write| [read, write]))
+            .filter(|&[read, write]| index(read).is_some() && index(read) == index(write))
+            .collect()
+    }
+
+    /// Written slices that are never read and whose every element some thread writes, with the
+    /// launch conditions that coverage needs.
+    pub fn initializes(&self) -> Vec<(usize, Requirement)> {
+        let accesses = &self.findings.accesses;
+        if self.failure.is_some()
+            || accesses
+                .iter()
+                .any(|access| access.origin.region == Region::Unknown)
+        {
+            return Vec::new();
+        }
+        self.parameters
+            .iter()
+            .enumerate()
+            .filter(|(_, parameter)| {
+                matches!(
+                    parameter.metadata,
+                    Parameter::Slice {
+                        access: Access::Write
+                    }
+                )
+            })
+            .filter_map(|(parameter, _)| {
+                let mut own = accesses
+                    .iter()
+                    .filter(|access| access.origin.region == Region::Parameter(parameter));
+                if own.clone().next().is_none()
+                    || own
+                        .clone()
+                        .any(|access| !access.write || access.atomic || access.partition.is_some())
+                {
+                    return None;
+                }
+                own.find_map(|write| self.coverage(write, parameter))
+                    .map(|requirement| (parameter, requirement))
+            })
+            .collect()
+    }
+
+    /// Whether `branch` heads the `for` loop over a range whose item is the slot of a write
+    /// `thread_id.x + stride * slot`, so the loop reaches the write once per item.
+    fn counted(&self, write: &super::Access, branch: usize, successor: usize) -> bool {
+        write
+            .origin
+            .index
+            .as_ref()
+            .and_then(proof::slots)
+            .is_some_and(|(variable, _)| {
+                self.variables[variable].description == "a loop counter"
+                    && program::reachable(
+                        &self.program.successors,
+                        successor,
+                        branch,
+                        &FxHashSet::default(),
+                    )
+            })
+    }
+
+    fn coverage(&self, write: &super::Access, parameter: usize) -> Option<Requirement> {
+        let index = Polynomial::atom(Atom::Index);
+        if write.origin.index.as_ref() != Some(&index) || !write.origin.path.is_empty() {
+            return None;
+        }
+        let mut guards = Vec::new();
+        for &(branch, successor) in &self.program.controls[write.block] {
+            if !self.program.branches[branch].as_ref()?.exact_guards {
+                return None;
+            }
+            let (_, facts) = self.program.edges[branch]
+                .iter()
+                .find(|(target, _)| *target == successor)?;
+            if facts.is_empty() {
+                return None;
+            }
+            guards.extend(facts.iter().cloned());
+        }
+        let length = Polynomial::atom(Atom::Length(parameter));
+        let range = Fact::new(Predicate::new(
+            length.add(&index, -1)?.offset(-1)?,
+            Relation::NonNegative,
+        ));
+        let engine = self.engine(&Facts::from(vec![range]));
+        let reason = "every element of an uninitialized output must be written";
+        let threads = (0..3).try_fold(Polynomial::constant(1), |product, axis| {
+            product
+                .multiply(&Polynomial::atom(Atom::BlockDimension(axis)))?
+                .multiply(&Polynomial::atom(Atom::GridDimension(axis)))
+        })?;
+        let mut requirement = engine.prove(
+            &Predicate::new(threads.add(&length, -1)?, Relation::NonNegative),
+            reason,
+        )?;
+        for guard in guards {
+            requirement.extend(engine.prove(&guard.predicate, reason)?);
+            requirement.extend(guard.requirement.iter().cloned());
+        }
+        Some(requirement)
+    }
+
     pub fn races(&mut self) {
         for index in 0..self.findings.accesses.len() {
             if !self.findings.accesses[index].write {
@@ -164,6 +303,7 @@ impl Analysis<'_, '_> {
                     }
                     let mut guards = Vec::new();
                     let mut preceding = FxHashSet::from_iter([write.block]);
+                    let mut counted = false;
                     for &(branch, successor) in &self.program.controls[write.block] {
                         preceding.insert(branch);
                         if self.program.controls[access.block].contains(&(branch, successor))
@@ -172,6 +312,10 @@ impl Analysis<'_, '_> {
                             continue;
                         }
                         if !self.program.branches[branch].as_ref()?.exact_guards {
+                            if !counted && self.counted(write, branch, successor) {
+                                counted = true;
+                                continue;
+                            }
                             return None;
                         }
                         let (_, facts) = self.program.edges[branch]

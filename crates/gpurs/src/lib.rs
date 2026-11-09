@@ -29,7 +29,7 @@ pub mod raw;
 
 pub use argument::{
     Argument, ArgumentMut, DeviceAddress, DeviceDescriptor, DeviceIndexed, DeviceScatter,
-    DeviceStrided, DeviceTensorMap,
+    DeviceStrided, DeviceTensorMap, Duplicates,
 };
 pub use error::{Error, Result};
 pub(crate) use gpurs_driver::Ownership;
@@ -39,8 +39,8 @@ pub use host::{
     context::Gpu,
     graph::{Capture, Graph, GraphExec},
     memory::{
-        BitPattern, Buffer, DeviceSlice, DeviceSliceMut, DeviceValue, PinnedBuffer, Transfer, View,
-        ViewMut,
+        BitPattern, Buffer, DeviceOutput, DeviceSlice, DeviceSliceMut, DeviceValue, PinnedBuffer,
+        Transfer, View, ViewMut,
     },
     stream::{Launch, LaunchConfig, Stream},
 };

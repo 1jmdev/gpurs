@@ -4,10 +4,17 @@ use super::{
     Accumulator, FragmentA, FragmentB, hopper::intrinsics as hopper_intrinsics, instruction,
     sealed::Sealed,
 };
-use crate::gpu::{BFloat16, BFloat162, Half, Half2};
+use crate::gpu::{BFloat16, BFloat162, Half, Half2, Tf32};
 
-/// An element type of tensor-core operands: 16-bit floats multiplied by `mma.sync.m16n8k16`.
+/// An element type of tensor-core operands: 16-bit floats multiplied by `mma.sync.m16n8k16`,
+/// and f32 rounded to TF32 and multiplied by `mma.sync.m16n8k8`, which only `mma.sync` and
+/// depth-major tiles support.
 pub trait Element: Copy + Default + 'static + Sealed {
+    /// The depth of one 32-byte operand slice.
+    const DEPTH: usize = 16;
+    /// Whether `ldmatrix.trans` reads the elements, for extent-major tiles.
+    #[doc(hidden)]
+    const TRANSPOSABLE: bool = true;
     /// The `CUtensorMapDataType` of the element.
     #[doc(hidden)]
     const TENSOR_MAP_TYPE: i32;
@@ -60,6 +67,43 @@ impl Element for Half {
         d: [Accumulator<f32>; 32],
     ) -> [Accumulator<f32>; 32] {
         hopper_intrinsics::warpgroup_multiply_accumulate_f16(a, b, d)
+    }
+}
+
+impl Element for f32 {
+    const DEPTH: usize = 8;
+    const TRANSPOSABLE: bool = false;
+    const TENSOR_MAP_TYPE: i32 = 7;
+    const FORMAT: u32 = 0;
+
+    #[inline]
+    fn pack(low: f32, _: f32) -> u32 {
+        low.to_bits()
+    }
+
+    #[inline]
+    fn multiply_accumulate(
+        a: &FragmentA<f32>,
+        b: &FragmentB<f32>,
+        c: Accumulator<f32>,
+    ) -> Accumulator<f32> {
+        let round = |bits: u32| Tf32::from_f32(f32::from_bits(bits)).to_bits();
+        let [w, x, y, z] = a.registers();
+        let [u, v] = b.registers();
+        instruction::multiply_accumulate_tf32(
+            FragmentA::new([round(w), round(x), round(y), round(z)]),
+            FragmentB::new([round(u), round(v)]),
+            c,
+        )
+    }
+
+    #[inline]
+    unsafe fn warpgroup_multiply_accumulate(
+        _: u64,
+        _: u64,
+        d: [Accumulator<f32>; 32],
+    ) -> [Accumulator<f32>; 32] {
+        d
     }
 }
 

@@ -12,19 +12,28 @@ use crate::{
     },
 };
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Duplicates {
+    #[default]
+    Disable,
+    KeepLast,
+}
+
 pub struct DeviceScatter<T> {
     buffer: Buffer<Scatter<T>>,
     dependencies: [ExternalAccess; 2],
     indices: Buffer<usize>,
     target_len: usize,
-    validation: Option<(Buffer<usize>, Buffer<u32>)>,
+    duplicates: Duplicates,
+    validation: Option<(Buffer<usize>, Buffer<u64>)>,
     _upload: Option<Transfer<PinnedBuffer<Scatter<T>>>>,
 }
 
 impl<T: Copy> DeviceScatter<T> {
-    /// Snapshots GPU indices asynchronously, suppressing out-of-bounds and duplicate entries.
-    /// Every occurrence of a duplicate destination is disabled. Subsequent source changes
-    /// do not affect this view; use `DeviceScatter::update_device` to refresh it.
+    /// Snapshots GPU indices asynchronously, suppressing out-of-bounds entries and resolving
+    /// duplicate destinations by `duplicates`, so every destination keeps at most one entry.
+    /// Subsequent source changes do not affect this view; use `DeviceScatter::update_device`
+    /// to refresh it.
     ///
     /// # Errors
     /// Returns CUDA failures or invalid operation errors.
@@ -32,6 +41,7 @@ impl<T: Copy> DeviceScatter<T> {
         stream: &Stream,
         target: &mut impl DeviceSliceMut<T>,
         indices: &impl DeviceSlice<usize>,
+        duplicates: Duplicates,
     ) -> Result<DeviceScatter<T>> {
         let gpu = Gpu {
             device: stream.device.clone(),
@@ -66,6 +76,7 @@ impl<T: Copy> DeviceScatter<T> {
             ],
             indices: Buffer::new(allocation.allocation, indices.len()),
             target_len,
+            duplicates,
             validation: None,
             _upload: None,
         };
@@ -150,6 +161,7 @@ impl<T: Copy> DeviceScatter<T> {
             ],
             indices,
             target_len,
+            duplicates: Duplicates::Disable,
             validation: None,
             _upload: None,
         })
@@ -158,7 +170,8 @@ impl<T: Copy> DeviceScatter<T> {
 
 impl<T> DeviceScatter<T> {
     /// Revalidates a same-length GPU index buffer without host readback or synchronization.
-    /// Duplicate destinations and out-of-bounds indices disable the corresponding entries.
+    /// Out-of-bounds indices disable their entries and duplicate destinations resolve by the
+    /// policy the view was created with.
     /// Existing graph consumers automatically wait for the refreshed snapshot.
     ///
     /// # Errors
@@ -200,7 +213,7 @@ impl<T> DeviceScatter<T> {
                 )
             })?)?;
             let allocation =
-                gpu.allocate(Layout::array::<u32>(self.target_len).map_err(|_| {
+                gpu.allocate(Layout::array::<u64>(self.target_len).map_err(|_| {
                     Error::InvalidOperation(
                         "scatter ownership allocation exceeds the size range".to_owned(),
                     )
@@ -229,6 +242,7 @@ impl<T> DeviceScatter<T> {
             self.len() as u64,
             self.target_len as u64,
             self.indices.allocation.pointer + self.indices.offset as u64,
+            u64::from(self.duplicates == Duplicates::KeepLast),
         ]
         .into_iter()
         .flat_map(u64::to_ne_bytes)

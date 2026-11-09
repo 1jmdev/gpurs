@@ -12,6 +12,11 @@ pub struct Kernel {
     pub result: Option<Value>,
     pub requirements: Vec<Clause>,
     pub preconditions: Vec<Clause>,
+    /// Read and written slice parameters a launch may bind to the same elements.
+    pub in_place: Vec<[usize; 2]>,
+    /// Written slice parameters the kernel fully writes without reading, with the launch
+    /// conditions under which it does.
+    pub initializes: Vec<(usize, Vec<Clause>)>,
     pub entry: Entry,
     pub shared: SharedMemory,
 }

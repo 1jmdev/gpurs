@@ -2,7 +2,7 @@
 
 use std::{
     any,
-    cell::RefCell,
+    cell::{Cell, RefCell},
     mem::{self, MaybeUninit},
     ptr,
     rc::{Rc, Weak},
@@ -29,6 +29,8 @@ pub struct KernelLaunch<'a, S: Launch> {
     pub(crate) position: usize,
     pub(crate) lengths: Vec<u64>,
     pub(crate) accesses: Vec<Access>,
+    pub(crate) slices: Vec<[usize; 2]>,
+    pub(crate) outputs: Vec<(usize, Rc<Cell<bool>>)>,
 }
 
 pub(crate) struct ValidatedLaunch {
@@ -91,6 +93,8 @@ pub fn kernel<'a, S: Launch, G>(
         position: 0,
         kernel,
         accesses: stream.stream().accesses.take(),
+        slices: Vec::new(),
+        outputs: Vec::new(),
     })
 }
 
@@ -131,6 +135,23 @@ impl<S: Launch> KernelLaunch<'_, S> {
                 }
             }
         };
+        let leaf = |variable: &Variable| match *variable {
+            Variable::BlockDimension(axis) => config.block[axis] as i128,
+            Variable::GridDimension(axis) => config.grid[axis] as i128,
+            Variable::Length(parameter) => i128::from(self.lengths[parameter]),
+            Variable::Scalar(parameter) => {
+                let Parameter::Value(value) = metadata.parameters[parameter] else {
+                    unreachable!("scalar launch variables are value parameters")
+                };
+                i128::from(self.scalar(parameter, 0, value.size.min(8) as usize))
+            }
+            Variable::ScalarElement(parameter, offset, size) => {
+                i128::from(self.scalar(parameter, offset, size))
+            }
+            Variable::Quotient(..) | Variable::Remainder(..) => {
+                unreachable!("quotients are evaluated by the polynomial")
+            }
+        };
         let validated = kernel
             .validated
             .borrow()
@@ -163,23 +184,6 @@ impl<S: Launch> KernelLaunch<'_, S> {
                     function.try_reserve_shared(shared_bytes)?;
                 }
             }
-            let leaf = |variable: &Variable| match *variable {
-                Variable::BlockDimension(axis) => config.block[axis] as i128,
-                Variable::GridDimension(axis) => config.grid[axis] as i128,
-                Variable::Length(parameter) => i128::from(self.lengths[parameter]),
-                Variable::Scalar(parameter) => {
-                    let Parameter::Value(value) = metadata.parameters[parameter] else {
-                        unreachable!("scalar launch variables are value parameters")
-                    };
-                    i128::from(self.scalar(parameter, 0, value.size.min(8) as usize))
-                }
-                Variable::ScalarElement(parameter, offset, size) => {
-                    i128::from(self.scalar(parameter, offset, size))
-                }
-                Variable::Quotient(..) | Variable::Remainder(..) => {
-                    unreachable!("quotients are evaluated by the polynomial")
-                }
-            };
             for clause in metadata.requirements.iter().chain(&metadata.preconditions) {
                 if !clause.holds(&leaf) {
                     return Err(self.violated(clause, &leaf));
@@ -198,7 +202,27 @@ impl<S: Launch> KernelLaunch<'_, S> {
             }
             threads
         };
+        for (parameter, _) in &self.outputs {
+            let clauses = metadata
+                .initializes
+                .iter()
+                .find(|(output, _)| output == parameter)
+                .ok_or_else(|| {
+                    Error::InvalidOperation(format!(
+                        "`{}` does not provably write every element of its uninitialized output",
+                        metadata.name
+                    ))
+                })?;
+            if let Some(clause) = clauses.1.iter().find(|clause| !clause.holds(&leaf)) {
+                return Err(self.violated(clause, &leaf));
+            }
+        }
         let capture = self.stream.capture();
+        if capture.is_some() && !self.outputs.is_empty() {
+            return Err(Error::InvalidOperation(
+                "graph kernels must write initialized storage".to_owned(),
+            ));
+        }
         if capture.is_some() && metadata.result.is_some() {
             return Err(Error::InvalidOperation(
                 "graph kernels must write existing storage".to_owned(),
@@ -226,7 +250,7 @@ impl<S: Launch> KernelLaunch<'_, S> {
             })
             .transpose()?;
         let mut accesses = mem::take(&mut self.accesses);
-        reject_aliasing(&accesses, &metadata.name)?;
+        self.reject_aliasing(&accesses)?;
         if let Some(buffer) = &result {
             accesses.push(Access::write(
                 &buffer.allocation,
@@ -237,6 +261,7 @@ impl<S: Launch> KernelLaunch<'_, S> {
             tracking::try_order(&stream.raw, &accesses)?;
         }
         if threads == 0 {
+            self.outputs.iter().for_each(|(_, written)| written.set(true));
             return Ok(result);
         }
         let linear = config.grid[1] == 1
@@ -282,6 +307,7 @@ impl<S: Launch> KernelLaunch<'_, S> {
                 })?;
         }
         tracking::complete(&stream.raw, &accesses);
+        self.outputs.iter().for_each(|(_, written)| written.set(true));
         accesses.clear();
         *stream.accesses.borrow_mut() = accesses;
         *stream.arguments.borrow_mut() = self.arguments;
@@ -295,6 +321,38 @@ impl<S: Launch> KernelLaunch<'_, S> {
             // SAFETY: integer scalar parameters are fully initialized.
             word | u64::from(unsafe { self.arguments[offset + byte].assume_init() }) << (8 * byte)
         })
+    }
+
+    #[track_caller]
+    fn reject_aliasing(&self, accesses: &[Access]) -> Result<()> {
+        let parameter = |index| {
+            self.slices
+                .iter()
+                .find(|[access, _]| *access == index)
+                .map(|[_, parameter]| *parameter)
+        };
+        for (index, access) in accesses.iter().enumerate() {
+            for (other_index, other) in accesses.iter().enumerate().skip(index + 1) {
+                let in_place = access.range == other.range
+                    && parameter(index).zip(parameter(other_index)).is_some_and(|(a, b)| {
+                        self.lengths[a] == self.lengths[b]
+                            && self.kernel.metadata.in_place.iter().any(|pair| {
+                                *pair == [a, b] || *pair == [b, a]
+                            })
+                    });
+                if Rc::ptr_eq(&access.allocation, &other.allocation)
+                    && (access.write || other.write)
+                    && tracking::overlaps(&access.range, &other.range)
+                    && !in_place
+                {
+                    return Err(Error::InvalidOperation(format!(
+                        "arguments of `{}` overlap while at least one of them is written",
+                        self.kernel.metadata.name
+                    )));
+                }
+            }
+        }
+        Ok(())
     }
 
     #[track_caller]
@@ -315,22 +373,6 @@ impl<S: Launch> KernelLaunch<'_, S> {
     }
 }
 
-#[track_caller]
-fn reject_aliasing(accesses: &[Access], kernel: &str) -> Result<()> {
-    for (index, access) in accesses.iter().enumerate() {
-        for other in &accesses[index + 1..] {
-            if Rc::ptr_eq(&access.allocation, &other.allocation)
-                && (access.write || other.write)
-                && tracking::overlaps(&access.range, &other.range)
-            {
-                return Err(Error::InvalidOperation(format!(
-                    "arguments of `{kernel}` overlap while at least one of them is written"
-                )));
-            }
-        }
-    }
-    Ok(())
-}
 
 #[inline(never)]
 #[track_caller]

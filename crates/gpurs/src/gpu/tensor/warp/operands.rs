@@ -64,21 +64,34 @@ impl<T: Element, const ROWS: usize, const COLUMNS: usize> OperandTile<T>
     const DEPTH: usize = ROWS;
 
     fn fragment_a(&self, extent: usize, depth: usize) -> FragmentA<T> {
+        const { assert!(T::TRANSPOSABLE, "extent-major tiles hold 16-bit elements") };
+        self.transposed_a(extent, depth)
+    }
+
+    fn fragments_b(&self, extent: usize, depth: usize) -> [FragmentB<T>; 2] {
+        const { assert!(T::TRANSPOSABLE, "extent-major tiles hold 16-bit elements") };
+        self.transposed_b(extent, depth)
+    }
+
+    fn fragment_b(&self, extent: usize, depth: usize) -> FragmentB<T> {
+        const { assert!(T::TRANSPOSABLE, "extent-major tiles hold 16-bit elements") };
+        FragmentB::new(instruction::load_matrices_transposed_2(
+            self.lane_address(depth, extent, false),
+        ))
+    }
+}
+
+impl<T: Element, const ROWS: usize, const COLUMNS: usize> SharedTile<T, ROWS, COLUMNS, ExtentMajor> {
+    fn transposed_a(&self, extent: usize, depth: usize) -> FragmentA<T> {
         FragmentA::new(instruction::load_matrices_transposed_4(
             self.lane_address(depth, extent, true),
         ))
     }
 
-    fn fragments_b(&self, extent: usize, depth: usize) -> [FragmentB<T>; 2] {
+    fn transposed_b(&self, extent: usize, depth: usize) -> [FragmentB<T>; 2] {
         let [a, b, c, d] =
             instruction::load_matrices_transposed_4(self.lane_address(depth, extent, false));
         [FragmentB::new([a, b]), FragmentB::new([c, d])]
-    }
-
-    fn fragment_b(&self, extent: usize, depth: usize) -> FragmentB<T> {
-        FragmentB::new(instruction::load_matrices_transposed_2(
-            self.lane_address(depth, extent, false),
-        ))
     }
 }
 
@@ -108,13 +121,13 @@ impl<const BM: usize, const BN: usize, const FM: usize, const FN: usize>
         const {
             assert!(A::EXTENT == BM, "`A` tiles span the rows of the block tile");
             assert!(
-                A::DEPTH.is_multiple_of(16),
-                "tiles hold whole 16-deep slices"
+                A::DEPTH.is_multiple_of(T::DEPTH),
+                "tiles hold whole slices"
             );
         };
         let mut fragments = [FragmentA::default(); FM];
         for i in 0..FM {
-            fragments[i] = tile.fragment_a(self.row().wrapping_add(i * 16), slice * 16);
+            fragments[i] = tile.fragment_a(self.row().wrapping_add(i * 16), slice * T::DEPTH);
         }
         fragments
     }
@@ -133,20 +146,20 @@ impl<const BM: usize, const BN: usize, const FM: usize, const FN: usize>
                 "`B` tiles span the columns of the block tile"
             );
             assert!(
-                B::DEPTH.is_multiple_of(16),
-                "tiles hold whole 16-deep slices"
+                B::DEPTH.is_multiple_of(T::DEPTH),
+                "tiles hold whole slices"
             );
         };
         let mut fragments = [FragmentB::default(); FN];
         for pair in 0..FN / 2 {
             let [first, second] =
-                tile.fragments_b(self.column().wrapping_add(pair * 16), slice * 16);
+                tile.fragments_b(self.column().wrapping_add(pair * 16), slice * T::DEPTH);
             fragments[pair * 2] = first;
             fragments[pair * 2 + 1] = second;
         }
         if FN % 2 == 1 {
             fragments[FN - 1] =
-                tile.fragment_b(self.column().wrapping_add((FN - 1) * 8), slice * 16);
+                tile.fragment_b(self.column().wrapping_add((FN - 1) * 8), slice * T::DEPTH);
         }
         fragments
     }

@@ -11,6 +11,6 @@ mod tensor_map;
 pub use address::{DeviceAddress, DeviceDescriptor};
 pub use indexed::DeviceIndexed;
 pub use reference::{Argument, ArgumentMut};
-pub use scatter::DeviceScatter;
+pub use scatter::{DeviceScatter, Duplicates};
 pub use strided::DeviceStrided;
 pub use tensor_map::DeviceTensorMap;

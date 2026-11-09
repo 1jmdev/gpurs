@@ -1,4 +1,4 @@
-use std::{mem::MaybeUninit, rc::Rc, slice};
+use std::{cell::Cell, mem::MaybeUninit, rc::Rc, slice};
 
 use gpurs_artifact::Parameter;
 
@@ -12,13 +12,13 @@ impl<S: Launch> KernelLaunch<'_, S> {
     /// # Safety
     /// `T` and this position match the kernel's immutable slice parameter.
     pub unsafe fn slice<T>(&mut self, argument: &impl DeviceSlice<T>) -> Result<()> {
-        self.slice_argument::<T>(argument.span(), false)
+        self.slice_argument::<T>(argument.span(), false, argument.written())
     }
 
     /// # Safety
     /// `T` and this position match the kernel's mutable slice parameter.
     pub unsafe fn slice_mut<T>(&mut self, argument: &mut impl DeviceSliceMut<T>) -> Result<()> {
-        self.slice_argument::<T>(argument.span(), true)
+        self.slice_argument::<T>(argument.span(), true, argument.written())
     }
 
     /// # Safety
@@ -65,11 +65,24 @@ impl<S: Launch> KernelLaunch<'_, S> {
         Ok(buffer)
     }
 
-    fn slice_argument<T>(&mut self, span: Span<'_>, mutable: bool) -> Result<()> {
+    fn slice_argument<T>(
+        &mut self,
+        span: Span<'_>,
+        mutable: bool,
+        written: Option<&Rc<Cell<bool>>>,
+    ) -> Result<()> {
         if !Rc::ptr_eq(&self.stream.stream().device, &span.allocation.device) {
             return Err(Error::InvalidOperation(
                 "kernel argument belongs to another GPU".to_owned(),
             ));
+        }
+        if let Some(written) = written.filter(|written| !written.get()) {
+            if !mutable {
+                return Err(Error::InvalidOperation(
+                    "an output is read before a kernel writes it".to_owned(),
+                ));
+            }
+            self.outputs.push((self.position, written.clone()));
         }
         let effect = self.effect(mutable);
         let offset = self.next() as usize;
@@ -77,6 +90,7 @@ impl<S: Launch> KernelLaunch<'_, S> {
         self.write_word(offset, pointer);
         self.write_word(offset + 8, span.len as u64);
         self.lengths[self.position - 1] = span.len as u64;
+        self.slices.push([self.accesses.len(), self.position - 1]);
         self.accesses.push(Access {
             allocation: span.allocation.clone(),
             range: span.bytes::<T>(),

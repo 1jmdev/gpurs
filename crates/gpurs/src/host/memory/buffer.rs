@@ -1,5 +1,6 @@
 use std::{
     any,
+    cell::Cell,
     marker::PhantomData,
     mem::MaybeUninit,
     ops::{Bound, Range, RangeBounds},
@@ -35,6 +36,13 @@ pub struct ViewMut<'a, T> {
     marker: PhantomData<&'a mut [T]>,
 }
 
+/// Uninitialized storage that only kernels proven to write every element may receive, and
+/// that becomes a buffer once one has.
+pub struct DeviceOutput<T> {
+    pub(crate) buffer: Buffer<T>,
+    pub(crate) written: Rc<Cell<bool>>,
+}
+
 pub struct DeviceValue<T> {
     pub(crate) buffer: Buffer<T>,
 }
@@ -49,6 +57,7 @@ pub struct Span<'a> {
 
 pub trait DeviceSlice<T>: Sealed<T> {
     fn download(&self) -> Result<Vec<T>> {
+        unwritten(self)?;
         download(self.span())
     }
 
@@ -66,7 +75,9 @@ pub trait DeviceSliceMut<T>: DeviceSlice<T> {
     where
         T: Copy,
     {
-        fill(self.span(), stream, value)
+        fill(self.span(), stream, value)?;
+        self.written().inspect(|written| written.set(true));
+        Ok(())
     }
 }
 
@@ -182,6 +193,15 @@ impl<'a> Span<'a> {
     }
 }
 
+pub(crate) fn unwritten<T>(slice: &(impl Sealed<T> + ?Sized)) -> Result<()> {
+    if slice.written().is_some_and(|written| !written.get()) {
+        return Err(Error::InvalidOperation(
+            "an output is read before a kernel writes it".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 #[track_caller]
 fn download<T>(span: Span<'_>) -> Result<Vec<T>> {
     let _context = span.allocation.device.context.try_enter()?;
@@ -277,6 +297,31 @@ impl<T> Sealed<T> for ViewMut<'_, T> {
     }
 }
 
+impl<T> Sealed<T> for DeviceOutput<T> {
+    fn span(&self) -> Span<'_> {
+        self.buffer.whole()
+    }
+
+    fn written(&self) -> Option<&Rc<Cell<bool>>> {
+        Some(&self.written)
+    }
+}
+
+impl<T> DeviceOutput<T> {
+    pub fn is_written(&self) -> bool {
+        self.written.get()
+    }
+
+    /// # Errors
+    /// Returns an invalid operation error before a kernel or fill writes the output.
+    pub fn into_buffer(self) -> Result<Buffer<T>> {
+        unwritten(&self)?;
+        Ok(self.buffer)
+    }
+}
+
+impl<T> DeviceSlice<T> for DeviceOutput<T> {}
+impl<T> DeviceSliceMut<T> for DeviceOutput<T> {}
 impl<T> DeviceSlice<T> for Buffer<T> {}
 impl<T> DeviceSlice<T> for View<'_, T> {}
 impl<T> DeviceSlice<T> for ViewMut<'_, T> {}

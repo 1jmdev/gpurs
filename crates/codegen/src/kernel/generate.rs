@@ -79,6 +79,8 @@ impl ModuleBuilder<'_> {
             result: plan.result,
             requirements: plan.requirements,
             preconditions: plan.preconditions,
+            in_place: plan.in_place,
+            initializes: plan.initializes,
             entry: Entry {
                 symbol,
                 linear,

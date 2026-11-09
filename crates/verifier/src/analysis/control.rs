@@ -230,7 +230,7 @@ impl Analysis<'_, '_> {
                 .findings
                 .accesses
                 .iter()
-                .any(|access| matches!(access.origin.region, Region::Shared(..)))
+                .any(|access| matches!(access.origin.region, Region::Shared(..)) || access.write)
         {
             return;
         }

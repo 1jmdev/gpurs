@@ -52,6 +52,8 @@ bit_patterns!(
     i32,
     u64,
     i64,
+    usize,
+    isize,
     f32,
     f64,
     Half,

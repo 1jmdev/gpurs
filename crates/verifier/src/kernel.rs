@@ -27,6 +27,8 @@ pub struct KernelPlan {
     pub requirements: Vec<artifact::Clause>,
     pub preconditions: Vec<artifact::Clause>,
     pub effects: KernelEffects,
+    pub in_place: Vec<[usize; 2]>,
+    pub initializes: Vec<(usize, Vec<artifact::Clause>)>,
 }
 
 /// The outcome of verifying one kernel.
@@ -167,9 +169,23 @@ pub fn kernel(
             })
             .collect()
     };
+    let (in_place, initializes) = if effects.contains(KernelEffects::ASYNCHRONOUS) {
+        (Vec::new(), Vec::new())
+    } else {
+        (analysis.in_place(), analysis.initializes())
+    };
     let summary = diagnostic::summary(&analysis, &preconditions);
     let requirements = clauses(&analysis.findings.requirements);
     let preconditions = clauses(&preconditions);
+    let initializes = initializes
+        .into_iter()
+        .map(|(parameter, requirement)| {
+            (
+                parameter,
+                clauses(&requirement.iter().cloned().collect::<Vec<_>>()),
+            )
+        })
+        .collect();
     drop(analysis);
     Some(Verification {
         plan: KernelPlan {
@@ -181,6 +197,8 @@ pub fn kernel(
             requirements,
             preconditions,
             effects,
+            in_place,
+            initializes,
         },
         summary,
     })

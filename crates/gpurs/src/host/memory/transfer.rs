@@ -11,7 +11,8 @@ use std::{
 use gpurs_driver::{self as driver, Event};
 
 use crate::{
-    Buffer, DeviceSlice, DeviceSliceMut, DeviceValue, Error, Gpu, Result, Stream,
+    BitPattern, Buffer, DeviceOutput, DeviceSlice, DeviceSliceMut, DeviceValue, Error, Gpu, Result,
+    Stream,
     host::{
         context::Device,
         launch,
@@ -187,6 +188,19 @@ impl DeviceAllocation {
         let mut buffer = Buffer::new(self.allocation.clone(), len);
         buffer.offset = offset;
         buffer
+    }
+}
+
+impl DeviceAllocation {
+    /// Elements `offset..offset + len` as an output for kernels that write all of them.
+    pub fn output<T: BitPattern>(&self, offset: usize, len: usize) -> DeviceOutput<T> {
+        let uninit = self.uninit::<T>(offset, len);
+        let mut buffer = Buffer::new(uninit.allocation.clone(), len);
+        buffer.offset = uninit.offset;
+        DeviceOutput {
+            buffer,
+            written: Rc::default(),
+        }
     }
 }
 

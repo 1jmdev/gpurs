@@ -41,6 +41,7 @@ impl<T> FragmentA<T> {
 impl<T: Element> FragmentA<T> {
     /// Rounds adjacent 16x8 f32 blocks into one 16x16 `A` operand.
     pub fn rounded(left: &Accumulator<f32>, right: &Accumulator<f32>) -> Self {
+        const { assert!(size_of::<T>() == 2, "rounded fragments hold 16-bit elements") };
         let [a, b, c, d] = left.values;
         let [e, f, g, h] = right.values;
         Self::new([T::pack(a, b), T::pack(c, d), T::pack(e, f), T::pack(g, h)])
