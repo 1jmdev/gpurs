@@ -11,6 +11,7 @@ mod compilation;
 mod launcher;
 mod primitive;
 mod references;
+mod slices;
 mod storage;
 
 use proc_macro::TokenStream;

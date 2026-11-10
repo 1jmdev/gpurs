@@ -3,7 +3,10 @@ use proc_macro2::{Delimiter, Group, TokenStream as Tokens, TokenTree};
 use quote::{format_ident, quote};
 use syn::{File, ImplItem, Item, Meta, Result, Visibility, parse_quote, visit_mut::VisitMut};
 
-use crate::attribute::{self, Options};
+use crate::{
+    attribute::{self, Options},
+    slices,
+};
 
 struct DevicePaths;
 
@@ -206,6 +209,7 @@ fn device_macro(tokens: Tokens, device: bool) -> (Tokens, bool) {
 pub(crate) fn device_item(item: Item, options: Options) -> Result<Tokens> {
     match item {
         Item::Fn(mut function) => {
+            slices::expand(&mut function)?;
             annotate(
                 &mut function.attrs,
                 Annotation::Device(function.sig.ident.to_string()),

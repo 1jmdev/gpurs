@@ -87,6 +87,10 @@ pub fn math(sess: Session<'_>, def: DefId) -> Option<String> {
                 | "log10"
                 | "powf"
                 | "powi"
+                | "tan"
+                | "atan2"
+                | "ln_1p"
+                | "exp_m1"
         )
         .then(|| format!("{operation}{suffix}"));
     }
@@ -101,7 +105,8 @@ pub fn math(sess: Session<'_>, def: DefId) -> Option<String> {
         "fmax" => "maxnum",
         "rint" => "round_ties_even",
         "sqrt" | "fabs" | "floor" | "ceil" | "trunc" | "round" | "fma" | "copysign" | "sin"
-        | "cos" | "exp" | "exp2" | "log" | "log2" | "log10" | "pow" => operation,
+        | "cos" | "exp" | "exp2" | "log" | "log2" | "log10" | "pow" | "tan" | "atan2" | "log1p"
+        | "expm1" => operation,
         _ => return None,
     };
     Some(format!("{operation}{suffix}"))

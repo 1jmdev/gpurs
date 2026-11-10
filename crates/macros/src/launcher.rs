@@ -3,6 +3,8 @@ use proc_macro2::{Delimiter, Group, TokenStream as Tokens, TokenTree};
 use quote::{ToTokens, format_ident, quote};
 use syn::{FnArg, GenericParam, Generics, ReceiverKind, ReturnType, Signature, Type};
 
+use crate::slices;
+
 pub(crate) fn type_parameters(generics: &Generics) -> Vec<Tokens> {
     generics
         .params
@@ -56,7 +58,14 @@ pub(crate) fn root(
                         element => quote!(&#mutable ::gpurs::DeviceValue<#element>),
                     }
                 }
-                value => quote!(#value),
+                value => match slices::slice_array(value) {
+                    Some((element, mutable, array)) => {
+                        let mutable = mutable.then(|| quote!(mut));
+                        let length = &array.len;
+                        quote!([&#mutable ::gpurs::Buffer<#element>; #length])
+                    }
+                    None => quote!(#value),
+                },
             },
         };
         inputs.push(quote!(#argument: #ty));
@@ -134,7 +143,31 @@ pub(crate) fn launcher(
                     ),
                 }
             }
-            value => (quote!(#value), quote!(__launch.value(&#argument);)),
+            value => match slices::slice_array(value) {
+                Some((element, true, array)) => {
+                    let length = &array.len;
+                    (
+                        quote!([&mut impl ::gpurs::DeviceSliceMut<#element>; #length]),
+                        quote! {
+                            for __slice in #argument {
+                                __launch.slice_mut(__slice)?;
+                            }
+                        },
+                    )
+                }
+                Some((element, false, array)) => {
+                    let length = &array.len;
+                    (
+                        quote!([&impl ::gpurs::DeviceSlice<#element>; #length]),
+                        quote! {
+                            for __slice in #argument {
+                                __launch.slice(__slice)?;
+                            }
+                        },
+                    )
+                }
+                None => (quote!(#value), quote!(__launch.value(&#argument);)),
+            },
         };
         inputs.push(quote!(#argument: #host_type));
         arguments.push(call);

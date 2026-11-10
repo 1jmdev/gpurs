@@ -324,7 +324,10 @@ impl FunctionBuilder<'_, '_> {
                 "round_ties_even" => "rint",
                 "pow" | "powf" => "pow",
                 "powi" => "powi",
-                "sin" | "cos" | "exp" | "exp2" | "log" | "log2" | "log10" => operation,
+                "ln_1p" => "log1p",
+                "exp_m1" => "expm1",
+                "sin" | "cos" | "tan" | "atan2" | "log1p" | "expm1" | "exp" | "exp2" | "log"
+                | "log2" | "log10" => operation,
                 _ => return None,
             };
             let fast = if self.fast_math
