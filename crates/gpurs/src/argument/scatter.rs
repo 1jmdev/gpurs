@@ -33,16 +33,17 @@ impl<T: Copy> DeviceScatter<T> {
     /// Snapshots GPU indices asynchronously, suppressing out-of-bounds entries and resolving
     /// duplicate destinations by `duplicates`, so every destination keeps at most one entry.
     /// Subsequent source changes do not affect this view; use `DeviceScatter::update_device`
-    /// to refresh it.
+    /// to refresh it. A capturing `queue` records the validation into its graph.
     ///
     /// # Errors
     /// Returns CUDA failures or invalid operation errors.
     pub fn from_device(
-        stream: &Stream,
+        queue: &impl Launch,
         target: &mut impl DeviceSliceMut<T>,
         indices: &impl DeviceSlice<usize>,
         duplicates: Duplicates,
     ) -> Result<DeviceScatter<T>> {
+        let stream = queue.stream();
         let gpu = Gpu {
             device: stream.device.clone(),
         };
@@ -80,7 +81,7 @@ impl<T: Copy> DeviceScatter<T> {
             validation: None,
             _upload: None,
         };
-        snapshot.update_device(stream, indices)?;
+        snapshot.update_device(queue, indices)?;
         snapshot._upload =
             Some(stream.try_copy_descriptor(&mut snapshot.buffer, slice::from_ref(&descriptor))?);
         Ok(snapshot)

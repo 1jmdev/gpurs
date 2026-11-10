@@ -1,6 +1,6 @@
 use std::{ffi::c_void, ptr};
 
-use crate::{Context, Function, LaunchRequest, Ownership, Result, Stream, ffi};
+use crate::{Context, Error, Function, LaunchRequest, Ownership, Result, Stream, ffi};
 
 #[derive(Debug)]
 pub struct Graph {
@@ -65,6 +65,9 @@ impl Graph {
             },
             "cuStreamGetCaptureInfo",
         )?;
+        if status != 1 {
+            return Err(Error::new("cuStreamGetCaptureInfo", 901));
+        }
         Ok(if count == 0 {
             Vec::new()
         } else {
