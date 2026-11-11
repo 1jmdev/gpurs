@@ -12,7 +12,7 @@ use crate::{
 pub struct Module(Rc<ModuleInner>);
 
 struct ModuleInner {
-    raw: driver::Module,
+    raw: Rc<driver::Module>,
     device: Rc<Device>,
 }
 
@@ -20,8 +20,8 @@ struct ModuleInner {
 #[derive(Clone)]
 pub struct Kernel {
     module: Module,
-    function: Function,
-    name: String,
+    pub(super) function: Function,
+    pub(super) name: String,
 }
 
 impl Gpu {
@@ -31,10 +31,25 @@ impl Gpu {
     /// Returns CUDA failures or invalid operation errors.
     pub fn load_ptx(&self, ptx: &str) -> Result<Module> {
         let _context = self.device.context.try_enter()?;
-        Ok(Module(Rc::new(ModuleInner {
-            raw: driver::Module::try_load_ptx(ptx)?,
-            device: self.device.clone(),
-        })))
+        Ok(self.module(Rc::new(driver::Module::try_load_ptx(ptx)?)))
+    }
+
+    /// The module of PTX embedded in the binary, loaded on first use and shared by every later
+    /// call on this device.
+    ///
+    /// ```no_run
+    /// const COPY: &str = "…"; // include_str!("copy.ptx")
+    /// # fn main() -> gpurs::Result<()> {
+    /// let gpu = gpurs::Gpu::new(0)?;
+    /// let kernel = gpu.embedded_ptx(COPY)?.kernel("copy")?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Errors
+    /// Returns CUDA failures to load the module.
+    pub fn embedded_ptx(&self, ptx: &'static str) -> Result<Module> {
+        Ok(self.module(self.device.embedded_ptx(ptx)?))
     }
 
     ///
@@ -44,10 +59,14 @@ impl Gpu {
     /// `image` must satisfy the complete-module contract of `load_module`.
     pub unsafe fn load_module(&self, image: &[u8]) -> Result<Module> {
         let _context = self.device.context.try_enter()?;
-        Ok(Module(Rc::new(ModuleInner {
-            raw: driver::Module::try_load(image)?,
+        Ok(self.module(Rc::new(driver::Module::try_load(image)?)))
+    }
+
+    fn module(&self, raw: Rc<driver::Module>) -> Module {
+        Module(Rc::new(ModuleInner {
+            raw,
             device: self.device.clone(),
-        })))
+        }))
     }
 }
 

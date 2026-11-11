@@ -7,7 +7,7 @@ use std::{
     slice,
 };
 
-use gpurs_artifact::{Artifact, Kernel, PARAMETERS_OFFSET, RESULT_OFFSET, Target};
+use gpurs_artifact::{Artifact, Image, Kernel, PARAMETERS_OFFSET, RESULT_OFFSET, Target};
 use gpurs_driver::{self as driver, Context, Function, LaunchAttributes, Module, Ownership};
 
 use crate::{
@@ -28,7 +28,7 @@ pub struct Gpu {
 }
 
 pub(crate) struct Device {
-    pub scatter_validation: OnceCell<Module>,
+    embedded_ptx: RefCell<HashMap<usize, Rc<Module>>>,
     pub transfer: Rc<driver::Stream>,
     pub download: Rc<driver::Stream>,
     pub release: Rc<driver::Stream>,
@@ -75,7 +75,7 @@ impl Gpu {
         context.try_set_pool_release_threshold(u64::MAX)?;
         let artifact = embedded_artifact(context.try_compute_capability()?)?;
         let device = Device {
-            scatter_validation: OnceCell::new(),
+            embedded_ptx: RefCell::default(),
             transfer: Rc::new(driver::Stream::try_with_context(&context, 0)?),
             download: Rc::new(driver::Stream::try_with_context(&context, 0)?),
             release: Rc::new(driver::Stream::try_with_context(&context, 0)?),
@@ -177,6 +177,19 @@ impl Gpu {
 }
 
 impl Device {
+    /// The module of `ptx`, loaded once per device and keyed by the text's address.
+    pub fn embedded_ptx(&self, ptx: &'static str) -> Result<Rc<Module>> {
+        if let Some(module) = self.embedded_ptx.borrow().get(&ptx.as_ptr().addr()) {
+            return Ok(module.clone());
+        }
+        let _context = self.context.try_enter()?;
+        let module = Rc::new(Module::try_load_ptx(ptx)?);
+        self.embedded_ptx
+            .borrow_mut()
+            .insert(ptx.as_ptr().addr(), module.clone());
+        Ok(module)
+    }
+
     #[track_caller]
     pub fn kernel(
         &self,
@@ -208,7 +221,10 @@ impl Device {
             )));
         };
         if self.modules[index].get().is_none() {
-            let _ = self.modules[index].set(Module::try_load(&self.artifact.modules[index].cubin)?);
+            let _ = self.modules[index].set(match &self.artifact.modules[index].image {
+                Image::Cubin(cubin) => Module::try_load(cubin)?,
+                Image::Ptx(ptx) => Module::try_load_ptx(ptx)?,
+            });
         }
         let module = self.modules[index].get().expect("module was loaded");
         let (offsets, size) = gpurs_artifact::parameter_offsets(&metadata.parameters);

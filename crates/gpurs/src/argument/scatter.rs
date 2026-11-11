@@ -1,6 +1,6 @@
 use std::{alloc::Layout, collections::HashSet, mem::MaybeUninit, rc::Rc, slice};
 
-use gpurs_driver::{LaunchAttributes, Module};
+use gpurs_driver::LaunchAttributes;
 
 use crate::{
     Argument, Buffer, DeviceAddress, DeviceSlice, DeviceSliceMut, Error, ExternalAccess, Gpu,
@@ -199,11 +199,7 @@ impl<T> DeviceScatter<T> {
             ));
         }
         let _context = device.context.try_enter()?;
-        if device.scatter_validation.get().is_none() {
-            let _ = device
-                .scatter_validation
-                .set(Module::try_load_ptx(include_str!("scatter.ptx"))?);
-        }
+        let module = device.embedded_ptx(include_str!("scatter.ptx"))?;
         if self.validation.is_none() {
             let gpu = Gpu {
                 device: device.clone(),
@@ -255,11 +251,7 @@ impl<T> DeviceScatter<T> {
         ];
         for name in ["claim_indices", "select_indices"] {
             operations.push(CapturedOperation::kernel(CapturedKernel {
-                function: device
-                    .scatter_validation
-                    .get()
-                    .expect("validation module was loaded")
-                    .try_function(name)?,
+                function: module.try_function(name)?,
                 request: LaunchConfig::new([blocks as usize, 1, 1], [256, 1, 1])
                     .request(LaunchAttributes::default()),
                 arguments: arguments.clone(),

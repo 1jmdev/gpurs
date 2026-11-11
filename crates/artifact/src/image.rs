@@ -37,11 +37,31 @@ pub struct Reference {
     pub statement: String,
 }
 
-#[derive(Serialize, Deserialize, Debug, Default)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct Module<'a> {
     #[serde(borrow)]
-    pub cubin: Cow<'a, [u8]>,
+    pub image: Image<'a>,
     pub kernels: Vec<Kernel>,
+}
+
+/// The device code of one module: assembled machine code, or PTX the driver compiles when the
+/// module is first loaded.
+#[derive(Serialize, Deserialize, Debug)]
+pub enum Image<'a> {
+    #[serde(borrow)]
+    Cubin(Cow<'a, [u8]>),
+    #[serde(borrow)]
+    Ptx(Cow<'a, str>),
+}
+
+/// The form in which a build embeds device code.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Embedding {
+    /// Machine code assembled by ptxas at build time.
+    #[default]
+    Cubin,
+    /// PTX compiled by the driver at run time, without ptxas at build time.
+    Ptx,
 }
 
 impl<'a> Artifact<'a> {

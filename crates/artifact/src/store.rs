@@ -7,6 +7,8 @@ use std::{
     process,
 };
 
+use crate::Embedding;
+
 /// Every input of a cached product; a new input is a new field, never an ad hoc string.
 #[derive(Hash)]
 pub enum Key<'a> {
@@ -37,6 +39,7 @@ pub enum Key<'a> {
         toolkit: &'a [Option<OsString>],
         registers: Option<&'a str>,
         dump: Option<&'a str>,
+        embedding: Embedding,
     },
 }
 

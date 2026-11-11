@@ -15,7 +15,7 @@ pub use configuration::{
     Stage, cargo,
 };
 pub use fragment::{Fragment, link};
-pub use image::{Artifact, LoweredCrate, LoweredTarget, Module, Reference};
+pub use image::{Artifact, Embedding, Image, LoweredCrate, LoweredTarget, Module, Reference};
 pub use kernel::{
     Access, Clause, Entry, Extent, Kernel, PARAMETERS_OFFSET, Parameter, Polynomial, Predicate,
     RESULT_OFFSET, Relation, SharedMemory, TransferType, Value, Variable, parameter_offsets,

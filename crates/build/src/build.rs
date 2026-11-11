@@ -9,8 +9,8 @@ use std::{
 };
 
 use gpurs_artifact::{
-    self as artifact, BuildConfiguration, CONFIGURATION, CONFIGURATION_VARIABLE, Crate, Key,
-    Libraries, LoweredCrate, Stage, Store, Target,
+    self as artifact, BuildConfiguration, CONFIGURATION, CONFIGURATION_VARIABLE, Crate,
+    Embedding, Key, Libraries, LoweredCrate, Stage, Store, Target,
 };
 use gpurs_nvvm::TOOLKIT_ENVIRONMENT;
 
@@ -62,11 +62,16 @@ pub fn compile(architecture: &str) {
 }
 
 pub fn compile_architectures(architectures: &[&str]) {
+    compile_with(architectures, Embedding::Cubin);
+}
+
+/// Compiles the kernels for `architectures`, embedding them as `embedding` describes.
+pub fn compile_with(architectures: &[&str], embedding: Embedding) {
     let arguments: Vec<OsString> = env::args_os().collect();
     let code = match Mode::detect(&arguments) {
         Mode::BuildScript => {
             println!("cargo::rustc-check-cfg=cfg(gpurs_device)");
-            if let Err(error) = build(architectures) {
+            if let Err(error) = build(architectures, embedding) {
                 fail(&error.to_string());
             }
             return;
@@ -86,7 +91,7 @@ pub fn compile_architectures(architectures: &[&str]) {
     process::exit(code)
 }
 
-fn build(architectures: &[&str]) -> Result<()> {
+fn build(architectures: &[&str], embedding: Embedding) -> Result<()> {
     if architectures.is_empty() {
         return Err("at least one GPU architecture is required".into());
     }
@@ -157,6 +162,7 @@ fn build(architectures: &[&str]) -> Result<()> {
         toolkit: &TOOLKIT_ENVIRONMENT.map(env::var_os),
         registers: registers.as_deref(),
         dump: dump.as_deref(),
+        embedding,
     }
     .digest();
     if !image.exists() || fs::read_to_string(&identity_path).ok() != Some(identity.clone()) {
@@ -177,7 +183,15 @@ fn build(architectures: &[&str]) -> Result<()> {
                         .as_deref()
                         .map(|filter| (filter, dump_directory.as_path()));
                     scope.spawn(move || {
-                        link::link(&lowered, compiler, architecture, registers, dump, store)
+                        link::link(
+                            &lowered,
+                            compiler,
+                            architecture,
+                            registers,
+                            dump,
+                            embedding,
+                            store,
+                        )
                     })
                 })
                 .collect::<Vec<_>>()

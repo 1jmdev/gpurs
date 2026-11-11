@@ -8,7 +8,8 @@ use std::{
 };
 
 use gpurs_artifact::{
-    self as artifact, Artifact, Fragment, Kernel, Key, Kind, LoweredTarget, Module, Store,
+    self as artifact, Artifact, Embedding, Fragment, Image, Kernel, Key, Kind, LoweredTarget,
+    Module, Store,
 };
 use gpurs_nvvm::Toolkit;
 
@@ -20,6 +21,7 @@ pub(crate) fn link(
     architecture: &str,
     registers: Option<&str>,
     dump: Option<(&str, &Path)>,
+    embedding: Embedding,
     store: &Store,
 ) -> Result<Artifact<'static>> {
     let mut kernels: Vec<Kernel> = Vec::new();
@@ -74,22 +76,6 @@ pub(crate) fn link(
             Ok(compiler.ptx(&ir, architecture)?.into_bytes())
         })?;
         let ptx = String::from_utf8(ptx)?;
-        let digest = Key::Cubin {
-            toolkit: &fingerprint,
-            architecture,
-            registers,
-            ptx: &ptx,
-        }
-        .digest();
-        let cubin = store.get_or_insert(Kind::Cubin, &digest, || -> Result<_> {
-            let scratch = store
-                .path(Kind::Cubin, &digest)
-                .with_added_extension(format!("{}.{index}.ptxas", process::id()));
-            fs::create_dir_all(&scratch)?;
-            let cubin = toolkit.assemble(&ptx, architecture, registers, &scratch)?;
-            fs::remove_dir_all(scratch)?;
-            Ok(cubin)
-        })?;
         if let Some((filter, root)) = dump
             && kernels[index].name.contains(filter)
         {
@@ -107,8 +93,34 @@ pub(crate) fn link(
             }
             fs::write(directory.join(format!("{architecture}.ptxas.txt")), report)?;
         }
+        let image = match embedding {
+            Embedding::Ptx => Image::Ptx(ptx.into()),
+            Embedding::Cubin => {
+                let digest = Key::Cubin {
+                    toolkit: &fingerprint,
+                    architecture,
+                    registers,
+                    ptx: &ptx,
+                }
+                .digest();
+                Image::Cubin(
+                    store
+                        .get_or_insert(Kind::Cubin, &digest, || -> Result<_> {
+                            let scratch = store
+                                .path(Kind::Cubin, &digest)
+                                .with_added_extension(format!("{}.{index}.ptxas", process::id()));
+                            fs::create_dir_all(&scratch)?;
+                            let cubin =
+                                toolkit.assemble(&ptx, architecture, registers, &scratch)?;
+                            fs::remove_dir_all(scratch)?;
+                            Ok(cubin)
+                        })?
+                        .into(),
+                )
+            }
+        };
         Ok(Module {
-            cubin: cubin.into(),
+            image,
             kernels: vec![kernels[index].clone()],
         })
     };
