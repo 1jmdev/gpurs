@@ -4,8 +4,7 @@ use gpurs_artifact::Parameter;
 
 use crate::{
     Argument, ArgumentMut, Buffer, DeviceSlice, DeviceSliceMut, Error, Launch, Result,
-    buffer::Span,
-    host::{launch::KernelLaunch, tracking::Access},
+    host::{launch::KernelLaunch, memory::buffer::Span, tracking::Access},
 };
 
 impl<S: Launch> KernelLaunch<'_, S> {
@@ -72,14 +71,14 @@ impl<S: Launch> KernelLaunch<'_, S> {
         written: Option<&Rc<Cell<bool>>>,
     ) -> Result<()> {
         if !Rc::ptr_eq(&self.stream.stream().device, &span.allocation.device) {
-            return Err(Error::InvalidOperation(
-                "kernel argument belongs to another GPU".to_owned(),
+            return Err(Error::ContextMismatch(
+                "kernel argument belongs to another GPU",
             ));
         }
         if let Some(written) = written.filter(|written| !written.get()) {
             if !mutable {
-                return Err(Error::InvalidOperation(
-                    "an output is read before a kernel writes it".to_owned(),
+                return Err(Error::Uninitialized(
+                    "an output is read before a kernel writes it",
                 ));
             }
             self.outputs.push((self.position, written.clone()));
@@ -104,8 +103,8 @@ impl<S: Launch> KernelLaunch<'_, S> {
             &self.stream.stream().device,
             &value.buffer().allocation.device,
         ) {
-            return Err(Error::InvalidOperation(
-                "kernel argument belongs to another GPU".to_owned(),
+            return Err(Error::ContextMismatch(
+                "kernel argument belongs to another GPU",
             ));
         }
         let effect = self.effect(mutable);
@@ -125,8 +124,8 @@ impl<S: Launch> KernelLaunch<'_, S> {
         }
         for access in value.dependencies() {
             if !Rc::ptr_eq(&self.stream.stream().device, &access.0.allocation.device) {
-                return Err(Error::InvalidOperation(
-                    "descriptor storage belongs to another GPU".to_owned(),
+                return Err(Error::ContextMismatch(
+                    "descriptor storage belongs to another GPU",
                 ));
             }
             self.accesses.push(access.0.clone());

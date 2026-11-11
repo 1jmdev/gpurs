@@ -1,9 +1,9 @@
-use self::sealed::Sealed;
 use crate::{
     DeviceDescriptor, DeviceIndexed, DeviceScatter, DeviceStrided, DeviceTensorMap, DeviceValue,
-    ExternalAccess,
-    buffer::{Buffer, Span},
     gpu::tensor::hopper::TensorMap,
+    host::memory::buffer::{Buffer, Span},
+    raw::ExternalAccess,
+    sealed::Sealed,
 };
 
 /// A retained kernel argument whose allocation dependencies are tracked during submission.
@@ -26,10 +26,6 @@ pub trait Argument<T>: Sealed {
 
 /// A retained argument supporting exclusive kernel references to its device value.
 pub trait ArgumentMut<T>: Argument<T> {}
-
-mod sealed {
-    pub trait Sealed {}
-}
 
 impl<T> Sealed for DeviceValue<T> {}
 impl<T> Sealed for DeviceDescriptor<T> {}

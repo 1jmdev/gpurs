@@ -3,7 +3,8 @@
 
 use std::marker::PhantomData;
 
-use super::super::{Element, SharedTile, sealed::Sealed};
+use super::super::{Element, SharedTile};
+use crate::sealed::Sealed;
 
 #[doc(hidden)]
 pub trait Initialize<W, R>: FnOnce(W) -> R {}

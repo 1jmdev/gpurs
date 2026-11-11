@@ -5,10 +5,8 @@ mod cursor;
 pub mod instruction;
 pub(super) mod intrinsics;
 mod ring;
-mod tensor_map;
 mod warpgroup;
 
-pub use cursor::TensorCursor;
+pub use cursor::{TensorCursor, TensorMap};
 pub use ring::{Consumer, Hopper, TensorRing};
-pub use tensor_map::TensorMap;
 pub use warpgroup::WarpgroupAccumulator;

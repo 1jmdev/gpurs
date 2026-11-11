@@ -1,6 +1,8 @@
-use std::collections::BTreeSet;
+use std::{cell::RefCell, collections::BTreeSet, rc::Rc};
 
-use super::{Cache, Direction, Proof};
+use gpurs_rustc::FxHashMap;
+
+use super::{Bound, Direction};
 use crate::symbolic::{self, Clause, Facts, Polynomial, Predicate, Relation, Requirement};
 
 const OPTIONS: usize = 4;
@@ -21,6 +23,57 @@ pub struct Engine<'a> {
     /// Bit width of each kernel parameter that is a scalar launch variable.
     pub scalars: &'a [u32],
     pub facts: Facts,
+}
+
+type Entries<K, V> = RefCell<FxHashMap<K, V>>;
+
+/// Memoized engine queries. Variables never change once created, so entries never go stale.
+#[derive(Default)]
+pub struct Cache {
+    pub proofs: Entries<(Facts, Predicate), Option<Proof>>,
+    pub contexts: Entries<(Facts, Polynomial), Rc<Vec<Bound>>>,
+    pub contradictions: Entries<(Facts, bool), Option<Requirement>>,
+    pub bounds: Entries<(Facts, Polynomial, Direction), Vec<Bound>>,
+}
+
+#[derive(Clone, Default)]
+pub struct Proof {
+    pub fixed: Requirement,
+    pub pending: Vec<BTreeSet<Predicate>>,
+}
+
+impl Proof {
+    pub fn fixed(fixed: Requirement) -> Self {
+        Self {
+            fixed,
+            pending: Vec::new(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.fixed.is_empty() && self.pending.is_empty()
+    }
+
+    pub fn union(self, other: Self) -> Self {
+        Self {
+            fixed: union(&self.fixed, &other.fixed),
+            pending: self.pending.into_iter().chain(other.pending).collect(),
+        }
+    }
+
+    pub fn materialize(&self, reason: &'static str) -> Requirement {
+        if self.pending.is_empty() {
+            return self.fixed.clone();
+        }
+        self.fixed
+            .iter()
+            .cloned()
+            .chain(self.pending.iter().map(|options| Clause {
+                options: options.clone(),
+                reason,
+            }))
+            .collect()
+    }
 }
 
 /// Marks a bound resting on the type range of a data-dependent value, which proves things

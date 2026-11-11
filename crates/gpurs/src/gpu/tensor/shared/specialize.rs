@@ -3,8 +3,10 @@
 
 use gpurs_macros::primitive;
 
-use super::super::sealed::Sealed;
-use crate::gpu::{self, Block, synchronization, tensor::hopper::instruction};
+use crate::{
+    gpu::{self, Block, synchronization, tensor::hopper::instruction},
+    sealed::Sealed,
+};
 
 /// A group of complete warps of the block, numbered from its first thread.
 pub trait ThreadGroup: Copy + Sealed {

@@ -2,9 +2,7 @@ use std::rc::Rc;
 
 use fixedbitset::FixedBitSet;
 use gpurs_artifact::Primitive;
-use gpurs_rustc::{
-    Body, Dominators, FxHashMap, FxHashSet, Graph, Instance, Session, TerminatorKind, Ty,
-};
+use gpurs_rustc::{Body, Dominators, FxHashMap, Graph, Instance, Session, Ty, graph};
 
 use super::{Context, State, Value};
 use crate::symbolic::Fact;
@@ -54,34 +52,14 @@ impl Program {
             .entry(instance)
             .or_insert_with(|| {
                 let body = sess.body(instance);
-                let successors = (0..body.blocks.len())
-                    .map(|block| normal_successors(&body, block))
-                    .collect::<Vec<_>>();
-                let graph = Graph::new(0, successors.clone());
-                let dominators = graph.dominators();
-                let mut order = graph.reverse_postorder();
-                let mut ranks = vec![usize::MAX; successors.len()];
-                for (rank, &block) in order.iter().enumerate() {
-                    ranks[block] = rank;
-                }
-                for (block, rank) in ranks.iter_mut().enumerate() {
-                    if *rank == usize::MAX {
-                        *rank = order.len();
-                        order.push(block);
-                    }
-                }
-                let mut loop_heads = FixedBitSet::with_capacity(successors.len());
-                for (block, targets) in successors.iter().enumerate() {
-                    for &target in targets {
-                        if dominators.is_reachable(block) && dominators.dominates(target, block) {
-                            loop_heads.insert(target);
-                        }
-                    }
-                }
+                let successors = Graph::normal_successors(&body);
+                let postdominators = graph::postdominators(&successors);
+                let graph = Graph::new(0, successors);
+                let (order, ranks) = graph.order();
                 Rc::new(Function {
                     body,
-                    postdominators: Rc::new(postdominators(&successors)),
-                    loop_heads: Rc::new(loop_heads),
+                    postdominators: Rc::new(postdominators),
+                    loop_heads: Rc::new(graph.loop_heads(&graph.dominators())),
                     order,
                     ranks,
                 })
@@ -93,87 +71,4 @@ impl Program {
 pub struct Summary {
     pub states: Rc<Vec<Option<State>>>,
     pub exit: Option<(State, Value)>,
-}
-
-pub fn postdominators(successors: &[Vec<usize>]) -> Dominators<usize> {
-    let count = successors.len();
-    let mut reversed = vec![Vec::new(); count + 1];
-    for (block, targets) in successors.iter().enumerate() {
-        if targets.is_empty() {
-            reversed[count].push(block);
-        }
-        for &target in targets {
-            reversed[target].push(block);
-        }
-    }
-    let exiting = Graph::new(count, reversed.clone()).reachable();
-    let dominators = Graph::new(0, successors.to_vec()).dominators();
-    for (block, targets) in successors.iter().enumerate() {
-        if !exiting[block]
-            && dominators.is_reachable(block)
-            && targets
-                .iter()
-                .any(|&target| dominators.dominates(target, block))
-        {
-            reversed[count].push(block);
-        }
-    }
-    Graph::new(count, reversed).dominators()
-}
-
-pub fn reachable(
-    successors: &[Vec<usize>],
-    start: usize,
-    target: usize,
-    barriers: &FxHashSet<usize>,
-) -> bool {
-    let mut pending = vec![start];
-    let mut visited = FxHashSet::default();
-    while let Some(block) = pending.pop() {
-        if !visited.insert(block) || barriers.contains(&block) {
-            continue;
-        }
-        if block == target {
-            return true;
-        }
-        pending.extend(successors[block].iter().copied());
-    }
-    false
-}
-
-pub fn reachable_set(
-    successors: &[Vec<usize>],
-    start: usize,
-    barriers: &FxHashSet<usize>,
-) -> FixedBitSet {
-    let mut pending = vec![start];
-    let mut visited = FixedBitSet::with_capacity(successors.len());
-    while let Some(block) = pending.pop() {
-        if visited.contains(block) || barriers.contains(&block) {
-            continue;
-        }
-        visited.insert(block);
-        pending.extend(successors[block].iter().copied());
-    }
-    visited
-}
-
-pub fn normal_successors(body: &Body, block: usize) -> Vec<usize> {
-    let terminator = &body.blocks[block].terminator;
-    let successors = match &terminator.kind {
-        TerminatorKind::Call { target, .. } => target.iter().copied().collect(),
-        TerminatorKind::Assert { target, .. } | TerminatorKind::Drop { target, .. } => {
-            vec![*target]
-        }
-        _ => terminator.successors(),
-    };
-    successors
-        .into_iter()
-        .filter(|&successor| {
-            !matches!(
-                body.blocks[successor].terminator.kind,
-                TerminatorKind::Unreachable
-            )
-        })
-        .collect()
 }

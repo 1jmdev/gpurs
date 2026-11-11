@@ -1,12 +1,12 @@
 use gpurs_ir::{Type, Value as IRValue};
 use gpurs_rustc::{
-    AllocId, Allocation, ConstOperand, ConstantKind, GlobalAlloc, Scalar, TyConstKind, ValueRepr,
-    session,
+    AllocId, Allocation, ConstOperand, ConstantKind, GlobalAlloc, Scalar, Shape, TyConstKind,
+    ValueRepr,
 };
 
 use super::{
     function::FunctionBuilder,
-    layout::{self, Shape},
+    layout,
     module::ModuleBuilder,
     place::{Operand, Place, Value},
 };
@@ -56,7 +56,7 @@ impl ModuleBuilder<'_> {
     fn scalar(&mut self, allocation: &Allocation, offset: usize, scalar: Scalar) -> IRValue {
         let ty = layout::immediate_type(scalar);
         let width = (ty.bits() as usize).div_ceil(8);
-        let value = session::allocation_bytes(allocation)
+        let value = gpurs_rustc::allocation_bytes(allocation)
             .get(offset..offset + width)
             .map_or(0, |slice| {
                 let mut buffer = [0u8; 16];
@@ -83,8 +83,9 @@ impl ModuleBuilder<'_> {
     pub fn global_pointer(&mut self, alloc_id: AllocId, offset: u64) -> IRValue {
         if !self.allocations.contains_key(&alloc_id) {
             let GlobalAlloc::Memory(allocation) = GlobalAlloc::from(alloc_id) else {
-                self.sess
-                    .err("static storage and function pointers are not supported in GPU constants");
+                self.sess.error_global(
+                    "static storage and function pointers are not supported in GPU constants",
+                );
                 return IRValue::address(0);
             };
             let pointer = self.allocation(&allocation);
@@ -96,7 +97,7 @@ impl ModuleBuilder<'_> {
     /// A constant global holding `allocation`, with its pointers relocated to their own
     /// globals.
     pub fn allocation(&mut self, allocation: &Allocation) -> IRValue {
-        let bytes = session::allocation_bytes(allocation);
+        let bytes = gpurs_rustc::allocation_bytes(allocation);
         let mut fields = Vec::new();
         let mut position = 0;
         for &(offset, provenance) in &allocation.provenance.ptrs {

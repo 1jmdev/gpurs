@@ -1,6 +1,5 @@
 use gpurs_ir::Type;
-use gpurs_rustc::{FloatLength, IntegerLength, Primitive, Scalar, Signature, layout};
-pub use gpurs_rustc::{PassMode, Shape};
+use gpurs_rustc::{FloatLength, IntegerLength, PassMode, Primitive, Scalar, Signature};
 
 pub fn primitive(scalar: Scalar) -> Primitive {
     match scalar {
@@ -33,7 +32,7 @@ pub fn memory_type(primitive: Primitive) -> Type {
         Primitive::Float {
             length: FloatLength::F16,
         } => Type::Half,
-        Primitive::Float { length } if layout::is_bfloat(length) => Type::Integer(16),
+        Primitive::Float { length } if gpurs_rustc::is_bfloat(length) => Type::Integer(16),
         Primitive::Float {
             length: FloatLength::F32,
         } => Type::Float,

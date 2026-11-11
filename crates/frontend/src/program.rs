@@ -49,7 +49,7 @@ pub fn analyze(sess: Session<'_>) -> Program {
                     .map(CrateItem)
             })
         else {
-            sess.err(format!(
+            sess.error_global(format!(
                 "GPU definition for `{}` was not found in the device view",
                 launch.key
             ));
@@ -58,7 +58,7 @@ pub fn analyze(sess: Session<'_>) -> Program {
         let function = definition.ty();
         let kind = function.kind();
         let Some((function, signature)) = kind.fn_def() else {
-            sess.err(format!("`{}` is not a function", launch.key));
+            sess.error_global(format!("`{}` is not a function", launch.key));
             continue;
         };
         let mut arguments = launch.generics.iter().copied();
@@ -69,7 +69,10 @@ pub fn analyze(sess: Session<'_>) -> Program {
                 .map(|argument| match argument {
                     GenericArgKind::Type(_) => {
                         GenericArgKind::Type(arguments.next().unwrap_or_else(|| {
-                            sess.err(format!("not enough type arguments for `{}`", launch.key));
+                            sess.error_global(format!(
+                                "not enough type arguments for `{}`",
+                                launch.key
+                            ));
                             Ty::bool_ty()
                         }))
                     }
@@ -79,7 +82,10 @@ pub fn analyze(sess: Session<'_>) -> Program {
                         {
                             GenericArgKind::Const(length)
                         } else {
-                            sess.err(format!("missing const argument for `{}`", launch.key));
+                            sess.error_global(format!(
+                                "missing const argument for `{}`",
+                                launch.key
+                            ));
                             argument.clone()
                         }
                     }
@@ -90,7 +96,7 @@ pub fn analyze(sess: Session<'_>) -> Program {
         let instance = match Instance::resolve(function, &concrete) {
             Ok(instance) => instance,
             Err(error) => {
-                sess.err(format!("cannot instantiate `{}`: {error:?}", launch.key));
+                sess.error_global(format!("cannot instantiate `{}`: {error:?}", launch.key));
                 continue;
             }
         };
@@ -114,7 +120,7 @@ pub fn analyze(sess: Session<'_>) -> Program {
             match transfer::descriptor(sess, ty) {
                 Ok(descriptor) if !host.types.contains(&descriptor) => host.types.push(descriptor),
                 Ok(_) => {}
-                Err(message) => sess.err(message),
+                Err(error) => sess.error_global(error.to_string()),
             }
         }
         kernels.push(Kernel {

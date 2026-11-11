@@ -1,7 +1,6 @@
 use gpurs_rustc::{
     AdtKind, AggregateKind, Allocation, ConstantKind, NonDivergingIntrinsic, Operand, RigidTy,
-    Rvalue, Shape, StatementKind, TagEncoding, Ty, TyConstKind, TyKind, UnOp, ValueRepr,
-    VariantIdx, VariantsShape, session,
+    Rvalue, StatementKind, TagEncoding, Ty, TyConstKind, TyKind, UnOp, ValueRepr, VariantsShape,
 };
 
 use super::{
@@ -31,7 +30,8 @@ impl Analysis<'_, '_> {
                 variant_index,
             } => {
                 let ty = self.place_type(place);
-                let variant = discriminant(ty, *variant_index);
+                let variant =
+                    gpurs_rustc::discriminant(ty, *variant_index).map(|value| value as i128);
                 if let Location::Slot(slot, path) = self.locate(place, state) {
                     let mut value = state::get(&state.slots[slot], &path);
                     value.variant = variant;
@@ -47,7 +47,8 @@ impl Analysis<'_, '_> {
                 if self.collect && self.quiet == 0 =>
             {
                 self.sess
-                    .error(self.span, "bulk pointer copies require a GPU access proof");
+                    .error(self.span, "bulk pointer copies require a GPU access proof")
+                    .emit();
             }
             _ => {}
         }
@@ -175,7 +176,7 @@ impl Analysis<'_, '_> {
             Rvalue::Repeat(operand, _) => Value::varying(self.operand(operand, state).variance),
             Rvalue::Discriminant(place) => {
                 let value = self.read(place, state).into_inner();
-                let domain = match session::rigid(self.place_type(place)) {
+                let domain = match gpurs_rustc::rigid(self.place_type(place)) {
                     RigidTy::Adt(definition, _) => Some(definition.num_variants()),
                     _ => None,
                 };
@@ -240,7 +241,7 @@ impl Analysis<'_, '_> {
         if let TyKind::RigidTy(RigidTy::Adt(definition, _)) = ty.kind()
             && definition.kind() == AdtKind::Enum
         {
-            let shape = Shape::of(self.sess, ty);
+            let shape = self.sess.shape(ty);
             if matches!(shape.repr(), ValueRepr::Scalar(_))
                 && matches!(
                     shape.layout.variants,
@@ -273,8 +274,8 @@ impl Analysis<'_, '_> {
         {
             return Value::varying(0);
         }
-        let shape = Shape::of(self.sess, ty);
-        let bytes = session::allocation_bytes(allocation);
+        let shape = self.sess.shape(ty);
+        let bytes = gpurs_rustc::allocation_bytes(allocation);
         let fields = self
             .sess
             .field_types(ty)
@@ -310,15 +311,5 @@ impl Analysis<'_, '_> {
             fields,
             ..ValueData::default()
         })
-    }
-}
-
-/// The discriminant value of `variant` of the enum `ty`.
-pub fn discriminant(ty: Ty, variant: VariantIdx) -> Option<i128> {
-    match session::rigid(ty) {
-        RigidTy::Adt(definition, _) if definition.kind() == AdtKind::Enum => {
-            Some(definition.discriminant_for_variant(variant).val as i128)
-        }
-        _ => None,
     }
 }

@@ -1,7 +1,7 @@
 use gpurs_artifact::{Access, Parameter};
-use gpurs_rustc::{BinOp, FxHashSet};
+use gpurs_rustc::{BinOp, FxHashSet, graph};
 
-use super::{Analysis, Region, program};
+use super::{Analysis, Region};
 use crate::{
     proof::{self, Comparison, Proofs},
     symbolic::{Atom, Fact, Facts, Polynomial, Predicate, Relation, Requirement},
@@ -96,7 +96,7 @@ impl Analysis<'_, '_> {
             .and_then(proof::slots)
             .is_some_and(|(variable, _)| {
                 self.variables[variable].description == "a loop counter"
-                    && program::reachable(
+                    && graph::reaches(
                         &self.program.successors,
                         successor,
                         branch,
@@ -169,15 +169,19 @@ impl Analysis<'_, '_> {
                     )
                 });
             if !access.atomic && access.partition.is_none() && injective.is_none() {
-                self.sess.error_help(
-                    access.span,
-                    format!(
-                        "multiple GPU threads may write the same memory location in `{}`",
-                        self.kernel.name()
-                    ),
-                    "use a distinct thread index for each write, an atomic operation, or a \
-                     verified single-writer guard",
-                );
+                self.sess
+                    .error(
+                        access.span,
+                        format!(
+                            "multiple GPU threads may write the same memory location in `{}`",
+                            self.kernel.name()
+                        ),
+                    )
+                    .with_help(
+                        "use a distinct thread index for each write, an atomic operation, or a \
+                         verified single-writer guard",
+                    )
+                    .emit();
             }
             let mut clauses = injective.unwrap_or_default();
             let warp =
@@ -212,12 +216,16 @@ impl Analysis<'_, '_> {
                 }
                 if access.partition.is_some() || other.partition.is_some() {
                     if access.partition != other.partition {
-                        self.sess.error_help(
-                            other.span,
-                            "GPU memory accesses may race with a partitioned matrix",
-                            "access the matrix only through one partition built from the same \
-                             data and dimensions",
-                        );
+                        self.sess
+                            .error(
+                                other.span,
+                                "GPU memory accesses may race with a partitioned matrix",
+                            )
+                            .with_help(
+                                "access the matrix only through one partition built from the same \
+                                 data and dimensions",
+                            )
+                            .emit();
                     }
                     continue;
                 }
@@ -233,13 +241,13 @@ impl Analysis<'_, '_> {
                 }
                 let apart = |barriers: &FxHashSet<usize>| {
                     access.block != other.block
-                        && !program::reachable(
+                        && !graph::reaches(
                             &self.program.successors,
                             access.block,
                             other.block,
                             barriers,
                         )
-                        && !program::reachable(
+                        && !graph::reaches(
                             &self.program.successors,
                             other.block,
                             access.block,
@@ -255,12 +263,13 @@ impl Analysis<'_, '_> {
                 if !separated
                     && (access.origin.index != other.origin.index || access.atomic != other.atomic)
                 {
-                    self.sess.error_help(
-                        other.span,
-                        "GPU memory accesses may race",
-                        "use the same distinct per-thread index, or separate shared-memory phases \
-                         with kernel::sync_block()",
-                    );
+                    self.sess
+                        .error(other.span, "GPU memory accesses may race")
+                        .with_help(
+                            "use the same distinct per-thread index, or separate shared-memory \
+                             phases with kernel::sync_block()",
+                        )
+                        .emit();
                 }
             }
             for clause in clauses {
@@ -288,12 +297,12 @@ impl Analysis<'_, '_> {
                         && !write.origin.path.contains(&usize::MAX)
                 })
                 .filter_map(|write| {
-                    if program::reachable(
+                    if graph::reaches(
                         &self.program.successors,
                         write.block,
                         access.block,
                         &self.findings.barriers,
-                    ) || !program::reachable(
+                    ) || !graph::reaches(
                         &self.program.successors,
                         write.block,
                         access.block,
@@ -326,7 +335,7 @@ impl Analysis<'_, '_> {
                         }
                         guards.extend(facts.iter().cloned());
                     }
-                    if program::reachable(&self.program.successors, 0, access.block, &preceding) {
+                    if graph::reaches(&self.program.successors, 0, access.block, &preceding) {
                         return None;
                     }
                     Some((write, guards))
@@ -383,10 +392,13 @@ impl Analysis<'_, '_> {
                         }
                     }
                 }
-                None => self.sess.error_notes(
-                    access.span,
-                    "shared memory may be read before it is initialized",
-                    &[format!(
+                None => self
+                    .sess
+                    .error(
+                        access.span,
+                        "shared memory may be read before it is initialized",
+                    )
+                    .with_note(format!(
                         "no preceding synchronized write covers read index `{}`; initialize the \
                          elements this read can reach, or guard the read to the initialized range",
                         access
@@ -394,8 +406,8 @@ impl Analysis<'_, '_> {
                             .index
                             .as_ref()
                             .map_or_else(|| "unknown".to_owned(), |index| self.describe(index),),
-                    )],
-                ),
+                    ))
+                    .emit(),
             }
         }
     }

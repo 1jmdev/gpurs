@@ -3,13 +3,14 @@ use std::{alloc::Layout, collections::HashSet, mem::MaybeUninit, rc::Rc, slice};
 use gpurs_driver::LaunchAttributes;
 
 use crate::{
-    Argument, Buffer, DeviceAddress, DeviceSlice, DeviceSliceMut, Error, ExternalAccess, Gpu,
-    Launch, LaunchConfig, PinnedBuffer, Result, Stream, Transfer,
+    Argument, Buffer, DeviceAddress, DeviceSlice, DeviceSliceMut, Error, Gpu, Launch, LaunchConfig,
+    PinnedBuffer, Result, Stream, Transfer,
     gpu::Scatter,
     host::{
         graph::{CapturedKernel, CapturedOperation},
         tracking::{self, Access},
     },
+    raw::ExternalAccess,
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -44,21 +45,19 @@ impl<T: Copy> DeviceScatter<T> {
         duplicates: Duplicates,
     ) -> Result<DeviceScatter<T>> {
         let stream = queue.stream();
-        let gpu = Gpu {
-            device: stream.device.clone(),
-        };
+        let gpu = stream.gpu();
         let span = target.span();
         if span.len == 0
             || indices.is_empty()
             || !Rc::ptr_eq(&stream.device, &span.allocation.device)
             || !Rc::ptr_eq(&stream.device, &stream.device)
         {
-            return Err(Error::InvalidOperation(
-                "scatter views require nonempty ranges on the same GPU".to_owned(),
+            return Err(Error::InvalidView(
+                "scatter views require nonempty ranges on the same GPU",
             ));
         }
         let allocation = gpu.allocate(Layout::array::<usize>(indices.len()).map_err(|_| {
-            Error::InvalidOperation("scatter index allocation exceeds the size range".to_owned())
+            Error::SizeOverflow("scatter index allocation exceeds the size range")
         })?)?;
         let target_len = span.len;
         let descriptor = Scatter {
@@ -70,12 +69,12 @@ impl<T: Copy> DeviceScatter<T> {
             target_len: span.len,
         };
         let mut snapshot = DeviceScatter {
-            buffer: Buffer::new(gpu.allocate(Layout::new::<Scatter<T>>())?.allocation, 1),
+            buffer: Buffer::new(gpu.allocate(Layout::new::<Scatter<T>>())?.allocation, 0, 1),
             dependencies: [
                 ExternalAccess::write(target),
                 ExternalAccess(Access::read(&allocation.allocation, 0..allocation.len())),
             ],
-            indices: Buffer::new(allocation.allocation, indices.len()),
+            indices: Buffer::new(allocation.allocation, 0, indices.len()),
             target_len,
             duplicates,
             validation: None,
@@ -96,9 +95,7 @@ impl<T: Copy> DeviceScatter<T> {
         target: &mut impl DeviceSliceMut<T>,
         indices: &[usize],
     ) -> Result<DeviceScatter<T>> {
-        let gpu = Gpu {
-            device: stream.device.clone(),
-        };
+        let gpu = stream.gpu();
         let span = target.span();
         if span.len == 0
             || indices.is_empty()
@@ -106,10 +103,9 @@ impl<T: Copy> DeviceScatter<T> {
             || indices.iter().any(|&index| index >= span.len)
             || indices.iter().collect::<HashSet<_>>().len() != indices.len()
         {
-            return Err(Error::InvalidOperation(
+            return Err(Error::InvalidView(
                 "scatter views require nonempty ranges on the same GPU and unique, in-bounds \
-                 indices"
-                    .to_owned(),
+                 indices",
             ));
         }
         let indices = gpu.copy(indices)?;
@@ -131,9 +127,7 @@ impl<T: Copy> DeviceScatter<T> {
         target: &mut impl DeviceSliceMut<T>,
         indices: &impl DeviceSlice<usize>,
     ) -> Result<DeviceScatter<T>> {
-        let gpu = Gpu {
-            device: stream.device.clone(),
-        };
+        let gpu = stream.gpu();
         let span = target.span();
         let indices_span = indices.span();
         if span.len == 0
@@ -141,12 +135,15 @@ impl<T: Copy> DeviceScatter<T> {
             || !Rc::ptr_eq(&stream.device, &span.allocation.device)
             || !Rc::ptr_eq(&stream.device, &indices_span.allocation.device)
         {
-            return Err(Error::InvalidOperation(
-                "scatter views require nonempty ranges on the same GPU".to_owned(),
+            return Err(Error::InvalidView(
+                "scatter views require nonempty ranges on the same GPU",
             ));
         }
-        let mut indices = Buffer::new(indices_span.allocation.clone(), indices_span.len);
-        indices.offset = indices_span.start;
+        let indices = Buffer::new(
+            indices_span.allocation.clone(),
+            indices_span.start,
+            indices_span.len,
+        );
         let target_len = span.len;
         let descriptor = Scatter {
             target: unsafe { DeviceAddress::from_raw(span.allocation.pointer + span.start as u64) },
@@ -184,19 +181,14 @@ impl<T> DeviceScatter<T> {
     ) -> Result<()> {
         let stream = queue.stream();
         if indices.len() != self.len() {
-            return Err(Error::InvalidOperation(
-                "scatter update lengths differ".to_owned(),
-            ));
+            return Err(Error::LengthMismatch("scatter update lengths differ"));
         }
-        let blocks = u32::try_from(self.len().div_ceil(256)).map_err(|_| {
-            Error::InvalidOperation("scatter validation grid exceeds CUDA range".to_owned())
-        })?;
+        let blocks = u32::try_from(self.len().div_ceil(256))
+            .map_err(|_| Error::SizeOverflow("scatter validation grid exceeds CUDA range"))?;
         let source = indices.span();
         let device = &self.indices.allocation.device;
         if !Rc::ptr_eq(device, &stream.device) || !Rc::ptr_eq(device, &source.allocation.device) {
-            return Err(Error::InvalidOperation(
-                "scatter update contexts differ".to_owned(),
-            ));
+            return Err(Error::ContextMismatch("scatter update contexts differ"));
         }
         let _context = device.context.try_enter()?;
         let module = device.embedded_ptx(include_str!("scatter.ptx"))?;
@@ -205,19 +197,15 @@ impl<T> DeviceScatter<T> {
                 device: device.clone(),
             };
             let snapshot = gpu.allocate(Layout::array::<usize>(self.len()).map_err(|_| {
-                Error::InvalidOperation(
-                    "scatter index allocation exceeds the size range".to_owned(),
-                )
+                Error::SizeOverflow("scatter index allocation exceeds the size range")
             })?)?;
             let allocation =
                 gpu.allocate(Layout::array::<u64>(self.target_len).map_err(|_| {
-                    Error::InvalidOperation(
-                        "scatter ownership allocation exceeds the size range".to_owned(),
-                    )
+                    Error::SizeOverflow("scatter ownership allocation exceeds the size range")
                 })?)?;
             self.validation = Some((
-                Buffer::new(snapshot.allocation, self.len()),
-                Buffer::new(allocation.allocation, self.target_len),
+                Buffer::new(snapshot.allocation, 0, self.len()),
+                Buffer::new(allocation.allocation, 0, self.target_len),
             ));
         }
         let (snapshot, owners) = self
@@ -292,8 +280,8 @@ impl<T> DeviceScatter<T> {
             || indices.iter().any(|&index| index >= self.target_len)
             || indices.iter().collect::<HashSet<_>>().len() != indices.len()
         {
-            return Err(Error::InvalidOperation(
-                "scatter updates require the same length and unique, in-bounds indices".to_owned(),
+            return Err(Error::InvalidView(
+                "scatter updates require the same length and unique, in-bounds indices",
             ));
         }
         stream.copy_from_host(&mut self.indices, indices)

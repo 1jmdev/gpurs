@@ -1,18 +1,16 @@
 use gpurs_ir::{Type, Value as IRValue};
-use gpurs_rustc::{
-    CrateDef, Graph, NonDivergingIntrinsic, RETURN_LOCAL, StatementKind, attributes,
-};
+use gpurs_rustc::{CrateDef, Graph, NonDivergingIntrinsic, PassMode, RETURN_LOCAL, StatementKind};
 
 use crate::{
     function::{FunctionBuilder, unroll},
-    layout::{self, PassMode},
+    layout,
     place::{Operand, Place, Value},
 };
 
 impl FunctionBuilder<'_, '_> {
     /// Lowers the body as the function `name` and adds it to the module.
     pub fn lower(mut self, name: &str) {
-        let signature = self.module.signature(self.instance);
+        let signature = self.sess.signature(self.instance);
         self.ir = gpurs_ir::Function::new(
             name,
             layout::return_type(&signature),
@@ -20,7 +18,7 @@ impl FunctionBuilder<'_, '_> {
         );
         self.ir.comment = self.instance.name();
         self.ir.inline = self.sess.is_closure_like(self.instance.def.def_id())
-            || attributes::primitive(self.sess, self.instance.def.def_id()).is_some();
+            || self.sess.primitive(self.instance.def.def_id()).is_some();
         let mut parameters =
             (0..layout::parameters(&signature).len()).map(|index| self.ir.parameter(index));
         let result =

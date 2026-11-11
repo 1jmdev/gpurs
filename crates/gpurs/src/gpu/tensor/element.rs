@@ -2,9 +2,11 @@
 
 use super::{
     Accumulator, FragmentA, FragmentB, hopper::intrinsics as hopper_intrinsics, instruction,
+};
+use crate::{
+    gpu::{BFloat16, BFloat162, Half, Half2, Tf32},
     sealed::Sealed,
 };
-use crate::gpu::{BFloat16, BFloat162, Half, Half2, Tf32};
 
 /// An element type of tensor-core operands: 16-bit floats multiplied by `mma.sync.m16n8k16`,
 /// and f32 rounded to TF32 and multiplied by `mma.sync.m16n8k8`, which only `mma.sync` and

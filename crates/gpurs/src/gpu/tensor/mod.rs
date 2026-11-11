@@ -48,8 +48,3 @@ pub use warp::{
     Accumulator, AccumulatorTile, ColumnValues, FragmentA, FragmentB, OperandTile, Operands,
     RowValues, WarpRegion, instruction,
 };
-
-/// Restricts the tensor traits to the implementations of this module.
-mod sealed {
-    pub trait Sealed {}
-}

@@ -3,9 +3,7 @@
 mod cursor;
 mod gather;
 mod matrix;
-mod vector;
 
 pub use cursor::TileCursor;
 pub use gather::{GatherCursor, GatheredMatrix};
-pub use matrix::GlobalMatrix;
-pub use vector::GlobalVector;
+pub use matrix::{GlobalMatrix, GlobalVector};

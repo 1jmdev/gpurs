@@ -1,10 +1,10 @@
 use std::{
-    error::Error,
     fmt::{Display, Formatter, Result as FormatResult},
     str::FromStr,
 };
 
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 /// A CUDA compute capability and its instruction compatibility domain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -35,7 +35,11 @@ enum Requirement {
 }
 
 /// An architecture string outside the `sm_XY`, `sm_XYa`, or `sm_XYf` forms.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[error(
+    "GPU architecture must look like sm_89, sm_90a, or sm_100f; target sets join them with `|` \
+     and accept `>=sm_80`"
+)]
 pub struct ParseTargetError;
 
 impl Target {
@@ -150,49 +154,5 @@ impl Display for Targets {
             }
         }
         Ok(())
-    }
-}
-
-impl Display for ParseTargetError {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> FormatResult {
-        formatter.write_str(
-            "GPU architecture must look like sm_89, sm_90a, or sm_100f; target sets join them \
-             with `|` and accept `>=sm_80`",
-        )
-    }
-}
-
-impl Error for ParseTargetError {}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn provides(target: &str, targets: &str) -> bool {
-        target
-            .parse::<Target>()
-            .expect("valid target")
-            .provides(&targets.parse().expect("valid targets"))
-    }
-
-    #[test]
-    fn membership() {
-        assert!(provides("sm_89", ">=sm_80"));
-        assert!(provides("sm_90a", ">=sm_80"));
-        assert!(!provides("sm_75", ">=sm_80"));
-        assert!(provides("sm_90a", "sm_90a | sm_100a"));
-        assert!(provides("sm_100a", "sm_90a | sm_100a"));
-        assert!(!provides("sm_90", "sm_90a | sm_100a"));
-        assert!(!provides("sm_103a", "sm_100a"));
-        assert!(provides("sm_103a", "sm_100f"));
-        assert!(!provides("sm_103", "sm_100f"));
-    }
-
-    #[test]
-    fn round_trip() {
-        let targets: Targets = " sm_90a |>= sm_100".parse().expect("valid targets");
-        assert_eq!(targets.to_string(), "sm_90a | >=sm_100");
-        assert!(">=sm_90a".parse::<Targets>().is_err());
-        assert!("".parse::<Targets>().is_err());
     }
 }

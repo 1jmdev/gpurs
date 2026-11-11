@@ -1,10 +1,61 @@
+//! Relations between polynomials: the comparisons path facts state and the disjointness of two
+//! per-thread indices.
+
 use gpurs_rustc::BinOp;
 
-use crate::symbolic::{Atom, Fact, Polynomial, Relation};
+use crate::symbolic::{Atom, Clause, Fact, Polynomial, Predicate, Relation};
 
 /// A path fact as an ordered comparison between a per-thread side and a launch side.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Comparison(pub BinOp, pub Polynomial, pub Polynomial);
+
+pub fn disjoint(left: &Polynomial, right: &Polynomial) -> Option<Vec<Clause>> {
+    let difference = left.add(right, -1)?.value()?;
+    let stride = left
+        .0
+        .iter()
+        .filter(|(term, _)| !term.is_empty())
+        .map(|(_, coefficient)| coefficient.checked_abs())
+        .collect::<Option<Vec<_>>>()?
+        .into_iter()
+        .min()?;
+    if stride > 1
+        && difference.rem_euclid(stride) != 0
+        && left
+            .0
+            .iter()
+            .all(|(term, coefficient)| term.is_empty() || coefficient % stride == 0)
+    {
+        return Some(Vec::new());
+    }
+    let modulus = left
+        .0
+        .iter()
+        .filter(|(term, _)| !term.is_empty() && term.as_slice() != [Atom::Thread(0)])
+        .map(|(_, coefficient)| *coefficient)
+        .min()?;
+    if modulus <= 0
+        || left.coefficient(&[Atom::Thread(0)]) != Some(&1)
+        || left.0.iter().any(|(term, coefficient)| {
+            !term.is_empty() && term.as_slice() != [Atom::Thread(0)] && coefficient % modulus != 0
+        })
+    {
+        return None;
+    }
+    let distance = difference.rem_euclid(modulus);
+    let limit = distance.min(modulus - distance);
+    (limit > 0).then(|| {
+        vec![Clause::single(
+            Predicate::new(
+                Polynomial::constant(limit)
+                    .add(&Polynomial::atom(Atom::BlockDimension(0)), -1)
+                    .unwrap(),
+                Relation::NonNegative,
+            ),
+            "thread-strided stores must occupy disjoint vector ranges",
+        )]
+    })
+}
 
 /// The comparisons that path facts state between per-thread expressions and launch values.
 pub fn comparisons(facts: &[Fact]) -> Vec<Comparison> {

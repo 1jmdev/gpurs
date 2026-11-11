@@ -1,9 +1,10 @@
-mod comparison;
-mod coverage;
-mod disjoint;
-mod indexing;
+//! Proofs over the indices of memory accesses: bounds, the slots a loop covers, and the
+//! disjointness of what threads write.
 
-pub use comparison::{Comparison, comparisons};
+mod coverage;
+mod indexing;
+mod relation;
+
 pub use coverage::slots;
-pub use disjoint::disjoint;
 pub use indexing::Proofs;
+pub use relation::{Comparison, comparisons, disjoint};

@@ -12,20 +12,27 @@ use super::{
 pub(super) fn report(analysis: &Analysis<'_, '_>, residual: &[&Obligation]) {
     let kernel = analysis.kernel.name();
     if let Some(failure) = &analysis.failure {
-        analysis.sess.error_help_notes(
-            analysis.kernel.def.def_id().span(),
-            format!("the safety analysis of `{kernel}` did not converge"),
-            std::slice::from_ref(failure),
-            "split the kernel into smaller functions or simplify its control flow",
-        );
+        analysis
+            .sess
+            .error(
+                analysis.kernel.def.def_id().span(),
+                format!("the safety analysis of `{kernel}` did not converge"),
+            )
+            .with_note(failure.clone())
+            .with_help("split the kernel into smaller functions or simplify its control flow")
+            .emit();
     }
     for obligation in residual {
         let function = analysis.program.contexts[obligation.context]
             .instance
             .name();
-        let mut notes = vec![why(analysis, obligation)];
+        let mut diagnostic = analysis.sess.error(
+            obligation.span,
+            format!("{} in `{function}`", describe(analysis, &obligation.check)),
+        );
+        diagnostic.note(why(analysis, obligation));
         if let Some(goal) = &obligation.goal {
-            notes.push(format!(
+            diagnostic.note(format!(
                 "it holds where `{}`",
                 render::predicate(goal, &analysis.names)
             ));
@@ -53,12 +60,7 @@ pub(super) fn report(analysis: &Analysis<'_, '_>, residual: &[&Obligation]) {
             }
             Check::Unanalyzed(_) => "call a #[gpu] function or a supported GPU operation instead",
         };
-        analysis.sess.error_help_notes(
-            obligation.span,
-            format!("{} in `{function}`", describe(analysis, &obligation.check)),
-            &notes,
-            help,
-        );
+        diagnostic.with_help(help).emit();
     }
 }
 

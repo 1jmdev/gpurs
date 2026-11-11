@@ -1,8 +1,8 @@
-use gpurs_rustc::{Instance, InstanceKind, RigidTy, TyKind};
+use gpurs_rustc::{Instance, InstanceKind, PassMode, RigidTy, TyKind};
 
 use super::{
     function::FunctionBuilder,
-    layout::{self, PassMode},
+    layout,
     place::{Operand, Place, Value},
 };
 
@@ -68,7 +68,7 @@ impl FunctionBuilder<'_, '_> {
         arguments: &[Operand],
         destination: &Place,
     ) {
-        let signature = self.module.signature(instance);
+        let signature = self.sess.signature(instance);
         let mut arguments = arguments.to_vec();
         let spreads = instance
             .body()

@@ -48,6 +48,7 @@ dependencies = [
  "gpurs-artifact",
  "gpurs-driver",
  "gpurs-macros",
+ "thiserror",
 ]
 
 [[package]]
@@ -66,6 +67,7 @@ dependencies = [
  "postcard",
  "serde",
  "serde_json",
+ "thiserror",
 ]
 
 [[package]]
@@ -86,6 +88,7 @@ dependencies = [
  "postcard",
  "serde",
  "serde_json",
+ "thiserror",
 ]
 
 [[package]]
@@ -110,12 +113,15 @@ dependencies = [
  "libc",
  "postcard",
  "serde",
- "serde_json",
+ "thiserror",
 ]
 
 [[package]]
 name = "gpurs-driver"
 version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
 
 [[package]]
 name = "gpurs-frontend"
@@ -173,6 +179,7 @@ dependencies = [
 name = "gpurs-rustc"
 version = "0.1.0"
 dependencies = [
+ "fixedbitset",
  "gpurs-artifact",
  "syn",
 ]
@@ -185,7 +192,7 @@ dependencies = [
  "gpurs-artifact",
  "gpurs-rustc",
  "rustc-hash",
- "serde",
+ "thiserror",
 ]
 
 [[package]]

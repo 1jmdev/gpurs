@@ -1,10 +1,10 @@
 use gpurs_artifact::{Convergence, Lowering, Memory, Operand as CallOperand, Primitive};
 use gpurs_ir::{Binary, Conversion, Flags, Type, Value as IRValue};
-use gpurs_rustc::{RigidTy, Scalar, ValueRepr, session};
+use gpurs_rustc::{RigidTy, Scalar, Shape, ValueRepr};
 
 use crate::{
     function::FunctionBuilder,
-    layout::{self, Shape},
+    layout,
     place::{Operand, Place, Value},
 };
 
@@ -137,9 +137,9 @@ impl FunctionBuilder<'_, '_> {
                 }
             }
             Lowering::SharedArray => {
-                let storage = destination
-                    .shape
-                    .field(self.sess, 0)
+                let storage = self
+                    .sess
+                    .field_shape(&destination.shape, 0)
                     .ty
                     .kind()
                     .builtin_deref(true)
@@ -235,9 +235,9 @@ impl FunctionBuilder<'_, '_> {
             }
             _ => (0..shape.count())
                 .flat_map(|field| {
-                    let inner = match session::rigid(shape.ty) {
+                    let inner = match gpurs_rustc::rigid(shape.ty) {
                         RigidTy::Array(element, _) => self.shape_of(element),
-                        _ => shape.field(self.sess, field),
+                        _ => self.sess.field_shape(&shape, field),
                     };
                     let offset = shape.offset(field).bytes() as u64;
                     self.scalars(&inner)

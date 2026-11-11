@@ -1,11 +1,9 @@
 use gpurs_ir::{Type, Value as IRValue};
-use gpurs_rustc::{Instance, Mutability, RETURN_LOCAL, RigidTy, TerminatorKind, Ty, ValueRepr};
-
-use crate::{
-    function::FunctionBuilder,
-    layout::{self, PassMode, Shape},
-    place::Operand,
+use gpurs_rustc::{
+    Instance, Mutability, PassMode, RETURN_LOCAL, RigidTy, Shape, TerminatorKind, Ty, ValueRepr,
 };
+
+use crate::{function::FunctionBuilder, layout, place::Operand};
 
 impl FunctionBuilder<'_, '_> {
     pub(crate) fn terminator(&mut self, terminator: &TerminatorKind, result: &(PassMode, Shape)) {

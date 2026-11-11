@@ -3,8 +3,9 @@ use std::{marker::PhantomData, rc::Rc};
 use gpurs_macros::primitive;
 
 use crate::{
-    Argument, ArgumentMut, ExternalAccess, Result, Stream,
-    buffer::{Buffer, DeviceValue},
+    Argument, ArgumentMut, Result, Stream,
+    host::memory::buffer::{Buffer, DeviceValue},
+    raw::ExternalAccess,
 };
 
 /// An explicit generic-space GPU address, transferable inside ordinary descriptors and arrays.

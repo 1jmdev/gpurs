@@ -1,11 +1,9 @@
 use gpurs_ir::{Access, Binary, Conversion, Flags, Predicate, Transfer, Type, Value as IRValue};
-use gpurs_rustc::{
-    BinOp, CrateDef, Instance, RigidTy, Ty, TyKind, ValueRepr, attributes, call_graph,
-};
+use gpurs_rustc::{BinOp, CrateDef, Instance, RigidTy, Ty, TyKind, ValueRepr};
 
 use crate::{
     function::FunctionBuilder,
-    layout::{self},
+    layout,
     place::{Operand, Place, Value},
 };
 
@@ -16,13 +14,13 @@ impl FunctionBuilder<'_, '_> {
         arguments: &[Operand],
         destination: &Place,
     ) -> bool {
-        if let Some(primitive) = attributes::primitive(self.sess, instance.def.def_id())
+        if let Some(primitive) = self.sess.primitive(instance.def.def_id())
             && primitive.leaf()
         {
             self.primitive((*primitive).clone(), arguments, destination);
             return true;
         }
-        if let Some(name) = call_graph::math(self.sess, instance.def.def_id())
+        if let Some(name) = self.sess.libdevice_math(instance.def.def_id())
             && let Some(value) = self.math(&name, arguments)
         {
             self.assign(destination, value);

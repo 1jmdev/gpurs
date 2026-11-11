@@ -150,11 +150,15 @@ impl Analysis<'_, '_> {
                     "load" | "store" | "swap" | "compare_exchange" | "compare_exchange_weak"
                 ) || name.starts_with("fetch_")
             }) {
-                self.sess.error_help(
-                    self.span,
-                    "GPU atomics require global or block-shared storage",
-                    "use a device buffer or shared_array instead of thread-local storage",
-                );
+                self.sess
+                    .error(
+                        self.span,
+                        "GPU atomics require global or block-shared storage",
+                    )
+                    .with_help(
+                        "use a device buffer or shared_array instead of thread-local storage",
+                    )
+                    .emit();
             }
             if let Some(Pointer::Memory(origin)) = arguments
                 .first()

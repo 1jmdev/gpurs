@@ -1,3 +1,7 @@
+//! The rustc side of gpurs: the driver entry, the [`Session`] every compiler stage queries,
+//! layouts, and control-flow graphs. MIR and type definitions are re-exported from
+//! `rustc_public` so dependent crates name one interface.
+
 #![feature(rustc_private)]
 
 extern crate rustc_abi;
@@ -5,6 +9,7 @@ extern crate rustc_ast;
 extern crate rustc_const_eval;
 extern crate rustc_data_structures;
 extern crate rustc_driver;
+extern crate rustc_errors;
 extern crate rustc_hir;
 extern crate rustc_interface;
 extern crate rustc_lexer;
@@ -12,21 +17,21 @@ extern crate rustc_middle;
 extern crate rustc_public;
 extern crate rustc_span;
 
-pub mod arguments;
-pub mod attributes;
-pub mod call_graph;
-pub mod driver;
-mod graph;
-mod item;
-pub mod layout;
-pub mod session;
+mod definition;
+mod driver;
+mod fingerprint;
+pub mod graph;
+mod instance;
+mod layout;
+mod reference;
+mod session;
 mod source;
 
-pub use arguments::device_arguments;
-pub use driver::{run, version};
+pub use definition::Item;
+pub use driver::{device_arguments, run, version};
 pub use graph::Graph;
-pub use item::Item;
-pub use layout::{PassMode, Shape, Signature, is_bfloat, pass_mode};
+pub use instance::{Function, wrapping};
+pub use layout::{PassMode, Shape, Signature, allocation_bytes, discriminant, is_bfloat, rigid};
 pub use rustc_data_structures::{
     fx::{FxHashMap, FxHashSet},
     graph::dominators::Dominators,
@@ -56,4 +61,4 @@ pub use rustc_public::{
     },
     visitor::{Visitable, Visitor},
 };
-pub use session::{Session, allocation_bytes, rigid};
+pub use session::Session;

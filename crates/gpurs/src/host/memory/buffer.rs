@@ -1,4 +1,5 @@
 use std::{
+    alloc::Layout,
     any,
     cell::Cell,
     marker::PhantomData,
@@ -10,13 +11,13 @@ use std::{
 
 use gpurs_driver as driver;
 
-use super::sealed::Sealed;
 use crate::{
-    BitPattern, Error, Gpu, Result,
+    BitPattern, Error, Result,
     host::{
         stream::Stream,
         tracking::{self, Access, Allocation},
     },
+    sealed::SliceSpan,
 };
 
 pub struct Buffer<T> {
@@ -55,7 +56,7 @@ pub struct Span<'a> {
     pub(crate) len: usize,
 }
 
-pub trait DeviceSlice<T>: Sealed<T> {
+pub trait DeviceSlice<T>: SliceSpan<T> {
     fn download(&self) -> Result<Vec<T>> {
         unwritten(self)?;
         download(self.span())
@@ -82,11 +83,11 @@ pub trait DeviceSliceMut<T>: DeviceSlice<T> {
 }
 
 impl<T> Buffer<T> {
-    pub(crate) fn new(allocation: Rc<Allocation>, len: usize) -> Self {
+    pub(crate) fn new(allocation: Rc<Allocation>, offset: usize, len: usize) -> Self {
         Buffer {
             allocation,
             len,
-            offset: 0,
+            offset,
             marker: PhantomData,
         }
     }
@@ -135,6 +136,38 @@ impl<T> Buffer<T> {
         )
     }
 
+    /// # Safety
+    /// All bytes represent initialized `U` values, with aliases as in `assume_init`.
+    #[track_caller]
+    pub unsafe fn reinterpret<U>(self) -> Buffer<U> {
+        let bytes = self.len() * size_of::<T>();
+        assert!(
+            size_of::<U>() != 0 && bytes.is_multiple_of(size_of::<U>()),
+            "GPU reinterpretation requires a whole number of nonzero-sized elements"
+        );
+        Buffer::within(self.allocation, self.offset, bytes / size_of::<U>())
+    }
+
+    pub fn into_value(self) -> DeviceValue<T> {
+        assert_eq!(self.len(), 1, "device references require one element");
+        DeviceValue { buffer: self }
+    }
+
+    /// Elements `offset..offset + len` of `allocation`, with `offset` in bytes.
+    #[track_caller]
+    pub(crate) fn within(allocation: Rc<Allocation>, offset: usize, len: usize) -> Self {
+        let bytes = Layout::array::<T>(len).expect("GPU suballocation exceeds the size range");
+        assert!(
+            offset <= allocation.bytes && bytes.size() <= allocation.bytes - offset,
+            "GPU suballocation exceeds its allocation"
+        );
+        assert!(
+            (allocation.pointer + offset as u64).is_multiple_of(bytes.align() as u64),
+            "GPU suballocation is not aligned for its element type"
+        );
+        Buffer::new(allocation, offset, len)
+    }
+
     pub(crate) fn whole(&self) -> Span<'_> {
         Span {
             allocation: &self.allocation,
@@ -144,13 +177,25 @@ impl<T> Buffer<T> {
     }
 }
 
+impl<T> Buffer<MaybeUninit<T>> {
+    /// # Safety
+    /// Every element holds a valid `T` and aliases obey reference exclusivity.
+    pub unsafe fn assume_init(self) -> Buffer<T> {
+        Buffer::new(self.allocation, self.offset, self.len)
+    }
+
+    /// Initializes every element from `data`, waiting for the copy.
+    pub fn write(self, stream: &Stream, data: &[T]) -> Result<Buffer<T>> {
+        let mut buffer = Buffer::new(self.allocation, self.offset, self.len);
+        stream.copy_from_host(&mut buffer, data)?.wait()?;
+        Ok(buffer)
+    }
+}
+
 impl<T> DeviceValue<T> {
     pub fn new(stream: &Stream, value: &T) -> Result<Self> {
         Ok(Self {
-            buffer: Gpu {
-                device: stream.device.clone(),
-            }
-            .upload(slice::from_ref(value))?,
+            buffer: stream.gpu().upload(slice::from_ref(value))?,
         })
     }
 
@@ -193,10 +238,10 @@ impl<'a> Span<'a> {
     }
 }
 
-pub(crate) fn unwritten<T>(slice: &(impl Sealed<T> + ?Sized)) -> Result<()> {
+pub(crate) fn unwritten<T>(slice: &(impl SliceSpan<T> + ?Sized)) -> Result<()> {
     if slice.written().is_some_and(|written| !written.get()) {
-        return Err(Error::InvalidOperation(
-            "an output is read before a kernel writes it".to_owned(),
+        return Err(Error::Uninitialized(
+            "an output is read before a kernel writes it",
         ));
     }
     Ok(())
@@ -227,8 +272,8 @@ fn download<T>(span: Span<'_>) -> Result<Vec<T>> {
 
 fn fill<T: Copy>(span: Span<'_>, stream: &Stream, value: T) -> Result<()> {
     if !Rc::ptr_eq(&stream.device, &span.allocation.device) {
-        return Err(Error::InvalidOperation(
-            "fill allocation belongs to another GPU".to_owned(),
+        return Err(Error::ContextMismatch(
+            "fill allocation belongs to another GPU",
         ));
     }
     let _context = stream.device.context.try_enter()?;
@@ -279,25 +324,25 @@ fn fill<T: Copy>(span: Span<'_>, stream: &Stream, value: T) -> Result<()> {
     Ok(())
 }
 
-impl<T> Sealed<T> for Buffer<T> {
+impl<T> SliceSpan<T> for Buffer<T> {
     fn span(&self) -> Span<'_> {
         self.whole()
     }
 }
 
-impl<T> Sealed<T> for View<'_, T> {
+impl<T> SliceSpan<T> for View<'_, T> {
     fn span(&self) -> Span<'_> {
         self.span
     }
 }
 
-impl<T> Sealed<T> for ViewMut<'_, T> {
+impl<T> SliceSpan<T> for ViewMut<'_, T> {
     fn span(&self) -> Span<'_> {
         self.span
     }
 }
 
-impl<T> Sealed<T> for DeviceOutput<T> {
+impl<T> SliceSpan<T> for DeviceOutput<T> {
     fn span(&self) -> Span<'_> {
         self.buffer.whole()
     }
@@ -330,8 +375,7 @@ impl<T> DeviceSliceMut<T> for ViewMut<'_, T> {}
 
 impl<T: BitPattern> Clone for Buffer<T> {
     fn clone(&self) -> Self {
-        let mut buffer = Self::new(self.allocation.clone(), self.len());
-        buffer.offset = self.offset;
+        let buffer = Buffer::new(self.allocation.clone(), self.offset, self.len());
         buffer
     }
 }
@@ -343,8 +387,8 @@ impl<T: BitPattern> Buffer<T> {
 
     pub(crate) fn try_cast_range<U>(&self, bytes: Range<usize>) -> Result<Buffer<U>> {
         if bytes.start > bytes.end || bytes.end > self.len() * size_of::<T>() {
-            return Err(Error::InvalidOperation(
-                "typed view exceeds its source byte range".to_owned(),
+            return Err(Error::InvalidView(
+                "typed view exceeds its source byte range",
             ));
         }
         if size_of::<U>() == 0
@@ -352,12 +396,15 @@ impl<T: BitPattern> Buffer<T> {
             || !(self.allocation.pointer + self.offset as u64 + bytes.start as u64)
                 .is_multiple_of(align_of::<U>() as u64)
         {
-            return Err(Error::InvalidOperation(
-                "typed view has an invalid element size or alignment".to_owned(),
+            return Err(Error::InvalidView(
+                "typed view has an invalid element size or alignment",
             ));
         }
-        let mut buffer = Buffer::new(self.allocation.clone(), bytes.len() / size_of::<U>());
-        buffer.offset = self.offset + bytes.start;
+        let buffer = Buffer::new(
+            self.allocation.clone(),
+            self.offset + bytes.start,
+            bytes.len() / size_of::<U>(),
+        );
         Ok(buffer)
     }
 }

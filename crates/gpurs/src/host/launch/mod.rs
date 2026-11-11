@@ -1,4 +1,4 @@
-mod argument;
+mod encoding;
 mod kernel;
 
 pub use kernel::{KernelCache, KernelLaunch, kernel};

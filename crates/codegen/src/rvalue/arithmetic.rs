@@ -1,9 +1,9 @@
 use gpurs_ir::{Binary, Flags, Predicate, Type, Value as IRValue};
-use gpurs_rustc::{BinOp, Scalar, UnOp, ValueRepr};
+use gpurs_rustc::{BinOp, Scalar, Shape, UnOp, ValueRepr};
 
 use crate::{
     function::FunctionBuilder,
-    layout::{self, Shape},
+    layout,
     place::{Operand, Value},
 };
 

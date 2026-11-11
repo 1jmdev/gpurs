@@ -1,11 +1,12 @@
-use std::{error, fmt};
+use thiserror::Error;
 
 use crate::ffi;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// A CUDA driver failure, retaining the original operation and numeric result.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
+#[error("CUDA driver call `{operation}` failed: {name} ({description}, code {code})")]
 pub struct Error {
     pub operation: &'static str,
     pub code: i32,
@@ -37,15 +38,3 @@ impl Error {
         }
     }
 }
-
-impl fmt::Display for Error {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "CUDA driver call `{}` failed: {} ({}, code {})",
-            self.operation, self.name, self.description, self.code
-        )
-    }
-}
-
-impl error::Error for Error {}

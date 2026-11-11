@@ -86,9 +86,9 @@ impl HostView {
             match transfer::descriptor(sess, ty) {
                 Ok(descriptor) if !self.types.contains(&descriptor) => self.types.push(descriptor),
                 Ok(_) => {}
-                Err(message) => {
-                    sess.err(format!(
-                        "cannot transfer `{}` to the GPU: {message}",
+                Err(error) => {
+                    sess.error_global(format!(
+                        "cannot transfer `{}` to the GPU: {error}",
                         sess.type_name(ty)
                     ));
                 }
@@ -135,7 +135,8 @@ impl HostView {
                 sess.error(
                     block.terminator.source_info.span,
                     "gpurs launcher arguments must be string literals",
-                );
+                )
+                .emit();
                 continue;
             };
             let suffix = if elements.is_empty() {

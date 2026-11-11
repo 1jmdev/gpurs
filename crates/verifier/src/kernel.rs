@@ -1,7 +1,5 @@
 use gpurs_artifact::{self as artifact, Access, Extent, KernelEffects, Parameter, Value};
-use gpurs_rustc::{
-    CrateDef, Instance, Mutability, RigidTy, Session, Shape, TyKind, layout, session,
-};
+use gpurs_rustc::{CrateDef, Instance, Mutability, RigidTy, Session, Shape, TyKind};
 
 use crate::{
     analysis::{Analysis, Obligation},
@@ -51,7 +49,7 @@ pub fn kernel(
     if sess.error_count() > errors {
         return None;
     }
-    let signature = layout::signature(sess, instance);
+    let signature = sess.signature(instance);
     let mut parameters = Vec::new();
     for (_, shape) in &signature.arguments {
         let metadata = match shape.ty.kind() {
@@ -61,25 +59,25 @@ pub fn kernel(
                 } else {
                     Access::Read
                 };
-                let referent = match session::rigid(pointee) {
+                let referent = match gpurs_rustc::rigid(pointee) {
                     RigidTy::Slice(element) => element,
                     _ => pointee,
                 };
                 if !(transfer::opaque_descriptor(sess, pointee) && access == Access::Read)
-                    && let Err(message) = transfer::check(sess, referent)
+                    && let Err(error) = transfer::check(sess, referent)
                 {
-                    sess.error(span, message);
+                    sess.error(span, error.to_string()).emit();
                     return None;
                 }
-                if matches!(session::rigid(pointee), RigidTy::Slice(_)) {
+                if matches!(gpurs_rustc::rigid(pointee), RigidTy::Slice(_)) {
                     Parameter::Slice { access }
                 } else {
                     Parameter::Reference { access }
                 }
             }
             _ => {
-                if let Err(message) = transfer::check(sess, shape.ty) {
-                    sess.error(span, message);
+                if let Err(error) = transfer::check(sess, shape.ty) {
+                    sess.error(span, error.to_string()).emit();
                     return None;
                 }
                 Parameter::Value(Value {
@@ -94,17 +92,16 @@ pub fn kernel(
         });
     }
     let result = &signature.result.1;
-    if let Err(message) = transfer::check(sess, result.ty) {
-        sess.error(span, message);
+    if let Err(error) = transfer::check(sess, result.ty) {
+        sess.error(span, error.to_string()).emit();
         return None;
     }
     let result =
-        (!matches!(session::rigid(result.ty), RigidTy::Tuple(fields) if fields.is_empty())).then(
-            || Value {
+        (!matches!(gpurs_rustc::rigid(result.ty), RigidTy::Tuple(fields) if fields.is_empty()))
+            .then(|| Value {
                 size: result.size().bytes() as u64,
                 align: result.align(),
-            },
-        );
+            });
 
     let mut analysis = Analysis::new(sess, instance, &parameters);
     analysis.run();
@@ -121,14 +118,15 @@ pub fn kernel(
         Extent::Explicit
     };
     if !configured && extent == Extent::Explicit {
-        sess.error_help(
+        sess.error(
             span,
             format!(
                 "launch dimensions of `{}` cannot be inferred",
                 instance.name()
             ),
-            "launch this kernel with stream.launch(LaunchConfig::new(grid, block))",
-        );
+        )
+        .with_help("launch this kernel with stream.launch(LaunchConfig::new(grid, block))")
+        .emit();
     }
     let residual: Vec<&Obligation> = analysis
         .findings

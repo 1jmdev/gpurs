@@ -1,124 +1,119 @@
+//! The kernel cache of one target: kernels keyed by every function they reach.
+
+use std::io;
+
 use gpurs_artifact::{BuildConfiguration, Kernel, Key, Kind, Store};
 use gpurs_codegen::{self as codegen, GeneratedKernel};
-use gpurs_rustc::{FxHashMap, FxHashSet, Instance, Session, call_graph, driver};
+use gpurs_frontend::Kernel as Launch;
+use gpurs_rustc::{self as rustc, FxHashMap, FxHashSet, Instance, Session};
 use gpurs_verifier::{self as verifier, Verification};
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
-/// A lowered kernel, cached by its MIR, its configuration, and the gpurs version.
-#[derive(Serialize, Deserialize)]
-struct Lowered {
-    kernel: Kernel,
-    summary: String,
+/// A failure reading or writing compiler artifacts, or starting lowering workers.
+#[derive(Debug, Error)]
+pub enum Error {
+    #[error("gpurs cache or artifact I/O failed: {0}")]
+    Io(#[from] io::Error),
+    #[error("gpurs artifact encoding failed: {0}")]
+    Encoding(#[from] postcard::Error),
 }
 
-pub struct Cache<'a> {
+/// A lowered kernel with the preconditions its verification summarized.
+#[derive(Serialize, Deserialize)]
+pub struct Lowered {
+    pub kernel: Kernel,
+    pub summary: String,
+}
+
+/// The cache of the kernels of one session and target architecture.
+pub struct Cache<'a, 'tcx> {
+    sess: Session<'tcx>,
     store: Store,
     configuration: &'a BuildConfiguration,
-    dependencies: FxHashMap<Instance, (String, Vec<Instance>)>,
+    architecture: &'a str,
+    fingerprints: FxHashMap<Instance, (String, Vec<Instance>)>,
 }
 
-impl<'a> Cache<'a> {
-    pub fn new(configuration: &'a BuildConfiguration) -> Result<Self, String> {
+impl<'a, 'tcx> Cache<'a, 'tcx> {
+    pub fn new(
+        sess: Session<'tcx>,
+        configuration: &'a BuildConfiguration,
+        architecture: &'a str,
+    ) -> Result<Self, Error> {
         Ok(Self {
-            store: Store::new(&configuration.cache).map_err(|error| error.to_string())?,
+            sess,
+            store: Store::new(&configuration.cache)?,
             configuration,
-            dependencies: FxHashMap::default(),
+            architecture,
+            fingerprints: FxHashMap::default(),
         })
     }
 
-    pub fn contains(
-        &mut self,
-        sess: Session<'_>,
-        root: Instance,
-        configured: bool,
-        key: &str,
-        architecture: &str,
-    ) -> bool {
-        let digest = self.locate(sess, root, configured, key, architecture);
+    pub fn contains(&mut self, launch: &Launch) -> bool {
+        let digest = self.digest(launch);
         self.store.path(Kind::Kernel, &digest).exists()
     }
 
-    /// The lowered kernel, its fragment digest, and its summary; `None` after a reported error.
-    pub fn kernel(
-        &mut self,
-        sess: Session<'_>,
-        root: Instance,
-        configured: bool,
-        key: &str,
-        architecture: &str,
-    ) -> Result<Option<(Kernel, String, String)>, String> {
-        let digest = self.locate(sess, root, configured, key, architecture);
-        let lowered = match self.store.get(Kind::Kernel, &digest) {
-            Some(bytes) => {
-                postcard::from_bytes::<Lowered>(&bytes).map_err(|error| error.to_string())?
-            }
-            None => {
-                let Some(Verification { plan, summary }) =
-                    verifier::kernel(sess, root, configured, key.to_owned())
-                else {
-                    return Ok(None);
-                };
-                let GeneratedKernel {
-                    kernel, fragment, ..
-                } = codegen::generate(sess, plan, self.configuration.audit);
-                let lowered = Lowered { kernel, summary };
-                // The fragment precedes its entry, so a cached kernel always has a fragment.
-                for (kind, bytes) in [
-                    (Kind::Fragment, postcard::to_allocvec(&fragment)),
-                    (Kind::Kernel, postcard::to_allocvec(&lowered)),
-                ] {
-                    let bytes = bytes.map_err(|error| error.to_string())?;
-                    self.store
-                        .insert(kind, &digest, &bytes)
-                        .map_err(|error| error.to_string())?;
-                }
-                lowered
-            }
+    /// The lowered kernel and its fragment digest, lowering it on a miss; `None` after a
+    /// reported error.
+    pub fn kernel(&mut self, launch: &Launch) -> Result<Option<(Lowered, String)>, Error> {
+        let digest = self.digest(launch);
+        if let Some(bytes) = self.store.get(Kind::Kernel, &digest) {
+            return Ok(Some((postcard::from_bytes(&bytes)?, digest)));
+        }
+        let Some(Verification { plan, summary }) = verifier::kernel(
+            self.sess,
+            launch.instance,
+            launch.configured,
+            launch.key.clone(),
+        ) else {
+            return Ok(None);
         };
-        Ok(Some((lowered.kernel, digest, lowered.summary)))
+        let GeneratedKernel {
+            kernel, fragment, ..
+        } = codegen::generate(self.sess, plan, self.configuration.audit);
+        let lowered = Lowered { kernel, summary };
+        // The fragment precedes its entry, so a cached kernel always has a fragment.
+        self.store
+            .insert(Kind::Fragment, &digest, &postcard::to_allocvec(&fragment)?)?;
+        self.store
+            .insert(Kind::Kernel, &digest, &postcard::to_allocvec(&lowered)?)?;
+        Ok(Some((lowered, digest)))
     }
 
-    fn locate(
-        &mut self,
-        sess: Session<'_>,
-        root: Instance,
-        configured: bool,
-        key: &str,
-        architecture: &str,
-    ) -> String {
-        let mut functions = Vec::new();
-        let mut pending = vec![root];
+    /// The cache key of `launch`: the fingerprints of every function it reaches, with the
+    /// configuration and compiler that lowered them.
+    fn digest(&mut self, launch: &Launch) -> String {
+        let mut pending = vec![launch.instance];
         let mut visited = FxHashSet::default();
         while let Some(instance) = pending.pop() {
             if !visited.insert(instance) {
                 continue;
             }
-            let (_, callees) = self.dependencies.entry(instance).or_insert_with(|| {
-                let function = call_graph::function(sess, instance);
-                let callees = function.calls.values().copied().collect();
+            let (_, callees) = self.fingerprints.entry(instance).or_insert_with(|| {
+                let function = self.sess.function(instance);
                 (
-                    sess.fingerprint(instance, function.body.as_deref()),
-                    callees,
+                    self.sess.fingerprint(instance, function.body.as_deref()),
+                    function.calls.values().copied().collect(),
                 )
             });
             pending.extend(callees.iter().copied());
-            functions.push(instance);
         }
-        let mut fingerprints = functions
+        let mut functions: Vec<_> = visited
             .iter()
-            .map(|instance| self.dependencies[instance].0.as_str())
-            .collect::<Vec<_>>();
-        fingerprints.sort_unstable();
-        let configuration = self.configuration;
+            .map(|instance| self.fingerprints[instance].0.as_str())
+            .collect();
+        functions.sort_unstable();
         Key::Kernel {
-            driver: driver::version(),
-            compiler: &configuration.compiler,
-            architectures: &configuration.architectures,
-            architecture,
-            kernel: key,
-            configured,
-            audit: configuration.audit,
-            functions: &fingerprints,
+            driver: rustc::version(),
+            compiler: &self.configuration.compiler,
+            architectures: &self.configuration.architectures,
+            architecture: self.architecture,
+            kernel: &launch.key,
+            configured: launch.configured,
+            audit: self.configuration.audit,
+            functions: &functions,
         }
         .digest()
     }

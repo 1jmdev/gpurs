@@ -5,9 +5,12 @@ use std::marker::PhantomData;
 use gpurs_macros::primitive;
 
 use super::intrinsics;
-use crate::gpu::{
-    self, Block,
-    tensor::{Bulk, Stage, sealed::Sealed, shared::stage::Initialize},
+use crate::{
+    gpu::{
+        self, Block,
+        tensor::{Bulk, Stage, shared::stage::Initialize},
+    },
+    sealed::Sealed,
 };
 
 /// The tensor-core instructions that read a [`TensorRing`]'s stages.

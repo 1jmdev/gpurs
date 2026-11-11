@@ -1,25 +1,54 @@
 use std::{
     collections::HashSet,
     env,
-    error::Error,
     ffi::OsString,
-    fs,
+    fs, io, panic,
     path::{Path, PathBuf},
-    process, thread,
+    process,
+    string::FromUtf8Error,
+    thread,
 };
 
 use gpurs_artifact::{
-    self as artifact, BuildConfiguration, CONFIGURATION, CONFIGURATION_VARIABLE, Crate,
-    Embedding, Key, Libraries, LoweredCrate, Stage, Store, Target,
+    self as artifact, BuildConfiguration, CONFIGURATION, CONFIGURATION_VARIABLE, Crate, Embedding,
+    Key, Libraries, LoweredCrate, Stage, Store, Target,
 };
 use gpurs_nvvm::TOOLKIT_ENVIRONMENT;
+use thiserror::Error;
 
 use crate::{
     discovery, library, link, metadata,
     wrapper::{self, COMPILER_LIBRARY},
 };
 
-pub(crate) type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
+pub(crate) type Result<T> = std::result::Result<T, Error>;
+
+/// A failure of the kernel build, reported to Cargo by the build script.
+#[derive(Debug, Error)]
+pub(crate) enum Error {
+    #[error("at least one GPU architecture is required")]
+    NoArchitecture,
+    #[error("GPU architecture must look like `sm_89`, `sm_90a`, or `sm_100f`, found `{0}`")]
+    Architecture(String),
+    #[error("`{0}` does not depend on gpurs")]
+    MissingRuntime(String),
+    #[error("cargo metadata does not describe the package `{0}`")]
+    UnknownPackage(String),
+    #[error("a nested cargo invocation failed:\n{0}")]
+    Cargo(String),
+    #[error("kernel fragment `{0}` is missing from the gpurs cache")]
+    MissingFragment(String),
+    #[error("a required environment variable is not set: {0}")]
+    Environment(#[from] env::VarError),
+    #[error(transparent)]
+    Io(#[from] io::Error),
+    #[error("gpurs artifact encoding failed: {0}")]
+    Encoding(#[from] postcard::Error),
+    #[error("cargo metadata is malformed: {0}")]
+    Metadata(#[from] serde_json::Error),
+    #[error("generated PTX is not UTF-8: {0}")]
+    Ptx(#[from] FromUtf8Error),
+}
 
 enum Mode {
     BuildScript,
@@ -78,7 +107,10 @@ pub fn compile_with(architectures: &[&str], embedding: Embedding) {
         }
         Mode::NestedBuildScript => {
             println!("cargo::rustc-check-cfg=cfg(gpurs_device)");
-            if matches!(CONFIGURATION.as_ref().unwrap().stage, Stage::Discovery) {
+            if CONFIGURATION
+                .as_ref()
+                .is_some_and(|configuration| matches!(configuration.stage, Stage::Discovery))
+            {
                 println!("cargo::rerun-if-env-changed={CONFIGURATION_VARIABLE}");
             }
             return;
@@ -93,22 +125,20 @@ pub fn compile_with(architectures: &[&str], embedding: Embedding) {
 
 fn build(architectures: &[&str], embedding: Embedding) -> Result<()> {
     if architectures.is_empty() {
-        return Err("at least one GPU architecture is required".into());
+        return Err(Error::NoArchitecture);
     }
     if let Some(architecture) = architectures
         .iter()
         .find(|architecture| architecture.parse::<Target>().is_err())
     {
-        return Err(format!(
-            "GPU architecture must look like `sm_89`, `sm_90a`, or `sm_100f`, found \
-             `{architecture}`"
-        )
-        .into());
+        return Err(Error::Architecture((*architecture).to_owned()));
     }
-    let directory = PathBuf::from(env::var_os("OUT_DIR").unwrap());
+    let directory = PathBuf::from(env::var("OUT_DIR")?);
     let artifacts = directory.join("artifacts");
     fs::create_dir_all(&artifacts)?;
-    let compiler = Path::new(COMPILER_LIBRARY).parent().unwrap();
+    let compiler = Path::new(COMPILER_LIBRARY)
+        .parent()
+        .expect("the compiler library lives in a target directory");
     let cache = compiler.join("cache");
     let store = Store::new(&cache)?;
     let selection = metadata::select()?;
@@ -134,8 +164,11 @@ fn build(architectures: &[&str], embedding: Embedding) -> Result<()> {
     paths.sort();
     let mut inputs = Vec::new();
     for path in paths {
-        let name = path.file_name().unwrap().to_string_lossy();
-        if sources.contains(name.split_once('-').unwrap().0) {
+        let name = path.file_name().map(|name| name.to_string_lossy());
+        if name.is_some_and(|name| {
+            name.split_once('-')
+                .is_some_and(|(digest, _)| sources.contains(digest))
+        }) {
             inputs.push(fs::read(&path)?);
         } else {
             fs::remove_file(&path)?;
@@ -155,7 +188,11 @@ fn build(architectures: &[&str], embedding: Embedding) -> Result<()> {
     let identity_path = directory.join("gpurs_artifact.identity");
     let registers = env::var("GPURS_MAX_REGISTERS").ok();
     let dump = env::var("GPURS_DUMP").ok();
-    let dump_directory = compiler.ancestors().nth(2).unwrap().join("gpurs/dump");
+    let dump_directory = compiler
+        .ancestors()
+        .nth(2)
+        .expect("the compiler library lives in a target directory")
+        .join("gpurs/dump");
     let identity = Key::Image {
         inputs: &inputs,
         architectures,
@@ -196,11 +233,17 @@ fn build(architectures: &[&str], embedding: Embedding) -> Result<()> {
                 })
                 .collect::<Vec<_>>()
                 .into_iter()
-                .map(|thread| thread.join().unwrap())
+                .map(|thread| {
+                    thread
+                        .join()
+                        .unwrap_or_else(|payload| panic::resume_unwind(payload))
+                })
                 .collect::<Result<Vec<_>>>()
         })?
         .into_iter();
-        let mut artifact = compiled.next().unwrap();
+        let mut artifact = compiled
+            .next()
+            .expect("at least one architecture was validated");
         artifact.alternatives = compiled.collect();
         fs::write(&image, artifact.encode())?;
         fs::write(

@@ -3,15 +3,14 @@ use std::rc::Rc;
 use gpurs_ir::{Type, Value as IRValue};
 use gpurs_rustc::{
     Body, CrateDef, FxHashMap, Instance, Operand as MirOperand, Place as MirPlace, RigidTy,
-    Session, Span, Ty, attributes, session,
+    Session, Shape, Span, Ty,
 };
 
 use crate::{
     function::unroll::Loop,
-    layout::{self, Shape},
-    module::ModuleBuilder,
+    layout,
+    module::{CallPath, ModuleBuilder},
     place::{Operand, Place, Value},
-    shared_memory::CallPath,
 };
 
 /// Lowers the MIR body of one monomorphic instance to an NVVM IR function.
@@ -49,7 +48,7 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
         let span = body.span;
         FunctionBuilder {
             sess,
-            fast_math: attributes::is_fast_math(sess, instance.def.def_id()),
+            fast_math: sess.is_fast_math(instance.def.def_id()),
             module,
             instance,
             body,
@@ -70,7 +69,7 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
     }
 
     pub fn shape_of(&self, ty: Ty) -> Shape {
-        Shape::of(self.sess, ty)
+        self.sess.shape(ty)
     }
 
     /// The address `offset` bytes into `place`, with the alignment it keeps there.
@@ -90,12 +89,12 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
 
     /// The element layout of an array, slice, reference, or single-field aggregate.
     pub fn element_shape(&self, place: &Place) -> Shape {
-        match session::rigid(place.shape.ty) {
+        match gpurs_rustc::rigid(place.shape.ty) {
             RigidTy::Array(element, _)
             | RigidTy::Slice(element)
             | RigidTy::Ref(_, element, _)
             | RigidTy::RawPtr(element, _) => self.shape_of(element),
-            _ => place.shape.field(self.sess, 0),
+            _ => self.sess.field_shape(&place.shape, 0),
         }
     }
 
@@ -108,16 +107,17 @@ impl<'m, 'sess> FunctionBuilder<'m, 'sess> {
     }
 
     pub fn error(&self, message: impl Into<String>) {
-        self.sess.error(self.span, message);
+        self.sess.error(self.span, message).emit();
     }
 
     pub fn unsupported(&self, what: &str) {
-        self.sess.error_help(
-            self.span,
-            format!("{what} is not supported in GPU code"),
-            "use a supported Rust operation or move this operation to the host before launching \
-             the kernel",
-        );
+        self.sess
+            .error(self.span, format!("{what} is not supported in GPU code"))
+            .with_help(
+                "use a supported Rust operation or move this operation to the host before \
+                 launching the kernel",
+            )
+            .emit();
     }
 
     /// Ends a block that verification proved unreachable; an audit build traps there instead.

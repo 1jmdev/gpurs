@@ -12,9 +12,9 @@ use gpurs_driver::{self as driver, Context, Function, LaunchAttributes, Module, 
 
 use crate::{
     Error, Result,
-    buffer::Buffer,
     host::{
         launch::{self, ValidatedLaunch},
+        memory::buffer::Buffer,
         stream::Stream,
         tracking::{self, Access, Allocation},
     },
@@ -89,6 +89,10 @@ impl Gpu {
         })
     }
 
+    pub fn ordinal(&self) -> usize {
+        self.device.context.device() as usize
+    }
+
     pub fn context(&self) -> &Context {
         &self.device.context
     }
@@ -131,52 +135,56 @@ impl Gpu {
     }
 
     pub(crate) fn copy<T>(&self, data: &[T]) -> Result<Buffer<T>> {
-        let _context = self.device.context.try_enter()?;
         let bytes = size_of_val(data);
-        let pointer = driver::try_allocate_async(bytes, &self.device.transfer)?;
-        let allocation = Rc::new(Allocation::new(self.device.clone(), pointer, bytes));
-        tracking::complete(
-            &self.device.transfer,
-            &[Access::write(&allocation, 0..bytes)],
-        );
+        let allocation = self.device.try_allocate(bytes, 1)?;
         // SAFETY: the allocation holds the bytes and the source lives until synchronization.
         unsafe {
             let source = slice::from_raw_parts(data.as_ptr().cast::<MaybeUninit<u8>>(), bytes);
-            driver::try_copy_to_device_async(pointer, source, &self.device.transfer)?;
+            driver::try_copy_to_device_async(allocation.pointer, source, &self.device.transfer)?;
         }
         let access = Access::write(&allocation, 0..bytes);
         tracking::complete(&self.device.transfer, &[access]);
         self.device.transfer.try_synchronize()?;
-        Ok(Buffer::new(allocation, data.len()))
+        Ok(Buffer::new(allocation, 0, data.len()))
     }
 
     pub fn zeros<T>(&self, len: usize) -> Result<Buffer<T>> {
         let _context = self.device.context.try_enter()?;
         let descriptor = launch::try_verified::<T>(&self.device)?;
         if !descriptor.zeroable {
-            return Err(Error::InvalidOperation(format!(
-                "`{}` has no valid all-zero representation",
-                descriptor.name
-            )));
+            return Err(Error::NotZeroable {
+                ty: descriptor.name.clone(),
+            });
         }
         let bytes = len.checked_mul(size_of::<T>()).ok_or_else(|| {
-            Error::InvalidOperation("GPU buffer size exceeds the addressable byte count".to_owned())
+            Error::SizeOverflow("GPU buffer size exceeds the addressable byte count")
         })?;
-        let pointer = driver::try_allocate_async(bytes, &self.device.transfer)?;
-        let allocation = Rc::new(Allocation::new(self.device.clone(), pointer, bytes));
-        tracking::complete(
-            &self.device.transfer,
-            &[Access::write(&allocation, 0..bytes)],
-        );
+        let allocation = self.device.try_allocate(bytes, 1)?;
         // SAFETY: the allocation holds `bytes` bytes.
-        unsafe { driver::try_fill_async(pointer, 0, bytes, &self.device.transfer)? };
+        unsafe { driver::try_fill_async(allocation.pointer, 0, bytes, &self.device.transfer)? };
         let access = Access::write(&allocation, 0..bytes);
         tracking::complete(&self.device.transfer, &[access]);
-        Ok(Buffer::new(allocation, len))
+        Ok(Buffer::new(allocation, 0, len))
     }
 }
 
 impl Device {
+    /// Device storage of `bytes` bytes aligned to `align`, allocated in stream order on the
+    /// transfer stream.
+    pub fn try_allocate(self: &Rc<Self>, bytes: usize, align: usize) -> Result<Rc<Allocation>> {
+        let _context = self.context.try_enter()?;
+        let padded = bytes.checked_add(align - 1).ok_or_else(|| {
+            Error::SizeOverflow("aligned GPU allocation exceeds the addressable byte count")
+        })?;
+        let base = driver::try_allocate_async(padded, &self.transfer)?;
+        let mut allocation =
+            Allocation::new(self.clone(), base.next_multiple_of(align as u64), bytes);
+        allocation.base = base;
+        let allocation = Rc::new(allocation);
+        tracking::complete(&self.transfer, &[Access::write(&allocation, 0..bytes)]);
+        Ok(allocation)
+    }
+
     /// The module of `ptx`, loaded once per device and keyed by the text's address.
     pub fn embedded_ptx(&self, ptx: &'static str) -> Result<Rc<Module>> {
         if let Some(module) = self.embedded_ptx.borrow().get(&ptx.as_ptr().addr()) {
@@ -216,9 +224,7 @@ impl Device {
                 Some((index, metadata))
             });
         let Some((index, metadata)) = found else {
-            return Err(Error::InvalidOperation(format!(
-                "kernel `{key}` is not part of this executable\'s GPU artifact"
-            )));
+            return Err(Error::UnknownKernel { key });
         };
         if self.modules[index].get().is_none() {
             let _ = self.modules[index].set(match &self.artifact.modules[index].image {
@@ -316,9 +322,8 @@ fn embedded_artifact(capability: u32) -> Result<Artifact<'static>> {
             continue;
         }
         visited.push(bytes.as_ptr());
-        let mut artifact = Artifact::decode(bytes).map_err(|error| {
-            Error::InvalidOperation(format!("invalid embedded GPU artifact: {error}"))
-        })?;
+        let mut artifact =
+            Artifact::decode(bytes).map_err(|error| Error::InvalidArtifact(error.to_string()))?;
         let mut candidates = mem::take(&mut artifact.alternatives);
         candidates.push(artifact);
         let artifact = candidates
@@ -331,11 +336,7 @@ fn embedded_artifact(capability: u32) -> Result<Artifact<'static>> {
             })
             .max_by_key(|(priority, _)| *priority)
             .map(|(_, artifact)| artifact)
-            .ok_or_else(|| {
-                Error::InvalidOperation(
-                    "no embedded GPU image is compatible with this device".to_owned(),
-                )
-            })?;
+            .ok_or_else(|| Error::IncompatibleDevice)?;
         merged.architecture = artifact.architecture;
         merged.compiler = artifact.compiler;
         merged.modules.extend(artifact.modules);

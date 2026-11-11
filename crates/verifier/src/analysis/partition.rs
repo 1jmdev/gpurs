@@ -64,12 +64,16 @@ impl Analysis<'_, '_> {
                 .collect::<Option<Vec<_>>>()
         });
         let (Some((region, index)), Some(mut layout)) = (data, layout) else {
-            self.sess.error_help(
-                self.span,
-                "the partitioned matrix may differ between GPU threads",
-                "construct it from kernel parameters, or values computed only from them, so every \
-                 thread derives the same partition",
-            );
+            self.sess
+                .error(
+                    self.span,
+                    "the partitioned matrix may differ between GPU threads",
+                )
+                .with_help(
+                    "construct it from kernel parameters, or values computed only from them, so \
+                     every thread derives the same partition",
+                )
+                .emit();
             return;
         };
         layout.insert(0, index);

@@ -10,12 +10,17 @@
 
 mod analysis;
 mod diagnostic;
+// The decision procedure and its algebra are public for the integration tests only.
+#[doc(hidden)]
 pub mod engine;
 mod kernel;
+#[doc(hidden)]
 pub mod proof;
+#[doc(hidden)]
 pub mod render;
-pub mod shared;
+mod shared;
 mod support;
+#[doc(hidden)]
 pub mod symbolic;
 pub mod transfer;
 

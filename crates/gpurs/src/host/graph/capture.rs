@@ -9,14 +9,15 @@ use std::{
 
 use gpurs_driver::{self as driver, Function, LaunchRequest};
 
+use super::GraphExec;
 use crate::{
-    DeviceSlice, DeviceSliceMut, Error, Event, ExternalAccess, Launch, LaunchConfig, Ownership,
-    Result, Stream,
+    DeviceSlice, DeviceSliceMut, Error, Event, Launch, LaunchConfig, Result, Stream,
     host::{
         context::Device,
         tracking::{self, Access},
     },
-    sealed_launch::Sealed,
+    raw::{ExternalAccess, Ownership},
+    sealed::LaunchTarget,
 };
 
 pub struct CapturedKernel {
@@ -105,15 +106,6 @@ pub(crate) struct GraphInner {
     pub(crate) nodes: Vec<*mut c_void>,
     pub(crate) _resources: Box<dyn Any>,
     pub(crate) pending: RefCell<Option<Event>>,
-}
-
-pub struct GraphExec {
-    pub(crate) raw: driver::GraphExec,
-    pub(crate) graph: Graph,
-    pub(crate) origin: Graph,
-    pub(crate) pending: RefCell<Option<Event>>,
-    pub(crate) replacements: Vec<Option<Vec<Access>>>,
-    pub(crate) accesses: Vec<Access>,
 }
 
 impl Stream {
@@ -235,8 +227,8 @@ impl Capture<'_> {
             || (Rc::ptr_eq(source.allocation, destination.allocation)
                 && tracking::overlaps(&accesses[0].range, &accesses[1].range))
         {
-            return Err(Error::InvalidOperation(
-                "captured copy lengths differ or ranges overlap".to_owned(),
+            return Err(Error::Overlap(
+                "captured copy lengths differ or ranges overlap",
             ));
         }
         self.stream.check_external(&accesses)?;
@@ -258,7 +250,7 @@ impl Capture<'_> {
 
 impl Launch for Capture<'_> {}
 
-impl Sealed for Capture<'_> {
+impl LaunchTarget for Capture<'_> {
     fn stream(&self) -> &Stream {
         self.stream
     }

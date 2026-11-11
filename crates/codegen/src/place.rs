@@ -1,13 +1,10 @@
 use gpurs_ir::{Access, Binary, Conversion, Flags, Transfer, Type, Value as IRValue};
 use gpurs_rustc::{
-    AdtKind, FieldsShape, MachineSize, ProjectionElem, RigidTy, Scalar, Ty, TyKind, ValueRepr,
-    VariantIdx, session,
+    AdtKind, FieldsShape, MachineSize, ProjectionElem, RigidTy, Scalar, Shape, Ty, TyKind,
+    ValueRepr, VariantIdx,
 };
 
-use super::{
-    function::FunctionBuilder,
-    layout::{self, Shape},
-};
+use super::{function::FunctionBuilder, layout};
 
 /// The most scalar leaves of an aggregate copied leaf by leaf: enough for the operand
 /// fragments and accumulator tiles of a warp, which a byte copy would leave in local memory.
@@ -134,7 +131,7 @@ impl FunctionBuilder<'_, '_> {
                 self.index(&place, index)
             }
             ProjectionElem::Subslice { from, to, from_end } => {
-                let element = place.shape.field(self.sess, 0);
+                let element = self.sess.field_shape(&place.shape, 0);
                 let pointer =
                     self.offset(place.pointer.clone(), from * element.size().bytes() as u64);
                 if from_end {
@@ -152,7 +149,7 @@ impl FunctionBuilder<'_, '_> {
                         shape: place.shape,
                     }
                 } else {
-                    let RigidTy::Array(element_ty, _) = session::rigid(place.shape.ty) else {
+                    let RigidTy::Array(element_ty, _) = gpurs_rustc::rigid(place.shape.ty) else {
                         unreachable!("array subslice of `{:?}`", place.shape.ty.kind())
                     };
                     let ty = Ty::try_new_array(element_ty, to - from)
@@ -302,12 +299,12 @@ impl FunctionBuilder<'_, '_> {
     /// registers.
     fn leaves(&self, shape: &Shape) -> Option<Vec<(u64, Scalar)>> {
         fn plain(builder: &FunctionBuilder<'_, '_>, shape: &Shape) -> bool {
-            match session::rigid(shape.ty) {
+            match gpurs_rustc::rigid(shape.ty) {
                 RigidTy::Adt(definition, _) if definition.kind() == AdtKind::Struct => (0..shape
                     .count())
-                    .all(|field| plain(builder, &shape.field(builder.sess, field))),
+                    .all(|field| plain(builder, &builder.sess.field_shape(shape, field))),
                 RigidTy::Tuple(_) => (0..shape.count())
-                    .all(|field| plain(builder, &shape.field(builder.sess, field))),
+                    .all(|field| plain(builder, &builder.sess.field_shape(shape, field))),
                 RigidTy::Array(element, _) => plain(builder, &builder.shape_of(element)),
                 RigidTy::Int(_)
                 | RigidTy::Uint(_)

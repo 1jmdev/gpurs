@@ -1,26 +1,85 @@
-use std::rc::Rc;
+//! The NVVM IR module of one kernel: the device function copies it holds, their lowering
+//! queue, and the block-shared allocations they make.
 
 use gpurs_artifact::{Fragment, Lowering, SharedMemory};
-use gpurs_ir::{Type, Value as IRValue};
-use gpurs_rustc::{
-    AllocId, CrateDef, FxHashMap, Instance, Session, Signature, attributes, call_graph, layout,
-};
+use gpurs_ir::{Module, Type, Value as IRValue};
+use gpurs_rustc::{AllocId, CrateDef, FxHashMap, Instance, Session};
 
-use super::{
-    function::FunctionBuilder,
-    shared_memory::{CallPath, SharedAllocations},
-};
+use crate::function::FunctionBuilder;
+
+/// The static block-shared bytes a kernel may declare; larger allocations are dynamic.
+const STATIC_LIMIT: u64 = 48 * 1024;
+
+pub type CallPath = Vec<(Instance, usize, Vec<u64>)>;
+type Site = (Instance, usize, Vec<u64>, CallPath);
+
+/// The block-shared slots of a module, one per allocation site and call path.
+pub struct SharedAllocations {
+    pub required: SharedMemory,
+    pub dynamic: bool,
+    slots: FxHashMap<Site, (IRValue, u64)>,
+}
+
+impl Default for SharedAllocations {
+    fn default() -> Self {
+        SharedAllocations {
+            required: SharedMemory {
+                static_bytes: 8,
+                dynamic_bytes: 0,
+            },
+            slots: FxHashMap::default(),
+            dynamic: false,
+        }
+    }
+}
+
+impl SharedAllocations {
+    pub fn allocate(
+        &mut self,
+        module: &mut Module,
+        site: Site,
+        size: u64,
+        align: u64,
+    ) -> (IRValue, u64) {
+        self.slots
+            .entry(site)
+            .or_insert_with(|| {
+                let start = self.required.static_bytes.next_multiple_of(align);
+                if start + size <= STATIC_LIMIT {
+                    self.required.static_bytes = start + size;
+                    (
+                        module.global(
+                            "gpurs.shared",
+                            3,
+                            false,
+                            IRValue::undef(Type::bytes(size)),
+                            align,
+                        ),
+                        0,
+                    )
+                } else {
+                    let offset = self.required.dynamic_bytes.next_multiple_of(align);
+                    self.required.dynamic_bytes = offset + size;
+                    (
+                        module.external("gpurs_dynamic", Type::bytes(0), 3, align),
+                        offset,
+                    )
+                }
+            })
+            .clone()
+    }
+}
 
 /// One copy of a function; `linear` folds a one-dimensional launch geometry, and `aligned`
 /// belongs to an entry whose slice arguments start 16-byte aligned.
-type Copy = (Instance, bool, bool, CallPath);
+type Specialization = (Instance, bool, bool, CallPath);
 
 /// One NVVM IR module holding every device function reachable from the requested kernels.
 pub(crate) struct ModuleBuilder<'sess> {
     pub sess: Session<'sess>,
-    pub ir: gpurs_ir::Module,
-    functions: FxHashMap<Copy, String>,
-    queue: Vec<Copy>,
+    pub ir: Module,
+    functions: FxHashMap<Specialization, String>,
+    queue: Vec<Specialization>,
     /// Whether a function reaches a block-shared allocation, whose slot depends on the path.
     allocating: FxHashMap<Instance, bool>,
     pub(super) allocations: FxHashMap<AllocId, IRValue>,
@@ -29,8 +88,8 @@ pub(crate) struct ModuleBuilder<'sess> {
 }
 
 impl<'sess> ModuleBuilder<'sess> {
-    pub fn new(sess: Session<'sess>) -> Self {
-        let mut ir = gpurs_ir::Module::default();
+    pub fn new(sess: Session<'sess>, audit: bool) -> Self {
+        let mut ir = Module::default();
         ir.typed_byval = sess.target.capability() >= 100;
         ModuleBuilder {
             sess,
@@ -40,7 +99,7 @@ impl<'sess> ModuleBuilder<'sess> {
             allocating: FxHashMap::default(),
             allocations: FxHashMap::default(),
             shared: SharedAllocations::default(),
-            audit: false,
+            audit,
         }
     }
 
@@ -73,18 +132,18 @@ impl<'sess> ModuleBuilder<'sess> {
         if let Some(&allocates) = self.allocating.get(&instance) {
             return allocates;
         }
-        let allocates = attributes::primitive(self.sess, instance.def.def_id())
+        let allocates = self
+            .sess
+            .primitive(instance.def.def_id())
             .is_some_and(|primitive| primitive.lowering == Lowering::SharedArray)
-            || call_graph::function(self.sess, instance)
+            || self
+                .sess
+                .function(instance)
                 .calls
                 .values()
                 .any(|&callee| self.allocates(callee));
         self.allocating.insert(instance, allocates);
         allocates
-    }
-
-    pub fn signature(&self, instance: Instance) -> Rc<Signature> {
-        layout::signature(self.sess, instance)
     }
 
     /// Lowers every queued function and renders the module, with the dynamic block-shared

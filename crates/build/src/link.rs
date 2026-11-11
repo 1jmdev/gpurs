@@ -1,6 +1,6 @@
 use std::{
     cmp::Reverse,
-    fs,
+    fs, panic,
     path::Path,
     process,
     sync::atomic::{AtomicUsize, Ordering},
@@ -13,7 +13,7 @@ use gpurs_artifact::{
 };
 use gpurs_nvvm::Toolkit;
 
-use crate::build::Result;
+use crate::build::{Error, Result};
 
 pub(crate) fn link(
     lowered: &[&LoweredTarget],
@@ -55,16 +55,14 @@ pub(crate) fn link(
     let mut work: Vec<_> = fragments.iter().enumerate().collect();
     work.sort_by_cached_key(|(_, fragment)| {
         Reverse(
-            fs::metadata(store.path(Kind::Fragment, fragment))
-                .unwrap()
-                .len(),
+            fs::metadata(store.path(Kind::Fragment, fragment)).map_or(0, |metadata| metadata.len()),
         )
     });
     let next = AtomicUsize::new(0);
     let assemble = |index: usize, fragment: &str| -> Result<Module<'static>> {
         let fragment = store
             .get(Kind::Fragment, fragment)
-            .ok_or("missing fragment")?;
+            .ok_or_else(|| Error::MissingFragment(fragment.to_owned()))?;
         let ir = artifact::link([&postcard::from_bytes::<Fragment>(&fragment)?]);
         let digest = Key::Ptx {
             toolkit: &fingerprint,
@@ -139,7 +137,11 @@ pub(crate) fn link(
             })
             .collect::<Vec<_>>()
             .into_iter()
-            .map(|thread| thread.join().unwrap())
+            .map(|thread| {
+                thread
+                    .join()
+                    .unwrap_or_else(|payload| panic::resume_unwind(payload))
+            })
             .collect::<Result<Vec<Vec<_>>>>()
     })?
     .into_iter()

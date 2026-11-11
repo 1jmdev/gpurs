@@ -1,13 +1,14 @@
 //! Control-flow graphs of MIR bodies and NVVM IR functions, analyzed with rustc's graph
 //! algorithms.
 
+use fixedbitset::FixedBitSet;
 use rustc_data_structures::graph::{
     DirectedGraph, Predecessors, StartNode, Successors,
     dominators::{self, Dominators},
     iterate,
 };
 
-use crate::{Body, TerminatorKind};
+use crate::{Body, FxHashSet, TerminatorKind};
 
 /// A control-flow graph over block indices.
 pub struct Graph {
@@ -78,6 +79,32 @@ impl Graph {
         diverging
     }
 
+    /// The successors of each block of `body` along normal control flow: unwind edges and edges
+    /// into unreachable blocks removed.
+    pub fn normal_successors(body: &Body) -> Vec<Vec<usize>> {
+        (0..body.blocks.len())
+            .map(|block| {
+                let terminator = &body.blocks[block].terminator;
+                let successors = match &terminator.kind {
+                    TerminatorKind::Call { target, .. } => target.iter().copied().collect(),
+                    TerminatorKind::Assert { target, .. } | TerminatorKind::Drop { target, .. } => {
+                        vec![*target]
+                    }
+                    _ => terminator.successors(),
+                };
+                successors
+                    .into_iter()
+                    .filter(|&successor| {
+                        !matches!(
+                            body.blocks[successor].terminator.kind,
+                            TerminatorKind::Unreachable
+                        )
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
     pub fn predecessors(&self, block: usize) -> &[usize] {
         &self.predecessors[block]
     }
@@ -98,6 +125,36 @@ impl Graph {
             reachable[block] = true;
         }
         reachable
+    }
+
+    /// The blocks in reverse postorder followed by the blocks the start does not reach, and the
+    /// rank of each block in that order.
+    pub fn order(&self) -> (Vec<usize>, Vec<usize>) {
+        let mut order = self.reverse_postorder();
+        let mut ranks = vec![usize::MAX; self.successors.len()];
+        for (rank, &block) in order.iter().enumerate() {
+            ranks[block] = rank;
+        }
+        for (block, rank) in ranks.iter_mut().enumerate() {
+            if *rank == usize::MAX {
+                *rank = order.len();
+                order.push(block);
+            }
+        }
+        (order, ranks)
+    }
+
+    /// The blocks entered by a back edge.
+    pub fn loop_heads(&self, dominators: &Dominators<usize>) -> FixedBitSet {
+        let mut heads = FixedBitSet::with_capacity(self.successors.len());
+        for (block, targets) in self.successors.iter().enumerate() {
+            for &target in targets {
+                if dominators.is_reachable(block) && dominators.dominates(target, block) {
+                    heads.insert(target);
+                }
+            }
+        }
+        heads
     }
 
     /// The dominance frontier of each block: the joins it reaches without strictly dominating
@@ -152,4 +209,72 @@ impl Predecessors for Graph {
     fn predecessors(&self, block: usize) -> impl Iterator<Item = usize> {
         self.predecessors[block].iter().copied()
     }
+}
+
+/// The postdominators of a graph whose start is block 0. Blocks without successors and blocks
+/// closing a loop that never exits lead to a virtual exit, so every block postdominates within
+/// a function that can loop forever.
+pub fn postdominators(successors: &[Vec<usize>]) -> Dominators<usize> {
+    let count = successors.len();
+    let mut reversed = vec![Vec::new(); count + 1];
+    for (block, targets) in successors.iter().enumerate() {
+        if targets.is_empty() {
+            reversed[count].push(block);
+        }
+        for &target in targets {
+            reversed[target].push(block);
+        }
+    }
+    let exiting = Graph::new(count, reversed.clone()).reachable();
+    let dominators = Graph::new(0, successors.to_vec()).dominators();
+    for (block, targets) in successors.iter().enumerate() {
+        if !exiting[block]
+            && dominators.is_reachable(block)
+            && targets
+                .iter()
+                .any(|&target| dominators.dominates(target, block))
+        {
+            reversed[count].push(block);
+        }
+    }
+    Graph::new(count, reversed).dominators()
+}
+
+/// Whether `target` is reachable from `start` without passing through `barriers`.
+pub fn reaches(
+    successors: &[Vec<usize>],
+    start: usize,
+    target: usize,
+    barriers: &FxHashSet<usize>,
+) -> bool {
+    let mut pending = vec![start];
+    let mut visited = FxHashSet::default();
+    while let Some(block) = pending.pop() {
+        if !visited.insert(block) || barriers.contains(&block) {
+            continue;
+        }
+        if block == target {
+            return true;
+        }
+        pending.extend(successors[block].iter().copied());
+    }
+    false
+}
+
+/// The blocks reachable from `start` without passing through `barriers`.
+pub fn reachable_from(
+    successors: &[Vec<usize>],
+    start: usize,
+    barriers: &FxHashSet<usize>,
+) -> FixedBitSet {
+    let mut pending = vec![start];
+    let mut visited = FixedBitSet::with_capacity(successors.len());
+    while let Some(block) = pending.pop() {
+        if visited.contains(block) || barriers.contains(&block) {
+            continue;
+        }
+        visited.insert(block);
+        pending.extend(successors[block].iter().copied());
+    }
+    visited
 }

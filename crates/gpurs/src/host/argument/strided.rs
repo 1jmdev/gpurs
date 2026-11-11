@@ -1,8 +1,10 @@
 use std::{ops::Range, rc::Rc, slice};
 
 use crate::{
-    Argument, Buffer, DeviceAddress, DeviceScatter, DeviceSlice, DeviceSliceMut, Error, Gpu,
-    PinnedBuffer, Result, Stream, Transfer, buffer::Span, gpu::Strided, host::tracking::Allocation,
+    Argument, Buffer, DeviceAddress, DeviceScatter, DeviceSlice, DeviceSliceMut, Error,
+    PinnedBuffer, Result, Stream, Transfer,
+    gpu::Strided,
+    host::{memory::buffer::Span, tracking::Allocation},
 };
 
 /// A retained strided descriptor. Zero strides broadcast; dimensions must be nonempty.
@@ -46,7 +48,7 @@ impl<T: Copy> DeviceScatter<T> {
             stream,
             target,
             &indices.ok_or_else(|| {
-                Error::InvalidOperation("strided view dimensions overflow or are empty".to_owned())
+                Error::InvalidView("strided view dimensions overflow or are empty")
             })?,
         )
     }
@@ -64,13 +66,11 @@ impl<T: Copy, const N: usize> DeviceStrided<T, N> {
         strides: [usize; N],
         offset: usize,
     ) -> Result<DeviceStrided<T, N>> {
-        let gpu = Gpu {
-            device: stream.device.clone(),
-        };
+        let gpu = stream.gpu();
         let span = source.span();
         if !Rc::ptr_eq(&stream.device, &span.allocation.device) {
-            return Err(Error::InvalidOperation(
-                "strided view belongs to another GPU".to_owned(),
+            return Err(Error::ContextMismatch(
+                "strided view belongs to another GPU",
             ));
         }
         let descriptor = descriptor::<T, N>(span, shape, strides, offset)?;
@@ -115,9 +115,8 @@ fn descriptor<T, const N: usize>(
     offset: usize,
 ) -> Result<Strided<T, N>> {
     if N > 8 || shape.contains(&0) || size_of::<T>() == 0 {
-        return Err(Error::InvalidOperation(
-            "strided views require rank at most eight and nonzero extents and element size"
-                .to_owned(),
+        return Err(Error::InvalidView(
+            "strided views require rank at most eight and nonzero extents and element size",
         ));
     }
     let end = shape
@@ -130,8 +129,8 @@ fn descriptor<T, const N: usize>(
         .iter()
         .try_fold(1usize, |len, size| len.checked_mul(*size));
     let (Some(_), Some(len)) = (end.filter(|end| *end < span.len), len) else {
-        return Err(Error::InvalidOperation(
-            "strided view exceeds its source or the addressable element count".to_owned(),
+        return Err(Error::InvalidView(
+            "strided view exceeds its source or the addressable element count",
         ));
     };
     Ok(Strided {

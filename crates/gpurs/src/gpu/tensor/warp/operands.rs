@@ -1,7 +1,10 @@
 //! Operand fragments of one 16-deep slice of a stage, loaded with `ldmatrix`.
 
 use super::{FragmentA, FragmentB, WarpRegion, instruction};
-use crate::gpu::tensor::{DepthMajor, Element, ExtentMajor, SharedTile, sealed::Sealed};
+use crate::{
+    gpu::tensor::{DepthMajor, Element, ExtentMajor, SharedTile},
+    sealed::Sealed,
+};
 
 /// The operands of one 16-deep slice for a warp region: an `A` fragment per 16 rows and a `B`
 /// fragment per 8 columns. They are plain registers, so the kernel decides how far ahead of
@@ -81,7 +84,9 @@ impl<T: Element, const ROWS: usize, const COLUMNS: usize> OperandTile<T>
     }
 }
 
-impl<T: Element, const ROWS: usize, const COLUMNS: usize> SharedTile<T, ROWS, COLUMNS, ExtentMajor> {
+impl<T: Element, const ROWS: usize, const COLUMNS: usize>
+    SharedTile<T, ROWS, COLUMNS, ExtentMajor>
+{
     fn transposed_a(&self, extent: usize, depth: usize) -> FragmentA<T> {
         FragmentA::new(instruction::load_matrices_transposed_4(
             self.lane_address(depth, extent, true),
@@ -120,10 +125,7 @@ impl<const BM: usize, const BN: usize, const FM: usize, const FN: usize>
     ) -> [FragmentA<T>; FM] {
         const {
             assert!(A::EXTENT == BM, "`A` tiles span the rows of the block tile");
-            assert!(
-                A::DEPTH.is_multiple_of(T::DEPTH),
-                "tiles hold whole slices"
-            );
+            assert!(A::DEPTH.is_multiple_of(T::DEPTH), "tiles hold whole slices");
         };
         let mut fragments = [FragmentA::default(); FM];
         for i in 0..FM {
@@ -145,10 +147,7 @@ impl<const BM: usize, const BN: usize, const FM: usize, const FN: usize>
                 B::EXTENT == BN,
                 "`B` tiles span the columns of the block tile"
             );
-            assert!(
-                B::DEPTH.is_multiple_of(T::DEPTH),
-                "tiles hold whole slices"
-            );
+            assert!(B::DEPTH.is_multiple_of(T::DEPTH), "tiles hold whole slices");
         };
         let mut fragments = [FragmentB::default(); FN];
         for pair in 0..FN / 2 {

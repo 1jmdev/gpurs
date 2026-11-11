@@ -1,10 +1,14 @@
-use std::{ffi::c_void, rc::Rc};
+//! Loaded CUDA modules and their kernels, including PTX generated at run time and loaded once
+//! per key.
+
+use std::{cell::RefCell, collections::HashMap, ffi::c_void, rc::Rc};
 
 use gpurs_driver::{self as driver, Function, LaunchAttributes, LaunchRequest};
 
 use crate::{
-    Error, Event, ExternalAccess, Gpu, LaunchConfig, Result, Stream,
+    Error, Event, Gpu, LaunchConfig, Result, Stream,
     host::{context::Device, tracking},
+    raw::ExternalAccess,
 };
 
 /// An externally compiled module; final release waits for context work to finish.
@@ -159,28 +163,23 @@ impl Kernel {
         accesses: &[ExternalAccess],
     ) -> Result<Event> {
         if !Rc::ptr_eq(&self.module.0.device, &stream.device) {
-            return Err(Error::InvalidOperation(
-                "kernel and stream contexts differ".to_owned(),
-            ));
+            return Err(Error::ContextMismatch("kernel and stream contexts differ"));
         }
         let dimensions = |values: [usize; 3]| -> Result<[u32; 3]> {
             let [x, y, z] = values;
             Ok([
-                u32::try_from(x).map_err(|_| {
-                    Error::InvalidOperation("launch dimension exceeds CUDA range".to_owned())
-                })?,
-                u32::try_from(y).map_err(|_| {
-                    Error::InvalidOperation("launch dimension exceeds CUDA range".to_owned())
-                })?,
-                u32::try_from(z).map_err(|_| {
-                    Error::InvalidOperation("launch dimension exceeds CUDA range".to_owned())
-                })?,
+                u32::try_from(x)
+                    .map_err(|_| Error::SizeOverflow("launch dimension exceeds CUDA range"))?,
+                u32::try_from(y)
+                    .map_err(|_| Error::SizeOverflow("launch dimension exceeds CUDA range"))?,
+                u32::try_from(z)
+                    .map_err(|_| Error::SizeOverflow("launch dimension exceeds CUDA range"))?,
             ])
         };
         let grid = dimensions(config.grid)?;
         let block = dimensions(config.block)?;
         let shared = u32::try_from(config.shared_bytes)
-            .map_err(|_| Error::InvalidOperation("shared memory exceeds CUDA range".to_owned()))?;
+            .map_err(|_| Error::SizeOverflow("shared memory exceeds CUDA range"))?;
         let _context = stream.device.context.try_enter()?;
         stream.maintain()?;
         let accesses: Vec<_> = accesses.iter().map(|access| access.0.clone()).collect();
@@ -211,5 +210,44 @@ impl Kernel {
 impl Drop for ModuleInner {
     fn drop(&mut self) {
         let _ = self.device.context.try_synchronize();
+    }
+}
+
+/// Modules of generated PTX by key, each generated and loaded on the first request for it.
+///
+/// ```no_run
+/// # fn main() -> gpurs::Result<()> {
+/// let gpu = gpurs::Gpu::new(0)?;
+/// let cache = gpurs::raw::PtxCache::new(&gpu);
+/// let kernel = cache.module("copy f32", || String::from("…"))?.kernel("copy")?;
+/// # Ok(())
+/// # }
+/// ```
+pub struct PtxCache {
+    gpu: Gpu,
+    modules: RefCell<HashMap<String, Module>>,
+}
+
+impl PtxCache {
+    pub fn new(gpu: &Gpu) -> Self {
+        PtxCache {
+            gpu: gpu.clone(),
+            modules: RefCell::default(),
+        }
+    }
+
+    /// The module of `key`, loading the PTX that `generate` returns when the key is new.
+    ///
+    /// # Errors
+    /// Returns CUDA failures to load the module.
+    pub fn module(&self, key: &str, generate: impl FnOnce() -> String) -> Result<Module> {
+        if let Some(module) = self.modules.borrow().get(key) {
+            return Ok(module.clone());
+        }
+        let module = self.gpu.load_ptx(&generate())?;
+        self.modules
+            .borrow_mut()
+            .insert(key.to_owned(), module.clone());
+        Ok(module)
     }
 }

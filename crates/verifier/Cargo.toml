@@ -14,7 +14,7 @@ fixedbitset.workspace = true
 rustc-hash.workspace = true
 gpurs-artifact.workspace = true
 gpurs-rustc.workspace = true
-serde.workspace = true
+thiserror.workspace = true
 
 [lints]
 workspace = true

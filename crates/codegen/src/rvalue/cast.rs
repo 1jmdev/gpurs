@@ -1,9 +1,9 @@
 use gpurs_ir::{Conversion, Predicate, Type, Value as IRValue};
-use gpurs_rustc::{CastKind, PointerCoercion, RigidTy, Scalar, TyKind, ValueRepr};
+use gpurs_rustc::{CastKind, PointerCoercion, RigidTy, Scalar, Shape, TyKind, ValueRepr};
 
 use crate::{
     function::FunctionBuilder,
-    layout::{self, Shape},
+    layout,
     place::{Operand, Value},
 };
 

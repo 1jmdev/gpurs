@@ -1,13 +1,13 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     env,
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 use gpurs_artifact::{self as artifact, Crate};
 use serde::Deserialize;
 
-use crate::build::Result;
+use crate::build::{Error, Result};
 
 #[derive(Deserialize)]
 struct Metadata {
@@ -88,27 +88,33 @@ pub(crate) fn select() -> Result<Selection> {
         .args(["metadata", "--format-version=1"])
         .output()?;
     if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).into());
+        return Err(Error::Cargo(
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        ));
     }
     let Metadata { packages, resolve } = serde_json::from_slice(&output.stdout)?;
     let name = env::var("CARGO_PKG_NAME")?;
-    let find = |id: &str| packages.iter().find(|package| package.id == id).unwrap();
+    let find = |id: &str| {
+        packages
+            .iter()
+            .find(|package| package.id == id)
+            .ok_or_else(|| Error::UnknownPackage(id.to_owned()))
+    };
     let dependencies = |package: &Package| {
-        &resolve
+        resolve
             .nodes
             .iter()
             .find(|node| node.id == package.id)
-            .unwrap()
-            .deps
+            .map_or(&[][..], |node| &node.deps)
     };
     let package = packages
         .iter()
         .find(|package| package.name == name)
-        .unwrap();
+        .ok_or_else(|| Error::UnknownPackage(name.clone()))?;
     let runtime = &packages
         .iter()
         .find(|package| package.name == "gpurs")
-        .unwrap()
+        .ok_or_else(|| Error::MissingRuntime(name.clone()))?
         .id;
     let kind = package
         .targets
@@ -120,7 +126,7 @@ pub(crate) fn select() -> Result<Selection> {
             "example" => 2,
             _ => 3,
         })
-        .unwrap();
+        .ok_or_else(|| Error::UnknownPackage(name.clone()))?;
     let example = kind == "example";
     let selected: Vec<_> = package
         .targets
@@ -131,7 +137,7 @@ pub(crate) fn select() -> Result<Selection> {
     let mut index = 0;
     while index < local.len() {
         for dependency in dependencies(local[index]) {
-            let dependency_package = find(&dependency.pkg);
+            let dependency_package = find(&dependency.pkg)?;
             if dependency_package.source.is_none()
                 && !local.iter().any(|known| known.id == dependency_package.id)
                 && dependency.normal(index == 0 && example)
@@ -157,7 +163,7 @@ pub(crate) fn select() -> Result<Selection> {
                         )
                     }
                 })
-                .map(|target| target.src_path.parent().unwrap().to_owned())
+                .filter_map(|target| target.src_path.parent().map(Path::to_path_buf))
                 .chain([local.manifest_path.clone()])
         })
         .collect();
@@ -172,8 +178,8 @@ pub(crate) fn select() -> Result<Selection> {
                 dependency.pkg == *runtime && dependency.name == "gpurs" && dependency.normal(false)
             })
         })
-        .flat_map(|node| {
-            let package = find(&node.id);
+        .filter_map(|node| find(&node.id).ok())
+        .flat_map(|package| {
             package
                 .targets
                 .iter()

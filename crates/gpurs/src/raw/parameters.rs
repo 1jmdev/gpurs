@@ -6,9 +6,9 @@ use gpurs_driver::LaunchAttributes;
 
 use crate::{
     DeviceSlice, DeviceSliceMut, Error, Launch, Result,
-    buffer::Span,
     host::{
         graph::{CapturedKernel, CapturedOperation},
+        memory::buffer::Span,
         tracking::{self, Access},
     },
     raw::Kernel,
@@ -69,8 +69,8 @@ impl Kernel {
     /// touch only the memory of those parameters, writing only what they mark as written.
     pub unsafe fn submit(&self, launcher: &impl Launch, parameters: ParameterBlock) -> Result<()> {
         let stream = launcher.stream();
-        let config = launcher.config().ok_or_else(|| {
-            Error::InvalidOperation(format!("`{}` needs explicit geometry", self.name))
+        let config = launcher.config().ok_or_else(|| Error::MissingGeometry {
+            kernel: self.name.clone(),
         })?;
         let ParameterBlock {
             mut words,
@@ -81,8 +81,8 @@ impl Kernel {
             .iter()
             .any(|access| !Rc::ptr_eq(&access.allocation.device, &stream.device))
         {
-            return Err(Error::InvalidOperation(
-                "kernel argument belongs to another GPU".to_owned(),
+            return Err(Error::ContextMismatch(
+                "kernel argument belongs to another GPU",
             ));
         }
         let request = config.request(LaunchAttributes::default());

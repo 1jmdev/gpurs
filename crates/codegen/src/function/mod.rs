@@ -1,5 +1,4 @@
 mod builder;
-mod copies;
 mod lower;
 mod select;
 mod terminator;

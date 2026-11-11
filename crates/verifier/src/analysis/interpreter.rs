@@ -1,11 +1,11 @@
 use std::collections::{BTreeMap, hash_map::Entry};
 
 use gpurs_artifact::Parameter;
-use gpurs_rustc::{FxHashMap, Instance, RigidTy, Session, Span, TerminatorKind, Ty, session};
+use gpurs_rustc::{FxHashMap, Graph, Instance, RigidTy, Session, Span, TerminatorKind, Ty};
 
 use super::{
     Context, Frame, Origin, Pointer, Region, State, Value, ValueData, arithmetic,
-    program::{self, Program, Summary},
+    program::{Program, Summary},
     state::Findings,
 };
 use crate::{
@@ -62,7 +62,7 @@ impl<'a, 'sess> Analysis<'a, 'sess> {
             parameters,
             scalars: parameters
                 .iter()
-                .map(|parameter| match session::rigid(parameter.layout.ty) {
+                .map(|parameter| match gpurs_rustc::rigid(parameter.layout.ty) {
                     RigidTy::Uint(kind) => arithmetic::bits(kind),
                     _ => 64,
                 })
@@ -112,18 +112,18 @@ impl<'a, 'sess> Analysis<'a, 'sess> {
                     ..ValueData::default()
                 }),
                 Parameter::Value(_)
-                    if matches!(session::rigid(parameter.layout.ty), RigidTy::Uint(_)) =>
+                    if matches!(gpurs_rustc::rigid(parameter.layout.ty), RigidTy::Uint(_)) =>
                 {
                     Value::integer(Polynomial::atom(Atom::Scalar(index)), 0)
                 }
                 Parameter::Value(_)
-                    if matches!(session::rigid(parameter.layout.ty), RigidTy::Array(..)) =>
+                    if matches!(gpurs_rustc::rigid(parameter.layout.ty), RigidTy::Array(..)) =>
                 {
                     Value::from(ValueData {
                         fields: (0..parameter.layout.count())
                             .map(|field| {
-                                let shape = parameter.layout.field(self.sess, field);
-                                if matches!(session::rigid(shape.ty), RigidTy::Uint(_))
+                                let shape = self.sess.field_shape(&parameter.layout, field);
+                                if matches!(gpurs_rustc::rigid(shape.ty), RigidTy::Uint(_))
                                     && shape.size().bytes() <= 8
                                 {
                                     Value::integer(
@@ -167,12 +167,16 @@ impl<'a, 'sess> Analysis<'a, 'sess> {
         let offset = self.program.successors.len();
         self.program
             .successors
-            .extend((0..body.blocks.len()).map(|block| {
-                program::normal_successors(&body, block)
+            .extend(
+                Graph::normal_successors(&body)
                     .into_iter()
-                    .map(|successor| offset + successor)
-                    .collect()
-            }));
+                    .map(|successors| {
+                        successors
+                            .into_iter()
+                            .map(|successor| offset + successor)
+                            .collect()
+                    }),
+            );
         self.program
             .branches
             .resize(self.program.successors.len(), None);

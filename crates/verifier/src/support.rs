@@ -1,7 +1,7 @@
 use gpurs_artifact::KernelEffects;
 use gpurs_rustc::{
     CrateDef, FxHashSet, Graph, Instance, InstanceKind, Item, RigidTy, Session, Span,
-    TerminatorKind, TyKind, attributes, call_graph,
+    TerminatorKind, TyKind,
 };
 
 /// Rejects unsupported call graphs and unions the effects their primitives declare.
@@ -16,14 +16,16 @@ pub fn check(sess: Session<'_>, root: Instance) -> KernelEffects {
         &mut effects,
     );
     if effects.contains(KernelEffects::REGISTER_EXCHANGE)
-        && !attributes::launch_bounds(sess, root.def.def_id())
+        && !sess
+            .launch_bounds(root.def.def_id())
             .is_some_and(|(_, blocks)| blocks <= 1)
     {
-        sess.error_help(
+        sess.error(
             root.def.def_id().span(),
             "register reallocation needs the block's register allocation at compile time",
-            "declare `#[gpu(threads = N)]` without `minimum_blocks` above 1",
-        );
+        )
+        .with_help("declare `#[gpu(threads = N)]` without `minimum_blocks` above 1")
+        .emit();
     }
     effects
 }
@@ -37,27 +39,26 @@ fn visit(
     effects: &mut KernelEffects,
 ) {
     if active.contains(&instance) {
-        sess.error_help(
-            span,
-            format!("recursive GPU call to `{}`", instance.name()),
-            "replace the recursive call with a loop; GPU call graphs must be acyclic",
-        );
+        sess.error(span, format!("recursive GPU call to `{}`", instance.name()))
+            .with_help("replace the recursive call with a loop; GPU call graphs must be acyclic")
+            .emit();
         return;
     }
-    if !checked.insert(instance) || call_graph::leaf(sess, instance) {
+    if !checked.insert(instance) || sess.is_leaf(instance) {
         return;
     }
     active.push(instance);
     if !instance.has_body() && matches!(instance.kind, InstanceKind::Item) {
-        sess.error_help(
+        sess.error(
             instance.def.def_id().span(),
             format!("GPU code cannot call `{}`", instance.name()),
-            "use a supported GPU operation or a #[gpu] Rust function",
-        );
+        )
+        .with_help("use a supported GPU operation or a #[gpu] Rust function")
+        .emit();
         active.pop();
         return;
     }
-    let function = call_graph::function(sess, instance);
+    let function = sess.function(instance);
     let Some(body) = &function.body else {
         active.pop();
         return;
@@ -77,24 +78,25 @@ fn visit(
                     continue;
                 };
                 let TyKind::RigidTy(RigidTy::FnDef(..)) = ty.kind() else {
-                    sess.error_help(
+                    sess.error(
                         terminator.source_info.span,
                         "indirect function calls are not supported in GPU code",
+                    )
+                    .with_help(
                         "call a #[gpu] function directly or use a generic parameter so the \
                          compiler can resolve the callee",
-                    );
+                    )
+                    .emit();
                     continue;
                 };
                 let Some(&callee) = function.calls.get(&block) else {
-                    sess.error_help(
-                        terminator.source_info.span,
-                        "cannot resolve GPU callee",
-                        "use a directly resolved GPU function",
-                    );
+                    sess.error(terminator.source_info.span, "cannot resolve GPU callee")
+                        .with_help("use a directly resolved GPU function")
+                        .emit();
                     continue;
                 };
                 let path = sess.path(callee.def.def_id());
-                if attributes::is_device(sess, instance.def.def_id())
+                if sess.is_device(instance.def.def_id())
                     && (sess.is(callee.def.def_id(), "core::mem::forget")
                         || path.starts_with("core::mem::manually_drop::")
                         || path.starts_with("core::mem::maybe_uninit::"))
@@ -105,16 +107,17 @@ fn visit(
                         .filter_map(|argument| argument.ty())
                         .any(|ty| sess.needs_drop(*ty))
                 {
-                    sess.error_help(
+                    sess.error(
                         terminator.source_info.span,
                         "GPU resources cannot bypass destructor cleanup",
-                        "let the resource leave scope normally, or complete its operation",
-                    );
+                    )
+                    .with_help("let the resource leave scope normally, or complete its operation")
+                    .emit();
                 }
-                if let Some(primitive) = attributes::primitive(sess, callee.def.def_id()) {
+                if let Some(primitive) = sess.primitive(callee.def.def_id()) {
                     *effects |= primitive.effects() - KernelEffects::INDEX;
                     if !sess.target.provides(&primitive.targets) {
-                        sess.error_help(
+                        sess.error(
                             terminator.source_info.span,
                             format!(
                                 "`{}` requires {}, not {}",
@@ -122,8 +125,11 @@ fn visit(
                                 primitive.targets,
                                 sess.target
                             ),
+                        )
+                        .with_help(
                             "select a GPU architecture that provides it in gpurs_build::compile",
-                        );
+                        )
+                        .emit();
                     }
                 }
                 if allowed(sess, callee, terminator.source_info.span) {
@@ -153,7 +159,8 @@ fn visit(
                 sess.error(
                     terminator.source_info.span,
                     "assembly, tail calls, and coroutines are not supported in GPU code",
-                );
+                )
+                .emit();
             }
             _ => {}
         }
@@ -163,17 +170,15 @@ fn visit(
 
 fn allowed(sess: Session<'_>, instance: Instance, span: Span) -> bool {
     if matches!(instance.kind, InstanceKind::Virtual { .. }) {
-        sess.error_help(
-            span,
-            "dynamic dispatch is not supported in GPU code",
-            "replace dyn Trait with a generic parameter bounded by the trait",
-        );
+        sess.error(span, "dynamic dispatch is not supported in GPU code")
+            .with_help("replace dyn Trait with a generic parameter bounded by the trait")
+            .emit();
         return false;
     }
     let path = sess.path(instance.def.def_id());
-    let approved = attributes::is_device(sess, instance.def.def_id())
-        || attributes::primitive(sess, instance.def.def_id()).is_some()
-        || call_graph::leaf(sess, instance)
+    let approved = sess.is_device(instance.def.def_id())
+        || sess.primitive(instance.def.def_id()).is_some()
+        || sess.is_leaf(instance)
         || sess.within(instance.def.def_id(), Item::DeviceModule)
         || sess.within(instance.def.def_id(), Item::AddressModule)
         || [
@@ -205,12 +210,15 @@ fn allowed(sess: Session<'_>, instance: Instance, span: Span) -> bool {
             .iter()
             .any(|prefix| path.starts_with(prefix));
     if !approved {
-        sess.error_help(
+        sess.error(
             span,
             format!("`{}` is unavailable in GPU code", instance.name()),
+        )
+        .with_help(
             "annotate this function or its implementation with #[gpu]; host-only operations must \
              stay outside the kernel",
-        );
+        )
+        .emit();
     }
     approved
 }

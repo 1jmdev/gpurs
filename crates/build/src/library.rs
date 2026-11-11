@@ -8,7 +8,7 @@ use gpurs_artifact::{BuildConfiguration, DEVICE_FLAGS, Libraries};
 use serde::Deserialize;
 
 use crate::{
-    build::Result,
+    build::{Error, Result},
     metadata::{Selection, Target},
     wrapper,
 };
@@ -58,7 +58,7 @@ pub(crate) fn view(
     let output = command
         .args(["--target", &env::var("HOST")?, "--target-dir"])
         .arg(compiler.join("metadata"))
-        .env("RUSTC", env::var_os("RUSTC").unwrap())
+        .env("RUSTC", env::var("RUSTC")?)
         .env(
             "CARGO_ENCODED_RUSTFLAGS",
             ["-Zalways-encode-mir", "--cfg=gpurs_device"]
@@ -85,7 +85,9 @@ pub(crate) fn view(
                 eprint!("{rendered}");
             }
         }
-        return Err(String::from_utf8_lossy(&output.stderr).into());
+        return Err(Error::Cargo(
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        ));
     }
     let mut libraries = Libraries::default();
     for message in messages {
@@ -121,7 +123,7 @@ pub(crate) fn view(
             }
             libraries
                 .directories
-                .insert(file.parent().unwrap().to_owned());
+                .extend(file.parent().map(Path::to_path_buf));
         }
     }
     Ok(libraries)

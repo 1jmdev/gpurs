@@ -4,7 +4,7 @@ use gpurs_rustc::{GenericArgKind, Instance, TyConst, TyConstKind};
 use crate::{
     function::FunctionBuilder,
     intrinsic::dispatch,
-    layout::{self},
+    layout,
     place::{Operand, Place, Value},
 };
 

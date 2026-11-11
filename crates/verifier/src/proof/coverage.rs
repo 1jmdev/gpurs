@@ -147,19 +147,21 @@ pub fn slots(expression: &Polynomial) -> Option<(usize, i128)> {
 
 /// `expression` with `variable` replaced by `value`; `None` when it occurs nested.
 fn replace(expression: &Polynomial, variable: usize, value: &Polynomial) -> Option<Polynomial> {
-    let replaced = expression
-        .0
-        .iter()
-        .try_fold(Polynomial::default(), |sum, (monomial, coefficient)| {
-            let product = monomial
-                .iter()
-                .try_fold(Polynomial::constant(*coefficient), |product, atom| {
-                    product.multiply(&match atom {
-                        Atom::Variable(found) if *found == variable => value.clone(),
-                        _ => Polynomial::atom(atom.clone()),
-                    })
-                })?;
-            sum.add(&product, 1)
-        })?;
+    let replaced =
+        expression
+            .0
+            .iter()
+            .try_fold(Polynomial::default(), |sum, (monomial, coefficient)| {
+                let product = monomial.iter().try_fold(
+                    Polynomial::constant(*coefficient),
+                    |product, atom| {
+                        product.multiply(&match atom {
+                            Atom::Variable(found) if *found == variable => value.clone(),
+                            _ => Polynomial::atom(atom.clone()),
+                        })
+                    },
+                )?;
+                sum.add(&product, 1)
+            })?;
     (!replaced.variables().contains(&variable)).then_some(replaced)
 }

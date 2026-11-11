@@ -1,6 +1,6 @@
 use std::rc::Rc;
 
-use gpurs_rustc::{CrateDef, Instance, Operand, Place, RigidTy, TyKind, attributes, call_graph};
+use gpurs_rustc::{CrateDef, Instance, Operand, Place, RigidTy, TyKind};
 
 use super::{Analysis, Check, Obligation, State, Value, ValueData, program::Callee, state};
 use crate::symbolic::Polynomial;
@@ -70,9 +70,9 @@ impl Analysis<'_, '_> {
                             .first()
                             .and_then(|argument| argument.ty())
                             .copied(),
-                        primitive: attributes::primitive(self.sess, instance.def.def_id()),
+                        primitive: self.sess.primitive(instance.def.def_id()),
                         intrinsic: instance.intrinsic_name(),
-                        leaf: call_graph::leaf(self.sess, instance),
+                        leaf: self.sess.is_leaf(instance),
                     }))
                 }
                 _ => None,

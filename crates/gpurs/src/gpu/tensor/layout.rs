@@ -1,7 +1,7 @@
 //! Operand layouts. Every operand is `extent x depth`: `A` is M x K and `B` is N x K, so both
 //! operands share one vocabulary and the layout alone selects `ldmatrix` or `ldmatrix.trans`.
 
-use super::sealed::Sealed;
+use crate::sealed::Sealed;
 
 /// The storage order of an operand.
 pub trait Layout: Sealed + 'static {

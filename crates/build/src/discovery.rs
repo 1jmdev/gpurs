@@ -5,7 +5,7 @@ use gpurs_artifact::{
 };
 
 use crate::{
-    build::{self, Result},
+    build::{self, Error, Result},
     metadata::Selection,
     wrapper,
 };
@@ -24,13 +24,17 @@ pub(crate) fn discover(
         .arg(compiler.join(format!("discovery-{}", env::var("PROFILE")?)))
         .output()?;
     if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).into());
+        return Err(Error::Cargo(
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        ));
     }
     Ok(())
 }
 
 pub(crate) fn compile(arguments: &[OsString]) -> i32 {
-    let configuration = CONFIGURATION.as_ref().unwrap();
+    let configuration = CONFIGURATION
+        .as_ref()
+        .expect("the discovery stage has a configuration");
     let source = arguments
         .iter()
         .find(|argument| argument.to_string_lossy().ends_with(".rs"))
@@ -40,7 +44,11 @@ pub(crate) fn compile(arguments: &[OsString]) -> i32 {
         stage: Stage::Device {
             output: configuration.artifacts.join(format!(
                 "{}-{test}.bin",
-                artifact::digest(env::current_dir().unwrap().join(source))
+                artifact::digest(
+                    env::current_dir()
+                        .expect("rustc runs in an accessible directory")
+                        .join(source),
+                )
             )),
         },
         ..configuration.clone()

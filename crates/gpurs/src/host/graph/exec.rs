@@ -1,21 +1,30 @@
 use std::{cell::RefCell, ffi::c_void, rc::Rc};
 
-use gpurs_driver::KernelNodeParameters;
+use gpurs_driver::{self as driver, KernelNodeParameters};
 
 use crate::{
     Error, Event, Result, Stream,
     host::{
-        graph::{Capture, CapturedOperation, Graph, GraphExec, Operation},
-        tracking,
+        graph::{Capture, CapturedOperation, Graph, Operation},
+        tracking::{self, Access},
     },
 };
+
+/// An instantiated graph that launches as one submission and accepts in-place kernel
+/// updates.
+pub struct GraphExec {
+    pub(crate) raw: driver::GraphExec,
+    pub(crate) graph: Graph,
+    pub(crate) origin: Graph,
+    pub(crate) pending: RefCell<Option<Event>>,
+    pub(crate) replacements: Vec<Option<Vec<Access>>>,
+    pub(crate) accesses: Vec<Access>,
+}
 
 impl GraphExec {
     pub fn upload(&self, stream: &Stream) -> Result<Event> {
         if !Rc::ptr_eq(&self.graph.0.device, &stream.device) {
-            return Err(Error::InvalidOperation(
-                "graph and stream contexts differ".to_owned(),
-            ));
+            return Err(Error::ContextMismatch("graph and stream contexts differ"));
         }
         self.try_finish()?;
         let _context = stream.device.context.try_enter()?;
@@ -38,9 +47,7 @@ impl GraphExec {
 
     pub fn launch(&self, stream: &Stream) -> Result<Event> {
         if !Rc::ptr_eq(&self.graph.0.device, &stream.device) {
-            return Err(Error::InvalidOperation(
-                "graph and stream contexts differ".to_owned(),
-            ));
+            return Err(Error::ContextMismatch("graph and stream contexts differ"));
         }
         stream.maintain()?;
         let _context = stream.device.context.try_enter()?;
@@ -67,7 +74,7 @@ impl GraphExec {
     pub fn update(&mut self, graph: &Graph) -> Result<i32> {
         self.try_finish()?;
         if !Rc::ptr_eq(&self.graph.0.device, &graph.0.device) {
-            return Err(Error::InvalidOperation("graph contexts differ".to_owned()));
+            return Err(Error::ContextMismatch("graph contexts differ"));
         }
         let result = self.raw.try_update(&graph.0.raw)?;
         if result == 0 {
@@ -85,9 +92,7 @@ impl GraphExec {
         record: impl FnOnce(&Capture<'_>) -> Result<()>,
     ) -> Result<()> {
         if !Rc::ptr_eq(&self.graph.0.device, &stream.device) {
-            return Err(Error::InvalidOperation(
-                "graph and stream contexts differ".to_owned(),
-            ));
+            return Err(Error::ContextMismatch("graph and stream contexts differ"));
         }
         let operations = self
             .graph
@@ -105,7 +110,7 @@ impl GraphExec {
                     })
                     .nth(index)
             })
-            .ok_or_else(|| Error::InvalidOperation("graph kernel index is invalid".to_owned()))?;
+            .ok_or_else(|| Error::InvalidGraph("graph kernel index is invalid"))?;
         let kernels = RefCell::new(Vec::new());
         record(&Capture {
             stream,
@@ -114,19 +119,17 @@ impl GraphExec {
         })?;
         let mut kernels = kernels.into_inner();
         if kernels.len() != 1 {
-            return Err(Error::InvalidOperation(
-                "graph update requires exactly one kernel".to_owned(),
+            return Err(Error::InvalidGraph(
+                "graph update requires exactly one kernel",
             ));
         }
         let Operation::Kernel(mut kernel) = kernels.pop().expect("one operation was recorded").0
         else {
-            return Err(Error::InvalidOperation(
-                "graph update requires a kernel call".to_owned(),
-            ));
+            return Err(Error::InvalidGraph("graph update requires a kernel call"));
         };
         if kernel.function.as_raw() != original.function.as_raw() {
-            return Err(Error::InvalidOperation(
-                "graph update must preserve the kernel entry point".to_owned(),
+            return Err(Error::InvalidGraph(
+                "graph update must preserve the kernel entry point",
             ));
         }
         let mut parameters = [kernel.arguments.as_mut_ptr().cast()];

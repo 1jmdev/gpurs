@@ -5,13 +5,15 @@ use std::mem::ManuallyDrop;
 use gpurs_macros::primitive;
 
 use super::{instruction, intrinsics};
-use crate::gpu::{
-    self, Block,
-    tensor::{
-        Accumulator, Element, OutputElement, OutputTile, TensorTile,
-        hopper::{Consumer, intrinsics as hopper_intrinsics},
-        sealed::Sealed,
+use crate::{
+    gpu::{
+        self, Block,
+        tensor::{
+            Accumulator, Element, OutputElement, OutputTile, TensorTile,
+            hopper::{Consumer, intrinsics as hopper_intrinsics},
+        },
     },
+    sealed::Sealed,
 };
 
 /// The descriptor version and 128-byte swizzle mode of a `tcgen05` matrix descriptor.

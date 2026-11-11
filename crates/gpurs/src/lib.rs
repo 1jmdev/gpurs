@@ -20,50 +20,32 @@
 #![cfg_attr(gpurs_device, allow(internal_features))]
 #![recursion_limit = "512"]
 
-mod argument;
 mod error;
 #[cfg_attr(gpurs_device, rustc_diagnostic_item = "gpurs_device_module")]
 pub mod gpu;
 mod host;
 pub mod raw;
+mod sealed;
 
-pub use argument::{
-    Argument, ArgumentMut, DeviceAddress, DeviceDescriptor, DeviceIndexed, DeviceScatter,
-    DeviceStrided, DeviceTensorMap, Duplicates,
-};
 pub use error::{Error, Result};
-pub(crate) use gpurs_driver::Ownership;
 pub use gpurs_macros::{BitPattern, gpu, unsafe_primitive};
-pub(crate) use host::memory::buffer;
 pub use host::{
+    argument::{
+        Argument, ArgumentMut, DeviceAddress, DeviceDescriptor, DeviceIndexed, DeviceScatter,
+        DeviceStrided, DeviceTensorMap, Duplicates,
+    },
     context::Gpu,
     graph::{Capture, Graph, GraphExec},
     memory::{
         BitPattern, Buffer, DeviceOutput, DeviceSlice, DeviceSliceMut, DeviceValue, PinnedBuffer,
         Transfer, View, ViewMut,
     },
-    stream::{Launch, LaunchConfig, Stream},
+    stream::{Event, Launch, LaunchConfig, Stream},
 };
-pub use raw::interop::Event;
-pub(crate) use raw::interop::ExternalAccess;
 
 #[doc(hidden)]
 pub mod __private {
     pub use gpurs_macros::{compilation, device};
 
     pub use crate::host::launch::{KernelCache, KernelLaunch, kernel};
-}
-
-pub(crate) mod sealed_launch {
-    use std::cell::RefCell;
-
-    use crate::{LaunchConfig, Stream, host::graph::CapturedOperation};
-
-    pub trait Sealed {
-        fn stream(&self) -> &Stream;
-        fn config(&self) -> Option<LaunchConfig>;
-        fn capture(&self) -> Option<&RefCell<Vec<CapturedOperation>>> {
-            None
-        }
-    }
 }

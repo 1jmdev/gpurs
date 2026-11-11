@@ -3,13 +3,8 @@
 //! host evaluates before submission.
 
 mod bounds;
-mod cache;
 mod context;
-mod numeric;
-mod proof;
 mod solver;
 
 pub use bounds::{Bound, Direction};
-pub use cache::Cache;
-pub use proof::Proof;
-pub use solver::{Engine, Variable, opaque};
+pub use solver::{Cache, Engine, Proof, Variable, opaque};

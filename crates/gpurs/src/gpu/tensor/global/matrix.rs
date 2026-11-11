@@ -1,4 +1,5 @@
-//! Operand matrices in GPU memory.
+//! Operand matrices in GPU memory, and vectors that epilogues broadcast along rows or columns,
+//! such as a bias.
 
 use std::{marker::PhantomData, ops::Range};
 
@@ -6,7 +7,7 @@ use super::{
     GatheredMatrix, TileCursor,
     cursor::{Chunks, Steps},
 };
-use crate::gpu::tensor::{DepthMajor, Element, ExtentMajor, Layout, ThreadGroup};
+use crate::gpu::tensor::{DepthMajor, Element, ExtentMajor, Layout, OutputElement, ThreadGroup};
 
 /// An `extent`x`depth` operand in a slice: `A` is M x K and `B` is N x K. Its lines, the rows
 /// of a [`DepthMajor`] matrix and the depth positions of an [`ExtentMajor`] one, start `stride`
@@ -153,5 +154,30 @@ impl<'a, T, L: Layout> GlobalMatrix<'a, T, L> {
 
     pub(super) fn parts(&self) -> (&'a [T], usize, usize) {
         (self.data, self.stride, self.offset)
+    }
+}
+
+/// A vector of `T` in a slice, indexed by output row or column; positions past the slice read
+/// as zero.
+#[derive(Clone, Copy, Debug)]
+pub struct GlobalVector<'a, T> {
+    data: &'a [T],
+}
+
+impl<'a, T: OutputElement> GlobalVector<'a, T> {
+    pub fn new(data: &'a [T]) -> Self {
+        GlobalVector { data }
+    }
+
+    pub fn len(&self) -> usize {
+        self.data.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+
+    pub(in crate::gpu::tensor) fn data(&self) -> &'a [T] {
+        self.data
     }
 }

@@ -1,8 +1,8 @@
 use std::{rc::Rc, slice};
 
 use crate::{
-    Argument, Buffer, DeviceAddress, DeviceSlice, Error, ExternalAccess, Gpu, Result, Stream,
-    gpu::Indexed, host::tracking::Access,
+    Argument, Buffer, DeviceAddress, DeviceSlice, Error, Result, Stream, gpu::Indexed,
+    host::tracking::Access, raw::ExternalAccess,
 };
 
 pub struct DeviceIndexed<T> {
@@ -20,9 +20,7 @@ impl<T: Copy> DeviceIndexed<T> {
         source: &impl DeviceSlice<T>,
         indices: &impl DeviceSlice<usize>,
     ) -> Result<DeviceIndexed<T>> {
-        let gpu = Gpu {
-            device: stream.device.clone(),
-        };
+        let gpu = stream.gpu();
         let source = source.span();
         let indices = indices.span();
         if source.len == 0
@@ -30,8 +28,8 @@ impl<T: Copy> DeviceIndexed<T> {
             || !Rc::ptr_eq(&stream.device, &source.allocation.device)
             || !Rc::ptr_eq(&stream.device, &indices.allocation.device)
         {
-            return Err(Error::InvalidOperation(
-                "indexed views require nonempty ranges on the same GPU".to_owned(),
+            return Err(Error::InvalidView(
+                "indexed views require nonempty ranges on the same GPU",
             ));
         }
         let descriptor = Indexed {

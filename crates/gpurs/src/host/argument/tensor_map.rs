@@ -3,10 +3,9 @@ use std::{marker::PhantomData, ops::Range, rc::Rc, slice};
 use gpurs_driver as driver;
 
 use crate::{
-    DeviceSlice, Error, Gpu, PinnedBuffer, Result, Stream, Transfer,
-    buffer::Buffer,
+    DeviceSlice, Error, PinnedBuffer, Result, Stream, Transfer,
     gpu::tensor::{Element, hopper::TensorMap},
-    host::tracking::Allocation,
+    host::{memory::buffer::Buffer, tracking::Allocation},
 };
 
 /// A reusable device descriptor retaining its source range until queued reads finish.
@@ -28,9 +27,7 @@ impl<T: Element, const ROWS: usize, const COLUMNS: usize> DeviceTensorMap<T, ROW
         rows: usize,
         columns: usize,
     ) -> Result<DeviceTensorMap<T, ROWS, COLUMNS>> {
-        let gpu = Gpu {
-            device: stream.device.clone(),
-        };
+        let gpu = stream.gpu();
         let _context = stream.device.context.try_enter()?;
         const { TensorMap::<T, ROWS, COLUMNS>::validate() };
         let span = source.span();
@@ -39,8 +36,8 @@ impl<T: Element, const ROWS: usize, const COLUMNS: usize> DeviceTensorMap<T, ROW
                 .checked_mul(columns)
                 .is_none_or(|elements| elements > span.len)
         {
-            return Err(Error::InvalidOperation(
-                "tensor map dimensions exceed the source range or belong to another GPU".to_owned(),
+            return Err(Error::InvalidView(
+                "tensor map dimensions exceed the source range or belong to another GPU",
             ));
         }
         let address = span.allocation.pointer + span.start as u64;
@@ -80,8 +77,8 @@ impl<T: Element, const ROWS: usize, const COLUMNS: usize> DeviceTensorMap<T, ROW
             .and_then(|elements| elements.checked_mul(size_of::<T>()))
             .is_none_or(|bytes| bytes > self.range.len())
         {
-            return Err(Error::InvalidOperation(
-                "tensor map dimensions exceed the retained source range".to_owned(),
+            return Err(Error::InvalidView(
+                "tensor map dimensions exceed the retained source range",
             ));
         }
         let map = TensorMap::<T, ROWS, COLUMNS> {

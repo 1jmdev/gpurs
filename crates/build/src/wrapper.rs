@@ -32,7 +32,10 @@ pub(crate) fn rustc(arguments: &[OsString]) -> i32 {
 }
 
 pub(crate) fn device(mut arguments: Vec<OsString>) -> i32 {
-    let libraries = &CONFIGURATION.as_ref().unwrap().libraries;
+    let libraries = &CONFIGURATION
+        .as_ref()
+        .expect("the device stage has a configuration")
+        .libraries;
     for index in 1..arguments.len() {
         let replacement = arguments[index].to_str().and_then(|value| {
             let (name, _) = value.split_once('=')?;

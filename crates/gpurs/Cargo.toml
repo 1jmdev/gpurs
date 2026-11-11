@@ -10,6 +10,7 @@ repository.workspace = true
 gpurs-artifact.workspace = true
 gpurs-driver.workspace = true
 gpurs-macros.workspace = true
+thiserror.workspace = true
 
 [lints]
 workspace = true

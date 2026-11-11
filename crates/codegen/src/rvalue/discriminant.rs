@@ -1,9 +1,9 @@
 use gpurs_ir::{Binary, Conversion, Flags, Predicate, Type, Value as IRValue};
-use gpurs_rustc::{RigidTy, TagEncoding, VariantIdx, VariantsShape, session};
+use gpurs_rustc::{Shape, TagEncoding, VariantIdx, VariantsShape};
 
 use crate::{
     function::FunctionBuilder,
-    layout::{self, Shape},
+    layout,
     place::{Operand, Place},
 };
 
@@ -20,8 +20,8 @@ impl FunctionBuilder<'_, '_> {
             return;
         };
         let value = match tag_encoding {
-            TagEncoding::Direct => discriminant_value(shape, variant)
-                .unwrap_or_else(|| variant_position(shape, variant).unwrap_or(0) as u128),
+            TagEncoding::Direct => gpurs_rustc::discriminant(shape.ty, variant)
+                .unwrap_or_else(|| shape.variant_position(variant).unwrap_or(0) as u128),
             TagEncoding::Niche {
                 untagged_variant,
                 niche_variants,
@@ -30,8 +30,8 @@ impl FunctionBuilder<'_, '_> {
                 if variant == *untagged_variant {
                     return;
                 }
-                let start = variant_position(shape, *niche_variants.start()).unwrap_or(0);
-                let index = variant_position(shape, variant).unwrap_or(start);
+                let start = shape.variant_position(*niche_variants.start()).unwrap_or(0);
+                let index = shape.variant_position(variant).unwrap_or(start);
                 (index.saturating_sub(start) as u128).wrapping_add(*niche_start)
             }
         };
@@ -53,8 +53,8 @@ impl FunctionBuilder<'_, '_> {
                 return Operand::immediate(IRValue::undef(target_type), result);
             }
             VariantsShape::Single { index } => {
-                let value = discriminant_value(shape, *index)
-                    .unwrap_or_else(|| variant_position(shape, *index).unwrap_or(0) as u128);
+                let value = gpurs_rustc::discriminant(shape.ty, *index)
+                    .unwrap_or_else(|| shape.variant_position(*index).unwrap_or(0) as u128);
                 return Operand::immediate(constant(value), result);
             }
             VariantsShape::Multiple {
@@ -79,8 +79,8 @@ impl FunctionBuilder<'_, '_> {
                 niche_variants,
                 niche_start,
             } => {
-                let start_index = variant_position(shape, *niche_variants.start()).unwrap_or(0);
-                let last_index = variant_position(shape, *niche_variants.end()).unwrap_or(0);
+                let start_index = shape.variant_position(*niche_variants.start()).unwrap_or(0);
+                let last_index = shape.variant_position(*niche_variants.end()).unwrap_or(0);
                 let tag_type = tag.ty.clone();
                 let start = IRValue::int(tag_type.clone(), niche_start);
                 let relative = self.ir.binary(Binary::Sub, Flags::empty(), tag, start);
@@ -90,25 +90,10 @@ impl FunctionBuilder<'_, '_> {
                 let first = constant(start_index as u128);
                 let tagged = self.ir.binary(Binary::Add, Flags::empty(), relative, first);
                 let untagged =
-                    constant(variant_position(shape, untagged_variant).unwrap_or(0) as u128);
+                    constant(shape.variant_position(untagged_variant).unwrap_or(0) as u128);
                 self.ir.select(is_niche, tagged, untagged)
             }
         };
         Operand::immediate(value, result)
     }
-}
-
-/// The discriminant value rustc assigns to `variant`, if the `Adt` encoding says otherwise.
-pub fn discriminant_value(shape: &Shape, variant: VariantIdx) -> Option<u128> {
-    let RigidTy::Adt(definition, _) = session::rigid(shape.ty) else {
-        return None;
-    };
-    Some(definition.discriminant_for_variant(variant).val)
-}
-
-pub fn variant_position(shape: &Shape, variant: VariantIdx) -> Option<usize> {
-    shape
-        .variants
-        .iter()
-        .position(|candidate| *candidate == variant)
 }

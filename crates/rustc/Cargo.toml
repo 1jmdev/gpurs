@@ -11,6 +11,7 @@ links = "gpurs_rustc"
 rustc_private = true
 
 [dependencies]
+fixedbitset.workspace = true
 gpurs-artifact.workspace = true
 syn.workspace = true
 

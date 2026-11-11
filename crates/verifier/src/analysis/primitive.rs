@@ -28,11 +28,15 @@ impl Analysis<'_, '_> {
                         Some(Pointer::Slot(..))
                     )
                 {
-                    self.sess.error_help(
-                        self.span,
-                        "native GPU atomics require global or block-shared storage",
-                        "use a device buffer or shared_array instead of thread-local storage",
-                    );
+                    self.sess
+                        .error(
+                            self.span,
+                            "native GPU atomics require global or block-shared storage",
+                        )
+                        .with_help(
+                            "use a device buffer or shared_array instead of thread-local storage",
+                        )
+                        .emit();
                 }
                 if let Some(Pointer::Memory(origin)) = arguments
                     .first()

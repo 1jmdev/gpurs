@@ -13,10 +13,10 @@ use gpurs_driver as driver;
 
 use crate::{
     Error, Result,
-    buffer::Buffer,
     host::{
         context::{Device, KernelKey, LoadedKernel},
         graph::{CapturedKernel, CapturedOperation},
+        memory::buffer::Buffer,
         stream::{Launch, LaunchConfig},
         tracking::{self, Access, Allocation},
     },
@@ -128,10 +128,9 @@ impl<S: Launch> KernelLaunch<'_, S> {
                     )
                 }
                 Extent::Explicit => {
-                    return Err(Error::InvalidOperation(format!(
-                        "kernel `{}` needs explicit geometry",
-                        metadata.name
-                    )));
+                    return Err(Error::MissingGeometry {
+                        kernel: metadata.name.clone(),
+                    });
                 }
             }
         };
@@ -169,12 +168,9 @@ impl<S: Launch> KernelLaunch<'_, S> {
                     u32::try_from(*value).ok()?;
                     count.checked_mul(*value)
                 })
-                .ok_or_else(|| {
-                    Error::InvalidOperation("GPU launch dimensions exceed CUDA range".to_owned())
-                })?;
-            let shared_bytes = u32::try_from(config.shared_bytes).map_err(|_| {
-                Error::InvalidOperation("launch shared memory exceeds CUDA range".to_owned())
-            })?;
+                .ok_or_else(|| Error::SizeOverflow("GPU launch dimensions exceed CUDA range"))?;
+            let shared_bytes = u32::try_from(config.shared_bytes)
+                .map_err(|_| Error::SizeOverflow("launch shared memory exceeds CUDA range"))?;
             if config.shared_bytes > metadata.shared.dynamic_bytes as usize {
                 for function in [Some(entry.general), entry.linear]
                     .into_iter()
@@ -207,11 +203,8 @@ impl<S: Launch> KernelLaunch<'_, S> {
                 .initializes
                 .iter()
                 .find(|(output, _)| output == parameter)
-                .ok_or_else(|| {
-                    Error::InvalidOperation(format!(
-                        "`{}` does not provably write every element of its uninitialized output",
-                        metadata.name
-                    ))
+                .ok_or_else(|| Error::UnwrittenOutput {
+                    kernel: metadata.name.clone(),
                 })?;
             if let Some(clause) = clauses.1.iter().find(|clause| !clause.holds(&leaf)) {
                 return Err(self.violated(clause, &leaf));
@@ -219,13 +212,13 @@ impl<S: Launch> KernelLaunch<'_, S> {
         }
         let capture = self.stream.capture();
         if capture.is_some() && !self.outputs.is_empty() {
-            return Err(Error::InvalidOperation(
-                "graph kernels must write initialized storage".to_owned(),
+            return Err(Error::Uninitialized(
+                "graph kernels must write initialized storage",
             ));
         }
         if capture.is_some() && metadata.result.is_some() {
-            return Err(Error::InvalidOperation(
-                "graph kernels must write existing storage".to_owned(),
+            return Err(Error::InvalidGraph(
+                "graph kernels must write existing storage",
             ));
         }
         let result = metadata
@@ -239,14 +232,12 @@ impl<S: Launch> KernelLaunch<'_, S> {
                 );
                 let count = if explicit.is_some() { threads } else { 1 };
                 let bytes = count.checked_mul(size_of::<R>()).ok_or_else(|| {
-                    Error::InvalidOperation(
-                        "GPU result size exceeds the addressable byte count".to_owned(),
-                    )
+                    Error::SizeOverflow("GPU result size exceeds the addressable byte count")
                 })?;
                 let pointer = driver::try_allocate_async(bytes, &stream.raw)?;
                 let allocation = Rc::new(Allocation::new(device.clone(), pointer, bytes));
                 tracking::complete(&stream.raw, &[Access::write(&allocation, 0..bytes)]);
-                Ok::<_, Error>(Buffer::new(allocation, count))
+                Ok::<_, Error>(Buffer::new(allocation, 0, count))
             })
             .transpose()?;
         let mut accesses = mem::take(&mut self.accesses);
@@ -261,7 +252,9 @@ impl<S: Launch> KernelLaunch<'_, S> {
             tracking::try_order(&stream.raw, &accesses)?;
         }
         if threads == 0 {
-            self.outputs.iter().for_each(|(_, written)| written.set(true));
+            self.outputs
+                .iter()
+                .for_each(|(_, written)| written.set(true));
             return Ok(result);
         }
         let linear = config.grid[1] == 1
@@ -307,7 +300,9 @@ impl<S: Launch> KernelLaunch<'_, S> {
                 })?;
         }
         tracking::complete(&stream.raw, &accesses);
-        self.outputs.iter().for_each(|(_, written)| written.set(true));
+        self.outputs
+            .iter()
+            .for_each(|(_, written)| written.set(true));
         accesses.clear();
         *stream.accesses.borrow_mut() = accesses;
         *stream.arguments.borrow_mut() = self.arguments;
@@ -334,21 +329,25 @@ impl<S: Launch> KernelLaunch<'_, S> {
         for (index, access) in accesses.iter().enumerate() {
             for (other_index, other) in accesses.iter().enumerate().skip(index + 1) {
                 let in_place = access.range == other.range
-                    && parameter(index).zip(parameter(other_index)).is_some_and(|(a, b)| {
-                        self.lengths[a] == self.lengths[b]
-                            && self.kernel.metadata.in_place.iter().any(|pair| {
-                                *pair == [a, b] || *pair == [b, a]
-                            })
-                    });
+                    && parameter(index)
+                        .zip(parameter(other_index))
+                        .is_some_and(|(a, b)| {
+                            self.lengths[a] == self.lengths[b]
+                                && self
+                                    .kernel
+                                    .metadata
+                                    .in_place
+                                    .iter()
+                                    .any(|pair| *pair == [a, b] || *pair == [b, a])
+                        });
                 if Rc::ptr_eq(&access.allocation, &other.allocation)
                     && (access.write || other.write)
                     && tracking::overlaps(&access.range, &other.range)
                     && !in_place
                 {
-                    return Err(Error::InvalidOperation(format!(
-                        "arguments of `{}` overlap while at least one of them is written",
-                        self.kernel.metadata.name
-                    )));
+                    return Err(Error::Aliasing {
+                        kernel: self.kernel.metadata.name.clone(),
+                    });
                 }
             }
         }
@@ -366,13 +365,14 @@ impl<S: Launch> KernelLaunch<'_, S> {
             })
             .collect::<Vec<_>>()
             .join(", ");
-        Error::InvalidOperation(format!(
-            "launch of `{}` violates the precondition `{}`: {} (evaluated difference: {values})",
-            self.kernel.metadata.name, clause.rendering, clause.reason
-        ))
+        Error::Precondition {
+            kernel: self.kernel.metadata.name.clone(),
+            precondition: clause.rendering.clone(),
+            reason: clause.reason.clone(),
+            values,
+        }
     }
 }
-
 
 #[inline(never)]
 #[track_caller]
@@ -387,9 +387,7 @@ pub(crate) fn try_verified<T>(device: &Device) -> Result<&TransferType> {
         .filter(|descriptor| {
             descriptor.size == size_of::<T>() as u64 && descriptor.align == align_of::<T>() as u64
         })
-        .ok_or_else(|| {
-            Error::InvalidOperation(format!(
-                "`{name}` has no verified GPU transfer descriptor in this executable\'s artifact"
-            ))
+        .ok_or_else(|| Error::UnverifiedType {
+            ty: name.to_owned(),
         })
 }

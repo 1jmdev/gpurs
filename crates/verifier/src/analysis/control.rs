@@ -1,7 +1,7 @@
 use fixedbitset::FixedBitSet;
-use gpurs_rustc::{AssertMessage, FxHashSet, TerminatorKind, session};
+use gpurs_rustc::{AssertMessage, FxHashSet, TerminatorKind, graph};
 
-use super::{Analysis, Check, Obligation, Region, State, Value, arithmetic, program};
+use super::{Analysis, Check, Obligation, Region, State, Value, arithmetic};
 use crate::symbolic::{Atom, Fact, Polynomial, Predicate, Relation, Requirement};
 
 impl Analysis<'_, '_> {
@@ -88,7 +88,7 @@ impl Analysis<'_, '_> {
                 target,
                 ..
             } => {
-                if session::wrapping(msg) {
+                if gpurs_rustc::wrapping(msg) {
                     return vec![(*target, Vec::new())];
                 }
                 let condition = self.operand(cond, state);
@@ -235,7 +235,7 @@ impl Analysis<'_, '_> {
             return;
         }
         let count = self.program.successors.len();
-        let postdominators = program::postdominators(&self.program.successors);
+        let postdominators = graph::postdominators(&self.program.successors);
         let postdominates = |first: usize, second: usize| {
             postdominators.is_reachable(second) && postdominators.dominates(first, second)
         };
@@ -250,7 +250,7 @@ impl Analysis<'_, '_> {
             let mut controlled = FixedBitSet::with_capacity(count);
             for &successor in &self.program.successors[block] {
                 let reachable =
-                    program::reachable_set(&self.program.successors, successor, &reconvergence);
+                    graph::reachable_from(&self.program.successors, successor, &reconvergence);
                 for target in reachable.ones() {
                     self.program.controls[target].push((block, successor));
                 }
@@ -269,14 +269,16 @@ impl Analysis<'_, '_> {
                         .iter()
                         .rfind(|context| context.offset <= block)
                         .unwrap();
-                    self.sess.error_notes(
-                        span,
-                        format!(
-                            "threads may reach this GPU collective on different control-flow \
-                             paths in `{}`",
-                            self.kernel.name()
-                        ),
-                        &[format!(
+                    self.sess
+                        .error(
+                            span,
+                            format!(
+                                "threads may reach this GPU collective on different control-flow \
+                                 paths in `{}`",
+                                self.kernel.name()
+                            ),
+                        )
+                        .with_note(format!(
                             "controlling branch bb{} in `{}` is {}; this collective requires {} \
                              control flow",
                             block - context.offset,
@@ -291,8 +293,8 @@ impl Analysis<'_, '_> {
                             } else {
                                 "warp-uniform"
                             },
-                        )],
-                    );
+                        ))
+                        .emit();
                 }
             }
         }

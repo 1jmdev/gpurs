@@ -1,5 +1,5 @@
 use gpurs_artifact::{Access, Parameter};
-use gpurs_rustc::{Operand, Place, ProjectionElem, RigidTy, Ty, session};
+use gpurs_rustc::{Operand, Place, ProjectionElem, RigidTy, Ty};
 
 use super::{Analysis, Origin, Pointer, Region, State, Value, ValueData, state};
 use crate::symbolic::Polynomial;
@@ -171,7 +171,7 @@ impl Analysis<'_, '_> {
                     _ => 2,
                 });
                 if matches!(
-                    session::rigid(self.place_type(place)),
+                    gpurs_rustc::rigid(self.place_type(place)),
                     RigidTy::Ref(..) | RigidTy::RawPtr(..)
                 ) {
                     value.pointer = Some(Pointer::Unknown);
